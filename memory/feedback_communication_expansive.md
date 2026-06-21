@@ -16,3 +16,5 @@ The user wants writing — both chat answers and stored documents — done **for
 **Why:** he reads the documents as a person and hands them to others; compression and bare codes cost comprehension.
 
 **How to apply:** full sentences everywhere, named-audience framing, no slogans, IDs in a separate AI section. Pairs with [[feedback_directness]] (no praise, disagree directly).
+
+**Paradigm connection:** KB entries and decisions logs are durable artifacts written for a human reader — Alex or a future self returning to the subject. They must be prose a person can read, not compressed chat fragments. The loop produces understanding; this rule ensures that understanding actually lands in the document in a form that survives beyond the session.

@@ -15,3 +15,5 @@ For build/implementation work (slides, HTML/CSS, code, mechanical edits), the wo
 - Delegate the build to a Sonnet subagent with a precise spec, hard scope rails, and acceptance checks; don't implement inline.
 - After Sonnet finishes, review the result with the user, then iterate.
 - Memory-store curation and lightweight planning/analysis are Opus's own work, not "implementation" — this rule targets build work. Relates to [[feedback_decide_before_building]] and [[feedback_reusable_tooling]].
+
+**Paradigm connection:** the plan written and reviewed together IS the delivered unit of the LOOP phase. Handing off to a Sonnet subagent is the clean boundary between "loop" (Opus gathers knowledge and produces the plan) and "execution" (gated by "Execute the plan"). Opus writing implementation directly collapses that boundary and bypasses the gate.

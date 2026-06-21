@@ -19,3 +19,5 @@ Strategic output must be stress-tested by a **real critic sub-agent** (an Agent 
 **Research decomposition & cost control:**
 - When a research question covers 2+ independent topics, decompose into parallel sub-agents automatically — don't wait to be asked. Launch them in one message (parallel); collect all results before synthesizing.
 - Use purposeful queries only; prefer fetching specific known URLs over broad searches. Many queries (~10) is a sign the scope is too broad — narrow first. Never show intermediate draft output to the user before the critic runs.
+
+**Paradigm connection:** the critic sub-agent is an independent check on understanding and the plan — exactly the kind of validation that self-review (same model, same biases) cannot provide. Running the critic is the KB-loop's quality gate on the plan before "Execute the plan" is invoked: it ensures the plan reflects reality, not a plausible-sounding but unchallenged draft. The research decomposition rule is the same discipline applied to the gather phase: parallel, purposeful, bounded — not open-ended accumulation.
