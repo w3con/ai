@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+# Layer 2 KB freshness: run bin/relation-build on staged kb/ docs, then
+# re-stage the processed files plus kb/_index.md.
+#
+# Non-blocking by design: if relation-build or the claude CLI fails for any
+# reason (network, missing key, timeout), the hook prints a warning and still
+# exits 0 so the commit is never blocked.  Use git commit --no-verify only as
+# a manual emergency bypass.
+
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+
+# ── Collect staged kb/ markdown (Added, Copied, Modified — not Deleted) ──────
+STAGED_KB=$(git diff --cached --name-only --diff-filter=ACM -- 'kb/**/*.md' 'kb/*.md')
+
+if [ -z "$STAGED_KB" ]; then
+    # Fast path: no kb/ docs staged — nothing to do.
+    exit 0
+fi
+
+# ── Filter: exclude kb/_index.md (generated — relation-build rebuilds it itself)
+CONTENT_KB=""
+while IFS= read -r rel; do
+    if [ "$rel" != "kb/_index.md" ]; then
+        CONTENT_KB="${CONTENT_KB}${rel}"$'\n'
+    fi
+done <<< "$STAGED_KB"
+
+CONTENT_KB="${CONTENT_KB%$'\n'}"  # trim trailing newline
+
+if [ -z "$CONTENT_KB" ]; then
+    # Only the generated index was staged — nothing for relation-build to do.
+    exit 0
+fi
+
+echo "[pre-commit] kb/ docs staged — running relation-build..." >&2
+
+# ── Run relation-build on exactly those paths ─────────────────────────────────
+# Pass absolute paths so the script works regardless of cwd.
+ABS_PATHS=()
+while IFS= read -r rel; do
+    ABS_PATHS+=("$PROJECT_ROOT/$rel")
+done <<< "$CONTENT_KB"
+
+"$PROJECT_ROOT/bin/relation-build" --ids "${ABS_PATHS[@]}"
+RB_EXIT=$?
+
+if [ $RB_EXIT -ne 0 ]; then
+    echo "[pre-commit] WARNING: relation-build exited $RB_EXIT — ai: blocks may be stale." >&2
+    echo "[pre-commit] Commit will proceed. Re-run 'bin/relation-build --ids <paths>' manually if needed." >&2
+    # Do NOT exit non-zero — never block the commit on a model/network failure.
+fi
+
+# ── Re-stage processed docs and kb/_index.md ─────────────────────────────────
+# relation-build may have updated frontmatter and the Related footer in those
+# files, and it always calls bin/kb-index at the end, so _index.md is fresh.
+# Use paths relative to PROJECT_ROOT with "git -C" — git rejects absolute paths
+# on some systems (macOS with non-standard volume mount points).
+
+REL_PATHS=()
+while IFS= read -r rel; do
+    REL_PATHS+=("$rel")
+done <<< "$CONTENT_KB"
+
+git -C "$PROJECT_ROOT" add -- "${REL_PATHS[@]}"
+
+INDEX_REL="kb/_index.md"
+if [ -f "$PROJECT_ROOT/$INDEX_REL" ]; then
+    git -C "$PROJECT_ROOT" add -- "$INDEX_REL"
+fi
+
+exit 0

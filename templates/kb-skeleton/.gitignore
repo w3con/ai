@@ -1,0 +1,17 @@
+# Secrets — never commit
+.env
+
+# macOS metadata
+.DS_Store
+
+# Python build artifacts
+bin/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Obsidian vault internals (not KB content)
+.obsidian/
+
+# Local AI cache (generated, not source)
+.ai/docs/
+.ai/logs/

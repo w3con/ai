@@ -1,0 +1,63 @@
+# {{PROJECT_NAME}} Knowledge Base
+
+{{PROJECT_DESCRIPTION}}
+
+**Path rule:** resolve `PROJECT_ROOT="$(git rev-parse --show-toplevel)"` — never hardcode absolute paths.
+
+## Knowledge Base
+
+The KB is **local-first markdown** under `kb/` — this is the single source of truth, edited in Obsidian (the `kb/` folder is the vault). Read it with Read / Grep / Glob.
+
+- **Navigation:** `kb/_index.md` is the generated map — one line per document, grouped by collection, plus a domain cross-reference. Start there to locate a doc, then Read it.
+- **Per-doc metadata** lives in YAML frontmatter; the contract is in `KB-CONVENTIONS.md` — human-owned fields plus a builder-owned `ai:` block (domains / topics / entities / summary) that you never hand-edit. Blocks folded from an old relation index carry `via: folded-from-legacy-relations` and are provisional until the builder is rerun.
+- **Regenerate the index** after adding or moving docs: `bin/kb-index` (idempotent; `--check` for a staleness gate).
+- **Pre-commit hook** at `.githooks/pre-commit` auto-refreshes the `ai:` block of every staged `kb/` document via `bin/relation-build`, then re-stages the updated files and the regenerated index. The hook covers both manual Obsidian edits and agent edits committed through the CLI. It is non-blocking by design — if `relation-build` or the Claude CLI fails for any reason, the commit still proceeds and a warning is printed; `git commit --no-verify` bypasses the hook entirely as an emergency escape. Because `core.hooksPath` is local git config (not version-controlled), activate it once per clone with `git config core.hooksPath .githooks`.
+- **PostToolUse hook** (`bin/kb-index-hook`, registered in `.claude/settings.json`) fires after every Write/Edit tool call that touches a `kb/` file. It runs `bin/kb-index --check` and regenerates the index if stale — zero tokens, non-blocking. This keeps `_index.md` in sync during agent sessions without waiting for a commit. Files without `ai:` blocks are left for the pre-commit hook (which calls `bin/relation-build`).
+- `kb/Unknown/` holds docs from deleted or unclassified collections — treat as archive, not live KB.
+
+## Other local files
+
+Add a table here for any non-KB assets (PDFs, spreadsheets, images) that live at the repo root.
+
+## Slash commands
+
+| Command | Use for |
+|---------|---------|
+| `/web-search` | Enforced web search — competitors, regulations, market data |
+| `/review <doc>` | Quality-gate review (local path or inline text) |
+| `/verify <claims>` | Fact-check specific claims via web |
+| `/deep <query>` | Cross-domain retrieval brief — spawns kb-retriever agent |
+
+For narrow questions, read `kb/` directly — find the doc via `kb/_index.md`, then Read/Grep it. For external facts, `/web-search`.
+
+## Data sourcing rules
+
+- **Cited source** (URL, report name, date) → use it, name the source
+- **No source cited** → flag ⚠️ *no source — treat as estimate*. Never present as fact.
+- **Strategy / brainstorm** → unsourced hypotheses OK as working assumptions — label them
+- Same applies to training data: no specific source → flag as estimate
+
+## Output quality
+
+**Action items:** named owner (not "we"/"the team") + specific date (YYYY-MM-DD).
+**Decisions:** what was decided + why + alternatives considered. "We discussed X" ≠ decision.
+**Summaries:** reflect actual content; preserve disagreements. No invented details.
+**Recommendations:** before drafting, verify each claim — sourced, assumption, or inference? Unresolved flags go in `## Reviewer Notes`.
+
+## Writing for the reader
+
+KB documents are written for a person, not just for retrieval. Before drafting, name the reader and write the way they speak:
+- **Audience vocabulary.** Know your reader's domain — use the terms they already know; explain the terms they don't.
+- **No empty slogans.** Cut clever lines that don't explain anything. Every sentence must carry concrete, actionable meaning.
+- **Human prose, not a telegram.** Full sentences in the documents themselves, not fragment-bullets.
+- **Keep machine-navigation out of human content.** Internal doc-IDs and decision codes mean nothing to a reader and break the flow. Human sections must be self-contained; collect IDs, decision codes and source links in a clearly-labelled "For AI / source map" section at the end. Anything a human might follow must be a real clickable link, not a bare code.
+
+## Communication style
+
+Disagree directly — before implementing, not after. No performative praise ("great question", "excellent"). Criticism that improves decisions is useful; validation is not.
+
+No telegraphic style in replies to the user. Write in full, connected sentences, the same as you would in a KB document — this applies to chat answers, not only stored content. Develop each thought far enough that it is clear on its own: state the point, then the reason or consequence, so the reader never has to reconstruct the logic from fragments. Brevity is fine and clutter is not, but never buy brevity at the cost of clarity — cut filler words, not the connective tissue that makes an argument readable. Avoid clipped fragment-bullets, dropped subjects, and headline-style shorthand where a real sentence carries the meaning better.
+
+## Working language
+
+English for all responses, documents, and stored content. User may write in other languages — respond in kind, store in English.

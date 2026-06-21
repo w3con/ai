@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""
+bin/relation-build — Builder v3: write ai: frontmatter + Related footer into kb/**/*.md
+
+Usage:
+  bin/relation-build                    process all kb/ docs (skip-list applied)
+  bin/relation-build --ids <path>...    process specific file paths only
+  bin/relation-build --force            ignore checksums, reprocess everything
+  bin/relation-build --no-skip-list     override the default folder skip-list
+
+Default skip-list folders (skipped unless --no-skip-list):
+  CustDev, Operations, Finances, Incubators
+
+Docs under ~30 words get a deterministic minimal ai: block with no model call.
+Docs whose body hash matches the stored ai.checksum are skipped (idempotent).
+Docs with via: folded-from-legacy-relations are processed first (known-stale).
+At the end, bin/kb-index is called to refresh kb/_index.md.
+"""
+
+import sys
+import os
+import re
+import json
+import hashlib
+import subprocess
+import logging
+import logging.handlers
+import datetime
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("PyYAML required: pip install pyyaml")
+
+PROJECT_ROOT = Path(
+    subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+)
+
+KB_DIR = PROJECT_ROOT / "kb"
+LOGS_DIR = PROJECT_ROOT / ".ai" / "logs"
+ENV_FILE = PROJECT_ROOT / ".env"
+
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+log = logging.getLogger("relation-build")
+log.setLevel(logging.DEBUG)
+_handler = logging.handlers.RotatingFileHandler(
+    LOGS_DIR / "relation.log", maxBytes=10 * 1024 * 1024, backupCount=3
+)
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+log.addHandler(_handler)
+_console = logging.StreamHandler()
+_console.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+log.addHandler(_console)
+
+# ── Default folder skip-list ────────────────────────────────────────────────
+DEFAULT_SKIP_FOLDERS = {"CustDev", "Operations", "Finances", "Incubators"}
+
+# ── Trivial-doc word threshold ──────────────────────────────────────────────
+TRIVIAL_WORD_THRESHOLD = 30
+
+# ── Related footer delimiters ───────────────────────────────────────────────
+RELATED_START = "<!-- relation-build:related-start -->"
+RELATED_END   = "<!-- relation-build:related-end -->"
+
+# ── EXTRACTION_PROMPT (reused from v2, adapted for local-first schema) ──────
+EXTRACTION_PROMPT = """You are a semantic indexer for a knowledge base about Validité — an EU regulatory compliance SaaS (Digital Product Passports, ESPR, EmpCo).
+
+Analyze this document and return a JSON object ONLY (no markdown, no explanation) matching this exact schema:
+
+{{
+  "domains": ["<list of 1-4 domain tags from: strategy, product, custdev, gtm, pricing, regulatory, competitive, technical, operations, finance, ux>"],
+  "topics": ["<list of 2-8 specific topic keywords: e.g. espr, dpp, mass-balance, retailer, supplier, manufacturer, blockchain, onboarding, pilot, fundraising, co-founder>"],
+  "entities": {{
+    "people": ["<named people mentioned>"],
+    "orgs": ["<named organisations, companies, associations — extract ALL named entities from tables, lists, and comparison sections>"],
+    "regulations": ["<named regulations or directives: ESPR, EmpCo, CSRD, AGEC, etc.>"]
+  }},
+  "related_slugs": ["<slugs of related documents — ONLY slugs that appear as [[wikilinks]] or are explicitly referenced in the document text; never infer>"],
+  "summary": "<2-3 sentence SYNTHESIZED summary — do NOT copy document text verbatim; write what the document is about in your own words>"
+}}
+
+Rules:
+- Return ONLY valid JSON, no prose
+- related_slugs: only include slugs you see literally referenced (as [[wikilink]] or explicit file mentions) — do NOT invent
+- summary: must be synthesized prose starting with a capital letter — never start with "#" or a markdown heading
+- entities.orgs: extract every named company, association, and organisation — including those in tables and non-English sections
+- If the document is short or a stub, still return the schema with what you can determine
+- The document may contain French or Russian content — analyse it regardless of language
+
+Document text:
+---
+{content}
+---"""
+
+
+# ── Frontmatter parsing / serialisation ─────────────────────────────────────
+
+def split_frontmatter(text: str) -> tuple[dict, str, str]:
+    """Return (fm_dict, raw_fm_str, body).
+
+    raw_fm_str is the original YAML string between the --- delimiters (used for
+    preserving human-authored fields).  body is everything after the closing ---.
+    If no frontmatter found, fm_dict={}, raw_fm_str='', body=text.
+    """
+    m = re.match(r"^---\n(.*?)\n---\n?(.*)", text, re.S)
+    if not m:
+        return {}, "", text
+    raw_fm = m.group(1)
+    body = m.group(2)
+    try:
+        fm = yaml.safe_load(raw_fm) or {}
+    except yaml.YAMLError:
+        fm = {}
+    return fm, raw_fm, body
+
+
+def strip_related_footer(body: str) -> str:
+    """Remove the generated ## Related footer (between delimiters) from body."""
+    pattern = re.compile(
+        r"\n?" + re.escape(RELATED_START) + r".*?" + re.escape(RELATED_END) + r"\n?",
+        re.S,
+    )
+    return pattern.sub("", body)
+
+
+def body_checksum(body_without_footer: str) -> str:
+    """SHA-256 of body text stripped of the Related footer (and leading/trailing whitespace)."""
+    normalised = body_without_footer.strip()
+    return "sha256:" + hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+
+
+def rebuild_frontmatter(raw_fm: str, ai_block: dict) -> str:
+    """Replace (or append) the ai: block in raw_fm, return new YAML string.
+
+    Human-authored fields (everything except ai:) are preserved verbatim.
+    The ai: block is serialised as YAML and inserted/replaced at the end of the
+    frontmatter, so human fields always come first.
+    """
+    # Strip existing ai: block (multi-line) from raw_fm
+    # Matches "ai:\n  ...\n" up to the next top-level key or end of string
+    cleaned = re.sub(
+        r"\n?^ai:.*?(?=\n^[a-zA-Z_]|\Z)",
+        "",
+        raw_fm,
+        flags=re.M | re.S,
+    ).rstrip()
+
+    # Serialise the ai block with consistent indentation
+    ai_yaml = _serialise_ai_block(ai_block)
+    return cleaned + "\n" + ai_yaml
+
+
+def _serialise_ai_block(ai: dict) -> str:
+    """Hand-roll the ai: YAML block to match the style used in KB-CONVENTIONS.md."""
+    lines = ["ai:"]
+
+    def _list_val(v):
+        if not v:
+            return "[]"
+        items = ", ".join(json.dumps(x, ensure_ascii=False) for x in v)
+        return "[" + items + "]"
+
+    for key in ("domains", "topics"):
+        lines.append(f"  {key}: {_list_val(ai.get(key, []))}")
+
+    ent = ai.get("entities", {})
+    people_str = _list_val(ent.get("people", []))
+    orgs_str = _list_val(ent.get("orgs", []))
+    regs_str = _list_val(ent.get("regulations", []))
+    lines.append(f"  entities: {{ people: {people_str}, orgs: {orgs_str}, regulations: {regs_str} }}")
+
+    summary = ai.get("summary", "")
+    # Quote summary if it contains special chars
+    safe_summary = summary.replace('"', '\\"')
+    lines.append(f'  summary: "{safe_summary}"')
+    lines.append(f'  generated: {ai.get("generated", datetime.date.today().isoformat())}')
+
+    if "source" in ai:
+        lines.append(f'  source: {ai["source"]}')
+    if "checksum" in ai:
+        lines.append(f'  checksum: "{ai["checksum"]}"')
+    # NOTE: 'via' is intentionally NOT written back — dropping it signals rebuild done
+
+    return "\n".join(lines)
+
+
+def build_related_footer(related_slugs: list[str]) -> str:
+    """Build the ## Related footer block (delimited so it is idempotently replaceable)."""
+    if not related_slugs:
+        links = "_No related documents found._"
+    else:
+        links = "  ".join(f"[[{slug}]]" for slug in related_slugs)
+    return (
+        "\n\n" + RELATED_START + "\n"
+        "## Related\n\n"
+        + links + "\n"
+        + RELATED_END
+    )
+
+
+# ── Model call ───────────────────────────────────────────────────────────────
+
+def load_env() -> dict:
+    if not ENV_FILE.exists():
+        log.error(".env not found")
+        sys.exit(1)
+    env = {}
+    for line in ENV_FILE.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            env[k.strip()] = v.strip()
+    return env
+
+
+def call_claude(env: dict, content: str) -> dict | None:
+    """Call Sonnet 4.6 via the CLI, return parsed JSON or None."""
+    model = "claude-sonnet-4-6"
+    prompt = EXTRACTION_PROMPT.format(content=content[:12000])  # ~3K token safety cap
+    try:
+        result = subprocess.run(
+            ["claude", "--model", model, "--print", prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ,
+                 "ANTHROPIC_API_KEY": env.get("ANTHROPIC_API_KEY",
+                                              os.environ.get("ANTHROPIC_API_KEY", ""))},
+        )
+        if result.returncode != 0:
+            log.warning(f"Claude error: {result.stderr[:200]}")
+            return None
+        raw = result.stdout.strip()
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:])
+            if raw.endswith("```"):
+                raw = raw[:-3].strip()
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.warning(f"JSON parse error: {e} | raw[:200]: {result.stdout[:200]}")
+        return None
+    except subprocess.TimeoutExpired:
+        log.warning("Claude CLI timeout (120s)")
+        return None
+    except FileNotFoundError:
+        log.warning("'claude' CLI not found in PATH — model call skipped")
+        return None
+    except Exception as e:
+        log.warning(f"Unexpected error calling Claude: {e}")
+        return None
+
+
+# ── Per-document processing ──────────────────────────────────────────────────
+
+def process_doc(path: Path, env: dict, force: bool) -> str:
+    """Process one .md file. Returns 'ok', 'skipped', 'trivial', or 'error'."""
+    rel = path.relative_to(PROJECT_ROOT)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as e:
+        log.warning(f"  {rel}: read error {e}")
+        return "error"
+
+    fm, raw_fm, body = split_frontmatter(text)
+    body_clean = strip_related_footer(body)
+    checksum = body_checksum(body_clean)
+
+    # ── Skip-by-checksum ─────────────────────────────────────────────────────
+    stored_checksum = (fm.get("ai") or {}).get("checksum")
+    if not force and stored_checksum == checksum:
+        log.debug(f"  ↷ {rel}: unchanged (checksum match)")
+        return "skipped"
+
+    # ── Preserve human-owned source/generated provenance from existing ai: block
+    existing_ai = fm.get("ai") or {}
+    source = existing_ai.get("source", "")
+    today = datetime.date.today().isoformat()
+
+    # ── Skip-by-triviality ───────────────────────────────────────────────────
+    word_count = len(body_clean.split())
+    if word_count < TRIVIAL_WORD_THRESHOLD:
+        log.info(f"  ○ {rel}: trivial ({word_count} words) — deterministic minimal block")
+        ai_block = {
+            "domains": [],
+            "topics": [],
+            "entities": {"people": [], "orgs": [], "regulations": []},
+            "summary": "Stub or empty document — title only, no content.",
+            "generated": today,
+            "checksum": checksum,
+        }
+        if source:
+            ai_block["source"] = source
+        _write_doc(path, raw_fm, fm, ai_block, body_clean, related_slugs=[])
+        return "trivial"
+
+    # ── Model call ───────────────────────────────────────────────────────────
+    log.info(f"  ▶ {rel}: extracting [{word_count} words]")
+    data = call_claude(env, body_clean)
+    if data is None:
+        log.warning(f"  ✗ {rel}: model call failed")
+        return "error"
+
+    ai_block = {
+        "domains": data.get("domains") or [],
+        "topics": data.get("topics") or [],
+        "entities": data.get("entities") or {"people": [], "orgs": [], "regulations": []},
+        "summary": data.get("summary") or "",
+        "generated": today,
+        "checksum": checksum,
+    }
+    if source:
+        ai_block["source"] = source
+
+    related_slugs = data.get("related_slugs") or []
+    _write_doc(path, raw_fm, fm, ai_block, body_clean, related_slugs)
+    log.info(f"  ✓ {rel} — {ai_block['summary'][:80]}")
+    return "ok"
+
+
+def _write_doc(path: Path, raw_fm: str, fm: dict, ai_block: dict,
+               body_clean: str, related_slugs: list[str]):
+    """Write the updated document back to disk with new ai: block + Related footer."""
+    new_fm_str = rebuild_frontmatter(raw_fm, ai_block)
+    footer = build_related_footer(related_slugs)
+    new_text = "---\n" + new_fm_str + "\n---\n" + body_clean.rstrip() + footer + "\n"
+    path.write_text(new_text, encoding="utf-8")
+
+
+# ── Doc discovery ─────────────────────────────────────────────────────────────
+
+def discover_docs(skip_folders: set[str]) -> tuple[list[Path], list[Path]]:
+    """Return (priority_paths, normal_paths).
+
+    priority_paths = docs with via: folded-from-legacy-relations (known-stale).
+    normal_paths = everything else.
+    Both lists exclude skip_folders, _index.md, and _import-reports/.
+    """
+    all_paths: list[Path] = []
+    for p in sorted(KB_DIR.glob("**/*.md")):
+        rel_parts = p.relative_to(KB_DIR).parts
+        # Skip _index.md and files starting with _
+        if p.name.startswith("_"):
+            continue
+        # Skip _import-reports
+        if rel_parts[0].startswith("_"):
+            continue
+        # Skip-list: top-level collection folder
+        if rel_parts[0] in skip_folders:
+            continue
+        all_paths.append(p)
+
+    priority: list[Path] = []
+    normal: list[Path] = []
+    for p in all_paths:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            normal.append(p)
+            continue
+        if "via: folded-from-legacy-relations" in text:
+            priority.append(p)
+        else:
+            normal.append(p)
+
+    return priority, normal
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def run(paths: list[Path], env: dict, force: bool, workers: int = 4):
+    counts = {"ok": 0, "skipped": 0, "trivial": 0, "error": 0}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(process_doc, p, env, force): p for p in paths}
+        for future in as_completed(futures):
+            result = future.result()
+            counts[result] += 1
+    return counts
+
+
+def refresh_index():
+    """Call bin/kb-index to regenerate kb/_index.md."""
+    kb_index = PROJECT_ROOT / "ai" / "bin" / "kb-index"
+    if not kb_index.exists():
+        log.warning("bin/kb-index not found — skipping index refresh")
+        return
+    try:
+        r = subprocess.run(
+            [sys.executable, str(kb_index)],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode == 0:
+            log.info(f"Index refreshed: {r.stdout.strip()}")
+            print(r.stdout.strip())
+        else:
+            log.warning(f"kb-index error: {r.stderr[:200]}")
+    except Exception as e:
+        log.warning(f"kb-index call failed: {e}")
+
+
+def main():
+    args = sys.argv[1:]
+
+    force = "--force" in args
+    no_skip_list = "--no-skip-list" in args
+    skip_folders = set() if no_skip_list else DEFAULT_SKIP_FOLDERS
+
+    # Specific paths mode
+    if "--ids" in args:
+        idx = args.index("--ids")
+        raw_paths = [a for a in args[idx + 1:] if not a.startswith("--")]
+        if not raw_paths:
+            print("--ids requires at least one path")
+            sys.exit(1)
+        paths = [Path(p) if Path(p).is_absolute() else PROJECT_ROOT / p for p in raw_paths]
+        missing = [p for p in paths if not p.exists()]
+        if missing:
+            print(f"Files not found: {missing}")
+            sys.exit(1)
+        env = load_env()
+        print(f"Processing {len(paths)} doc(s) (targeted run)")
+        counts = run(paths, env, force=force)
+    else:
+        # Full run with skip-list and provisional-first ordering
+        priority, normal = discover_docs(skip_folders)
+        total = len(priority) + len(normal)
+        print(f"Discovered {total} docs "
+              f"({len(priority)} provisional-first, {len(normal)} normal)")
+        if skip_folders:
+            print(f"Skip-list folders: {sorted(skip_folders)}")
+        env = load_env()
+        # Process priority (folded) docs first, then normal
+        counts = {"ok": 0, "skipped": 0, "trivial": 0, "error": 0}
+        for batch_name, batch in [("priority", priority), ("normal", normal)]:
+            if not batch:
+                continue
+            log.info(f"--- {batch_name} batch ({len(batch)} docs) ---")
+            batch_counts = run(batch, env, force)
+            for k in counts:
+                counts[k] += batch_counts[k]
+
+    print(
+        f"\nRelation build complete: "
+        f"{counts['ok']} extracted, {counts['trivial']} trivial, "
+        f"{counts['skipped']} skipped (unchanged), {counts['error']} errors"
+    )
+
+    # Always refresh the index at the end
+    refresh_index()
+
+
+if __name__ == "__main__":
+    main()
