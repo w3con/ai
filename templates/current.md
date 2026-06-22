@@ -4,11 +4,11 @@ Status: active | parked | closed
 
 > Fill this against the "session document" section of `CLAUDE.md`, which holds the full rubric for the status-line percentages and the criteria for a good Problem / Cause / Goal / Solution. Score each axis by comparing your text to that rubric, not by feel. Re-read this file every turn before you write.
 
-## Status line (per-turn — printed in chat AND logged here)
+## Status line (printed in chat AND kept here — current only)
 
-Format: `[<session>] domain NN% · task NN% · plan NN%`. Log one line every answer so the trajectory is visible; a low axis is the cue to ask Alex now rather than proceed.
+Format: `[<session>] domain NN% · task NN% · plan NN%`. Keep just the current line, replaced every answer (no history); a low axis is the cue to ask Alex now rather than proceed.
 
-- <date> — [<session>] domain NN% · task NN% · plan NN%
+`[<session>] domain NN% · task NN% · plan NN%`
 
 ## Problem
 
@@ -41,3 +41,7 @@ Format: `[<session>] domain NN% · task NN% · plan NN%`. Log one line every ans
 ## Session Decisions
 
 (Decisions reached this session; durable ones graduate to `decisions/<subject>.md`.)
+
+## Knowledge saved to KB
+
+(Append-only log of what was promoted to the KB this session — date · what · link to the `kb/` note or decision. Mandatory section: an empty list is a visible reminder that a KB save is owed. Use `/k` to save, then log it here.)

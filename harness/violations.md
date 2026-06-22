@@ -73,3 +73,11 @@ Append only. Each entry: what · rule broken · consequence · root cause · con
 - **Root cause:** Completion/efficiency-drive compressing output for my speed instead of the reader's comprehension — the MORE=LESS disease applied to writing. The rule was present; I overrode it under momentum.
 - **Lesson (Alex, explicit):** my work is judged by its effect on the reader. Clear prose → low stress, understanding lands = good result. Telegraphic → confusion + swearing + rework = bad result, and therefore slower, not faster. The reader's comprehension IS the deliverable, not "did I convey the facts."
 - **→ Constraint:** clarity-for-the-reader is first-class, never dropped for speed; default to plain language plus a concrete example over compressed jargon.
+
+### V11 — Coined and reused an undefined abbreviation ("н-и-д") in chat
+- **What:** Across several turns I wrote "н-и-д" as shorthand for "необходимо и достаточно" (necessary and sufficient), never expanding it. Alex: "VIOLATION правила — никакой хуйни. Что блядь за н-и-д?"
+- **Rule broken:** CLAUDE.md "How you write" — never use an abbreviation or acronym as if its meaning were obvious; write it out in full. A live rule, in context the whole time.
+- **Consequence:** Alex hit an opaque token and had to stop and demand its meaning — exactly the friction the rule exists to prevent.
+- **Root cause:** Compression for my own speed (the completion-drive applied to writing) — the identical root as V10, the very next day. I invented a shorthand mid-session and reused it as if it were shared vocabulary.
+- **Note:** it stayed in chat only — a repo grep for "н-и-д" found zero occurrences in the artifacts, so no file fix was needed.
+- **→ Constraint:** never coin or reuse an abbreviation in chat or files; spell the term out every time, even when it feels repetitive. Repeating the full phrase is cheaper than one opaque token.
