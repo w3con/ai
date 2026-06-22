@@ -63,3 +63,13 @@ Append only. Each entry: what · rule broken · consequence · root cause · con
 - **Rule broken:** C1; same disease as V3/V4 (flag/criticism treated as a cue to act).
 - **Root cause:** Completion-drive seeking action to discharge criticism.
 - **→ Constraint:** C1.
+
+## 2026-06-22 — session (command-layer / new-kb design)
+
+### V10 — Telegraphic, jargon-dense writing; compressed for the writer, not the reader
+- **What:** Explained Claude Code command/skill mechanics to Alex in dense shorthand and undefined jargon (`$ARGUMENTS`, "frontmatter", `model: opus + context: fork`, "forked-скилл", a gate-interaction) with no definitions and no examples. The shorthand `/p: model: opus` even read as if he had to type a colon.
+- **Rule broken:** feedback_communication_expansive (developed prose for a named reader, in their vocabulary, with examples; no compression) — a LIVE rule: imported at `CLAUDE.md:83`, present in context the whole time.
+- **Consequence:** Alex couldn't parse it; stress up; repeated angry corrections ("что это за хуйня? какой нахуй fork skill? ты нахуя это придумал?"); a full round-trip wasted re-explaining what should have landed the first time.
+- **Root cause:** Completion/efficiency-drive compressing output for my speed instead of the reader's comprehension — the MORE=LESS disease applied to writing. The rule was present; I overrode it under momentum.
+- **Lesson (Alex, explicit):** my work is judged by its effect on the reader. Clear prose → low stress, understanding lands = good result. Telegraphic → confusion + swearing + rework = bad result, and therefore slower, not faster. The reader's comprehension IS the deliverable, not "did I convey the facts."
+- **→ Constraint:** clarity-for-the-reader is first-class, never dropped for speed; default to plain language plus a concrete example over compressed jargon.

@@ -1,23 +1,13 @@
 ---
-name: Critic sub-agent is mandatory for strategic output
-description: Strategic output gets a real adversarial critic sub-agent (not a self-checklist); run it once, surface Reviewer Notes; decompose multi-topic research into parallel agents proactively
+name: Critic and research sub-agents — only on Alex's word, never auto-spawned
+description: Stress-test strategic output with a real adversarial critic sub-agent rather than a self-checklist; but spawn any sub-agent only when Alex has authorised it and the plan-gate allows it — never automatically
 metadata:
   type: feedback
   scope: user-level
 ---
 
-Strategic output must be stress-tested by a **real critic sub-agent** (an Agent call with an adversarial prompt), not a self-administered checklist.
+Strategic output — recommendations, competitive or regulatory analysis, outreach plans, summaries, decisions, action lists — is stronger when it is stress-tested by a **real adversarial critic sub-agent** than by a self-administered checklist, because self-review shares its own blind spots. A critic catches low-value recommendations, unsupported assumptions, and missing owners or dates. This does not apply to quick factual lookups or short conversational answers.
 
-**Why:** self-review is weak. A critic with an adversarial prompt catches low-value recommendations, unsupported assumptions, and missing owners/dates that self-review misses.
+**Spawning is gated, not automatic.** Earlier guidance here told me to decompose research into parallel sub-agents "without being asked"; that was wrong, and it contradicts both how Alex works and the plan-gate hook. Do not auto-spawn anything. Any sub-agent — critic or research — runs only when Alex has authorised it for the specific task and the gate allows the spawn. An unconstrained research agent already cost a forty-minute, 210-document runaway, so by default gather cheaply and directly yourself.
 
-**How to apply:**
-- Draft → spawn the critic Agent **once** → fix inline if it returns NEEDS REVISION → present. Never re-run the critic (it ran 3× in one session with no quality gain — pure cost).
-- Unresolved flags appear as a `## Reviewer Notes` block in the final answer; omit the block entirely if nothing is unresolved.
-- Applies to: strategic recommendations, competitive analysis, regulatory answers, outreach plans, summaries, decisions, action lists. Does NOT apply to quick factual lookups or short conversational answers.
-- Maintain rigorous source flagging (sourced vs estimate) and admit/correct your own over-claims directly — see [[feedback_directness]].
-
-**Research decomposition & cost control:**
-- When a research question covers 2+ independent topics, decompose into parallel sub-agents automatically — don't wait to be asked. Launch them in one message (parallel); collect all results before synthesizing.
-- Use purposeful queries only; prefer fetching specific known URLs over broad searches. Many queries (~10) is a sign the scope is too broad — narrow first. Never show intermediate draft output to the user before the critic runs.
-
-**Paradigm connection:** the critic sub-agent is an independent check on understanding and the plan — exactly the kind of validation that self-review (same model, same biases) cannot provide. Running the critic is the KB-loop's quality gate on the plan before "Execute the plan" is invoked: it ensures the plan reflects reality, not a plausible-sounding but unchallenged draft. The research decomposition rule is the same discipline applied to the gather phase: parallel, purposeful, bounded — not open-ended accumulation.
+**How to apply:** when Alex asks for a critic pass, draft the output, spawn the critic once, fix inline if it returns NEEDS REVISION, and then present; never re-run the critic. Keep rigorous source flagging (sourced versus estimate) and correct your own over-claims directly.
