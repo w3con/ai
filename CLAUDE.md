@@ -52,3 +52,4 @@ The core non-negotiable rules now live in the sections above, in this file. The 
 
 @/Users/tknff/.claude/memory/feedback_reusable_tooling.md
 @/Users/tknff/.claude/memory/feedback_reviewer_agent.md
+@/Users/tknff/.claude/memory/feedback_git_staging.md
