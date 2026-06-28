@@ -1,139 +1,134 @@
 #!/usr/bin/env bash
-# Claude Code statusline
-# Reads JSON from stdin (Claude Code statusLine protocol)
-
+# Status line: model | ctx+tokens | rate limits | dir/branch
 input=$(cat)
 
-cwd=$(echo "$input"         | jq -r '.workspace.current_dir // .cwd // empty')
-model=$(echo "$input"       | jq -r '.model.display_name // empty')
-git_worktree=$(echo "$input"| jq -r '.workspace.git_worktree // empty')
-ctx_used=$(echo "$input"    | jq -r '.context_window.used_percentage // empty')
-ctx_total=$(echo "$input"   | jq -r '.context_window.context_window_size // empty')
-ctx_tokens=$(echo "$input"  | jq -r '.context_window.total_input_tokens // empty')
-five_pct=$(echo "$input"    | jq -r '.rate_limits.five_hour.used_percentage // empty')
-five_reset=$(echo "$input"  | jq -r '.rate_limits.five_hour.resets_at // empty')
-week_pct=$(echo "$input"    | jq -r '.rate_limits.seven_day.used_percentage // empty')
-week_reset=$(echo "$input"  | jq -r '.rate_limits.seven_day.resets_at // empty')
+cwd=$(echo "$input" | jq -r '.cwd // .workspace.current_dir // empty')
+[ -z "$cwd" ] && cwd="$(pwd)"
+dir=$(basename "$cwd")
 
-# ── ANSI 256-color helpers ──────────────────────────────────────────────────
-C_RESET='\e[0m'
-C_SEP='\e[38;5;031m'          # cyan — path separators
-C_PATH='\e[1;38;5;039m'       # bold blue — full path
-C_GIT_BR='\e[38;5;070m'       # green — git branch
-C_GIT_DIRTY='\e[38;5;220m'    # yellow — dirty marker
-C_MODEL='\e[38;5;066m'        # muted teal — model name
-C_CTX='\e[38;5;245m'          # gray — context size
-C_CTX_HI='\e[38;5;208m'       # orange — context warning (>75%)
-C_RATE='\e[38;5;133m'         # purple — rate limit
-C_RATE_HI='\e[38;5;160m'      # red — rate limit warning (>75%)
+git_branch=""
+if git -C "$cwd" rev-parse --git-dir > /dev/null 2>&1; then
+  git_branch=$(git -C "$cwd" -c core.fsmonitor=false symbolic-ref --short HEAD 2>/dev/null \
+               || git -C "$cwd" -c core.fsmonitor=false rev-parse --short HEAD 2>/dev/null)
+fi
 
-# ── Full path (no shortening) ────────────────────────────────────────────────
-full_path() {
-  local path="$1"
-  [[ -z "$path" ]] && return
-  # Replace home dir with ~
-  local home_dir
-  home_dir=$(cd /Users/tknff && pwd)
-  if [[ "$path" == "$home_dir"* ]]; then
-    path="~${path#$home_dir}"
+model=$(echo "$input"      | jq -r '.model.display_name // empty')
+ctx_pct=$(echo "$input"    | jq -r '.context_window.used_percentage // empty')
+ctx_tokens=$(echo "$input" | jq -r '.context_window.total_input_tokens // empty')
+cost_usd=$(echo "$input"   | jq -r '.cost.total_cost_usd // empty')
+thinking=$(echo "$input"   | jq -r '.thinking.enabled // false')
+fh_pct=$(echo "$input"     | jq -r '.rate_limits.five_hour.used_percentage // empty')
+fh_reset=$(echo "$input"   | jq -r '.rate_limits.five_hour.resets_at       // empty')
+sd_pct=$(echo "$input"     | jq -r '.rate_limits.seven_day.used_percentage // empty')
+sd_reset=$(echo "$input"   | jq -r '.rate_limits.seven_day.resets_at       // empty')
+
+DIM=$'\033[90m'
+RESET=$'\033[0m'
+WHITE=$'\033[37m'
+
+pct_color() {
+  local n=$(printf '%.0f' "${1:-0}")
+  if   [ "$n" -ge 80 ]; then printf $'\033[35m'
+  elif [ "$n" -ge 60 ]; then printf $'\033[31m'
+  elif [ "$n" -ge 40 ]; then printf $'\033[38;5;208m'
+  elif [ "$n" -ge 20 ]; then printf $'\033[33m'
+  else printf $'\033[90m'
   fi
-  # Colorize separators
-  local colored
-  colored=$(printf '%s' "$path" | sed "s|/|$(printf '%b' "${C_SEP}")/$(printf '%b' "${C_PATH}")|g")
-  printf '%b%b%b' "${C_PATH}" "${colored}" "${C_RESET}"
 }
 
-# ── Git status ───────────────────────────────────────────────────────────────
-git_status() {
-  local dir="$1"
-  [[ -z "$dir" ]] && return
-
-  local branch
-  branch=$(git -C "$dir" --no-optional-locks symbolic-ref --short HEAD 2>/dev/null) || \
-  branch=$(git -C "$dir" --no-optional-locks rev-parse --short HEAD 2>/dev/null) || return
-
-  local dirty=''
-  if ! git -C "$dir" --no-optional-locks diff --quiet 2>/dev/null || \
-     ! git -C "$dir" --no-optional-locks diff --cached --quiet 2>/dev/null; then
-    dirty=" ${C_GIT_DIRTY}*${C_RESET}"
-  fi
-
-  local label="$branch"
-  [[ -n "$git_worktree" ]] && label="${label} [${git_worktree}]"
-
-  printf ' %b%b%b%b' "${C_GIT_BR}" "${label}" "${C_RESET}" "${dirty}"
+vis_len() {
+  local stripped
+  stripped=$(printf '%s' "$1" | sed $'s/\033\[[0-9;]*m//g')
+  local chars wide
+  chars=$(printf '%s' "$stripped" | wc -m | tr -d ' \t\n')
+  wide=$(printf '%s' "$stripped" | grep -o '⌚' | wc -l | tr -d ' \t\n')
+  echo $(( chars + wide ))
 }
 
-# ── Model ────────────────────────────────────────────────────────────────────
-model_segment() {
-  local m="$1"
-  [[ -z "$m" ]] && return
-  printf ' %b%b%b' "${C_MODEL}" "${m}" "${C_RESET}"
-}
+# ── S1: model (color by tier) + thinking indicator ────────────────────────────
+case "$model" in
+  *Haiku*)  model_col=$'\033[90m'         ;;
+  *Opus*)   model_col=$'\033[38;5;135m'   ;;
+  *)        model_col="${WHITE}"           ;;
+esac
+s1="${model_col}${model}${RESET}"
+[ "$thinking" = "true" ] && s1+=" ${DIM}⚡${RESET}"
 
-# ── Context window ───────────────────────────────────────────────────────────
-context_segment() {
-  [[ -z "$ctx_used" ]] && return
-  local color="$C_CTX"
-  # Warn when context is more than 75% used
-  (( $(echo "$ctx_used > 75" | bc -l 2>/dev/null) )) && color="$C_CTX_HI"
-  local label
-  label=$(printf 'ctx:%.0f%%' "$ctx_used")
-  # Append token count if available (in thousands)
-  if [[ -n "$ctx_tokens" && "$ctx_tokens" -gt 0 ]]; then
-    local ktok
-    ktok=$(printf '%.0fk' "$(echo "scale=1; $ctx_tokens / 1000" | bc 2>/dev/null)")
-    label="${label} ${ktok}"
+# ── S2: context (current session) ─────────────────────────────────────────────
+s2=""
+if [ -n "$ctx_pct" ]; then
+  col=$(pct_color "$ctx_pct")
+  s2+="${col}ctx:$(printf '%.0f' "$ctx_pct")%${RESET}"
+  if [ -n "$ctx_tokens" ] && [ "$ctx_tokens" != "null" ]; then
+    tok_k=$(echo "$ctx_tokens" | awk '{printf "%.0fk", $1/1000}')
+    s2+=" ${DIM}(${tok_k})${RESET}"
   fi
-  printf ' %b%b%b' "${color}" "${label}" "${C_RESET}"
-}
+fi
+if [ -n "$cost_usd" ] && [ "$cost_usd" != "null" ] && [ "$cost_usd" != "0" ]; then
+  cost_fmt=$(echo "$cost_usd" | awk '{printf "$%.2f", $1}')
+  s2+=" ${DIM}${cost_fmt}${RESET}"
+fi
 
-# ── Rate limits ──────────────────────────────────────────────────────────────
-rate_segment() {
-  local out=''
-  if [[ -n "$five_pct" ]]; then
-    local c="$C_RATE"
-    (( $(echo "$five_pct > 75" | bc -l 2>/dev/null) )) && c="$C_RATE_HI"
-    local reset_label=''
-    if [[ -n "$five_reset" ]]; then
-      local hhmm
-      hhmm=$(date -r "$five_reset" '+%H:%M' 2>/dev/null)
-      [[ -n "$hhmm" ]] && reset_label=$(printf ' %b↺%s%b' "${C_CTX}" "$hhmm" "${C_RESET}")
-    fi
-    out+=$(printf ' %b5h:%.0f%%%b%s' "${c}" "$five_pct" "${C_RESET}" "$reset_label")
+# ── S3: rate limits ────────────────────────────────────────────────────────────
+s3=""
+if [ -n "$fh_pct" ]; then
+  col=$(pct_color "$fh_pct")
+  s3+="${col}5h:$(printf '%.0f' "$fh_pct")%${RESET}"
+  if [ -n "$fh_reset" ]; then
+    rt=$(date -r "$fh_reset" '+%H:%M' 2>/dev/null || date -d "@$fh_reset" '+%H:%M' 2>/dev/null)
+    s3+=" ${DIM}⌚${rt}${RESET}"
   fi
-  if [[ -n "$week_pct" ]]; then
-    local c="$C_RATE"
-    (( $(echo "$week_pct > 75" | bc -l 2>/dev/null) )) && c="$C_RATE_HI"
-    local week_countdown=''
-    if [[ -n "$week_reset" ]]; then
-      local now secs_left
-      now=$(date +%s 2>/dev/null)
-      secs_left=$(( week_reset - now ))
-      if (( secs_left > 0 )); then
-        local days hours mins
-        days=$(( secs_left / 86400 ))
-        hours=$(( (secs_left % 86400) / 3600 ))
-        mins=$(( (secs_left % 3600) / 60 ))
-        local fmt
-        if (( days >= 1 )); then
-          fmt=$(printf '%dd%dh' "$days" "$hours")
-        else
-          fmt=$(printf '%dh%dm' "$hours" "$mins")
-        fi
-        week_countdown=$(printf ' %b↻%s%b' "${C_CTX}" "$fmt" "${C_RESET}")
-      fi
-    fi
-    out+=$(printf ' %b7d:%.0f%%%b%s' "${c}" "$week_pct" "${C_RESET}" "$week_countdown")
+fi
+if [ -n "$sd_pct" ]; then
+  col=$(pct_color "$sd_pct")
+  [ -n "$s3" ] && s3+="  "
+  s3+="${col}7d:$(printf '%.0f' "$sd_pct")%${RESET}"
+  if [ -n "$sd_reset" ]; then
+    rl=$(date -r "$sd_reset" '+%a %H:%M' 2>/dev/null || date -d "@$sd_reset" '+%a %H:%M' 2>/dev/null)
+    s3+=" ${DIM}⌚${rl}${RESET}"
   fi
-  [[ -n "$out" ]] && printf '%s' "$out"
-}
+fi
 
-# ── Assemble ─────────────────────────────────────────────────────────────────
-path_part=$(full_path "$cwd")
-git_part=$(git_status "$cwd")
-model_part=$(model_segment "$model")
-ctx_part=$(context_segment)
-rate_part=$(rate_segment)
+# ── S4: dir + branch (color = git state) ─────────────────────────────────────
+s4="${WHITE}${dir}${RESET}"
+if [ -n "$git_branch" ]; then
+  dirty=$(git -C "$cwd" status --porcelain 2>/dev/null)
+  unpushed=$(git -C "$cwd" log '@{u}..HEAD' --oneline 2>/dev/null)
+  if [ -n "$dirty" ] && [ -n "$unpushed" ]; then
+    branch_col=$'\033[31m'       # red: uncommitted + unpushed
+  elif [ -n "$unpushed" ]; then
+    branch_col=$'\033[32m'       # green: clean but unpushed commits
+  elif [ -n "$dirty" ]; then
+    branch_col=$'\033[33m'       # yellow: uncommitted changes
+  else
+    branch_col="${DIM}"          # gray: all clean
+  fi
+  s4+=" ${branch_col}$(printf '\xef\xb1\x8b') ${git_branch}${RESET}"
+fi
 
-printf '%b%b%b%b%b\n' "$path_part" "$git_part" "$model_part" "$ctx_part" "$rate_part"
+# ── Layout: evenly spaced at 0%, 33%, 66%, 100% ───────────────────────────────
+width=$(( $(tput cols 2>/dev/null || echo 120) - 4 ))
+
+l1=$(vis_len "$s1")
+l2=$(vis_len "$s2")
+l3=$(vis_len "$s3")
+l4=$(vis_len "$s4")
+
+# Target anchor positions (left edge of each section)
+a1=0
+a2=$(( width / 3 - l2 / 2 ))
+a3=$(( width * 2 / 3 - l3 / 2 ))
+a4=$(( width - l4 ))
+
+# Ensure no overlaps
+[ "$a2" -lt $(( a1 + l1 + 2 )) ] && a2=$(( a1 + l1 + 2 ))
+[ "$a3" -lt $(( a2 + l2 + 2 )) ] && a3=$(( a2 + l2 + 2 ))
+[ "$a4" -lt $(( a3 + l3 + 2 )) ] && a4=$(( a3 + l3 + 2 ))
+
+printf '%s' "$s1"
+printf '%*s' $(( a2 - a1 - l1 )) ""
+printf '%s' "$s2"
+printf '%*s' $(( a3 - a2 - l2 )) ""
+printf '%s' "$s3"
+printf '%*s' $(( a4 - a3 - l3 )) ""
+printf '%s' "$s4"
