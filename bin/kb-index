@@ -41,7 +41,7 @@ def load_docs():
     docs = []
     for path in glob.glob(os.path.join(KB, "**", "*.md"), recursive=True):
         rel = os.path.relpath(path, KB)
-        if rel.startswith("_") or os.path.basename(path) == "_index.md":
+        if rel.startswith("_") or any(p.startswith("_") for p in rel.split(os.sep)[:-1]) or os.path.basename(path) == "_index.md":
             continue
         text = open(path, encoding="utf-8").read()
         m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
