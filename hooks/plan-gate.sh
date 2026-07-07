@@ -18,10 +18,14 @@
 # Fail-closed: any parse error or unexpected exception → deny.
 #
 # Usage: Claude Code calls this automatically via hooks config.
-#        Plans directory is discovered from $CLAUDE_PROJECT_DIR (set by Claude Code),
-#        falling back to $PWD. Override with $PLAN_GATE_PLANS_DIR for testing.
+#        Plan directories are discovered from $CLAUDE_PROJECT_DIR (set by Claude Code),
+#        falling back to $PWD. Both <project>/plans and <project>/ai/plans are scanned
+#        (projects following the ai/-tree convention keep plans in ai/plans — change
+#        approved by Alex, 2026-07-07). Override with $PLAN_GATE_PLANS_DIR for testing
+#        (colon-separated list of directories).
 
-PLANS_DIR="${PLAN_GATE_PLANS_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}/plans}"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
+PLANS_DIR="${PLAN_GATE_PLANS_DIR:-${PROJECT_DIR}/plans:${PROJECT_DIR}/ai/plans}"
 
 # Read stdin fully before passing to python3
 STDIN_DATA="$(cat)"
@@ -93,7 +97,10 @@ if subagent_type in ALLOWLISTED_SUBTYPES or agent_name in {s.lower() for s in AL
 SENTINEL = "<!-- scope:pass -->"
 
 try:
-    plan_files = glob.glob(os.path.join(plans_dir, "*.md"))
+    plan_files = []
+    for d in plans_dir.split(":"):
+        if d:
+            plan_files.extend(glob.glob(os.path.join(d, "*.md")))
     sentinel_found = False
     for path in plan_files:
         try:
