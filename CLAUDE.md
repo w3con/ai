@@ -30,11 +30,15 @@ Discussion reaches a decision before you make a change. While options are still 
 
 Build work — code, slides, HTML and CSS, mechanical multi-file edits — runs in a fixed shape: you (Opus) write the complete plan, Alex reviews it, a Sonnet subagent implements the whole thing, and then you and Alex review the result together. You do not write the implementation yourself, because Alex pays for Opus to think and plan, not to perform mechanical edits.
 
+**Never reuse one build agent across phases. Spawn a fresh one for every phase and every sub-checkpoint.** Resuming a subagent — whether Alex types into it or you continue it with the `SendMessage` tool — silently restarts it on the *session* model, not the model it was spawned with. This was measured on 2026-07-10: an executor spawned with `model: "sonnet"` ran 22 turns on `claude-sonnet-5`, and the first continuation ran on `claude-opus-4-8` without a word of warning. Reuse therefore buys back one cold start (roughly 15k Sonnet tokens) and pays for the entire remaining phase at Opus prices, which is far more expensive — and it quietly destroys the whole Opus-plans / Sonnet-implements arrangement above. A fresh spawn per phase is the cheaper option, not the wasteful one.
+
+The corollary is that **an agent's word about which model it is has no evidential value**: it answers "what am I now", not "what wrote this". To learn which model actually did the work, read the `model` field in the agent's transcript file — `grep -o '"model":"[^"]*"' <output_file> | sort | uniq -c`, where the order of lines gives the chronology. Never take the launch parameter or the agent's self-report as proof.
+
 Before any non-trivial task — more than two or three files, several distinct steps, or a real risk of exhausting the session — you write a phased, resumable plan to `<project>/plans/<slug>.md` (one file per task, so two parallel tasks never overwrite each other). Each phase produces one artifact, carries explicit acceptance criteria, and is small enough to survive the session dying part-way through. The `scope` agent (`~/.claude/agents/scope.md`) then checks that the plan is properly phased and writes its verdict into the plan file; it does not author plans. Show the plan to Alex and get his explicit approval — the command is "Execute the plan" — before any implementation begins.
 
 Judge the size before you reach for this, and do not over-apply it. A trivial task — a one-line fix, a single small edit, or a mechanical write whose content is already decided — you do directly with Edit or Write; writing a plan or calling an agent for it is itself wasted effort. Curating this memory store and these rules, and any lightweight planning or analysis, is your own direct work, not "implementation" to delegate to Sonnet. The on-disk plan, not a commit, is the resume checkpoint; commit only when the whole task is finished, and delete the plan file once the task is closed. To resume after a session dies, look through `<project>/plans/*.md` and read any plan whose status is not `DONE`.
 
-A deterministic `PreToolUse` hook (`hooks/plan-gate.sh`) backs this up: it blocks spawning a build agent (`Task`/`Agent`) unless an approved plan is present, while always allowing the read-only and check agents (`scope`, `Explore`, `Plan`). The rule it enforces is: gathering and checking are free, executing is gated.
+A deterministic `PreToolUse` hook (`hooks/plan-gate.sh`) backs this up: it blocks spawning a build agent (`Task`/`Agent`) unless the plan handed to that agent carries the scope PASS sentinel, while always allowing the read-only and check agents (`scope`, `Explore`, `Plan`). The rule it enforces is: gathering and checking are free, executing is gated. **You must name the plan file, by path, in the build agent's prompt** — the gate reads that file and no other; a spawn that names no plan is denied. Rationale, and the permanently-open gate this replaced, in `decisions/plan-gate-contract.md`.
 
 ## Where work files live
 
@@ -46,10 +50,14 @@ The knowledge base itself — a `kb/` Obsidian vault — is maintained in the th
 
 The slash-commands Alex drives me with are skill files under `skills/`, one folder per command, with their reference table in `ai_readme.md`: `/p` (write a phased plan to disk), `/s` (send the plan to the `scope` agent), `/q` (a question — answer, do not act), and `/f` (append a miss to `harness/fuckups.md`).
 
+## Web search tool
+
+`bin/websearch` in this repository is a search script, called directly or through the `web-search` skill whenever Alex says "погугли" or "search the web". It tries providers in order — Tavily, then Brave, then DuckDuckGo — caches each answer for fifteen minutes so a repeated query never re-hits the network, and reports what happened through its exit code: `0` success, `2` bad arguments, `3` every provider failed (the caller then falls back to the built-in `WebSearch` tool).
+
 ## Granular working-style facts (imported below)
 
 The core non-negotiable rules now live in the sections above, in this file. The two imported files below carry the remaining situational practices that do not belong in every-turn rules. The granular store is `~/.claude/memory/` (one fact per file, maintained by the `user-profiler` agent); project-specific facts stay in each project's own memory directory, not here. To add a user-level fact, write the file in `~/.claude/memory/`, update that directory's `MEMORY.md` index, and add an `@import` line below.
 
-@/Users/tknff/.claude/memory/feedback_reusable_tooling.md
-@/Users/tknff/.claude/memory/feedback_reviewer_agent.md
-@/Users/tknff/.claude/memory/feedback_git_staging.md
+@memory/feedback_reusable_tooling.md
+@memory/feedback_reviewer_agent.md
+@memory/feedback_git_staging.md

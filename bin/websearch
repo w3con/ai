@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+"""websearch — provider-chained web search, standard library only.
+
+Tries providers in order — Tavily, then Brave, then DuckDuckGo (see
+PROVIDERS below) — and prints exactly one JSON object to stdout describing
+the first provider that returned results. All diagnostics (skips, HTTP
+errors, empty results) go to stderr, never stdout.
+
+Every call is first looked up in a 15-minute, on-disk cache keyed by
+provider + query + result count (~/.cache/websearch/); a hit never touches
+the network and sets "cached": true. On a cache miss, each provider is
+throttled independently (a per-provider timestamp file in the same cache
+directory) before the HTTP request is made, and HTTP 429/5xx responses are
+retried up to twice with exponential backoff before falling through to the
+next provider. --no-cache bypasses the cache entirely, both for reading and
+for writing.
+
+Usage:
+    websearch "ESPR textiles delegated act"
+    websearch --count 3 --text "digital product passport regulation"
+    websearch --no-cache "some query"   # skip the on-disk cache entirely
+
+Output contract (stdout, one line, unless --text is given):
+    {"provider": "tavily", "query": "...", "results": [
+        {"title": "...", "url": "...", "snippet": "..."}
+    ], "cached": false}
+
+Exit codes:
+    0  success — a provider returned results, printed to stdout
+    2  bad arguments (missing query, bad flag) — argparse's own exit code
+    3  every provider in the chain was skipped, errored, or returned nothing
+
+API keys are read from <this script's dir>/../.env (i.e. Dev/ai/.env), not
+from $HOME or the current directory, so the script behaves the same no
+matter where it is invoked from. A shell-exported environment variable of
+the same name always wins over the .env file, even if exported empty — that
+lets a caller force a provider to be skipped for testing without touching
+the .env file itself.
+"""
+import argparse
+import hashlib
+import html
+import json
+import os
+import random
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ENV_PATH = SCRIPT_DIR.parent / ".env"
+
+HTTP_TIMEOUT_SECONDS = 10
+
+# --- Throttling, retry and disk cache (checkpoint 1C) ----------------------
+#
+# The cache/throttle directory lives outside the repository on purpose
+# (~/.cache, not Dev/ai/): it is per-machine state, never git-tracked, and
+# it must survive `git pull` without two machines ever fighting over the
+# same files.
+CACHE_DIR = Path.home() / ".cache" / "websearch"
+CACHE_TTL_SECONDS = 15 * 60
+
+# Minimum seconds between two requests to the same provider. DuckDuckGo's
+# number is the floor of a range: a random 0-1s jitter is added to it on
+# every wait, both to avoid a perfectly-periodic request pattern (which
+# looks more like automation than a human clicking around) and to satisfy
+# the plan's "2.5s + jitter 0-1s" requirement literally — the enforced gap
+# is therefore always >= 2.5s, never exactly 2.5s.
+THROTTLE_MIN_INTERVAL_SECONDS = {
+    "tavily": 1.0,
+    "brave": 1.1,       # Brave's free tier is capped at 1 request/second.
+    "duckduckgo": 2.5,
+}
+
+# Retry only HTTP 429 (rate limited) and 5xx (server-side failure) — both
+# are plausibly transient. Any other HTTP error (a 4xx that isn't 429) is a
+# client-side problem (bad key, malformed request) that retrying cannot
+# fix, so it falls through to the next provider immediately — no retry.
+MAX_RETRIES = 2
+RETRY_BACKOFF_BASE_SECONDS = 0.5
+
+
+def log(message):
+    print(message, file=sys.stderr)
+
+
+def load_dotenv(path):
+    """Parse KEY=VALUE lines from an .env file. Never logs or returns values
+    on its own initiative — callers decide what, if anything, gets printed."""
+    env = {}
+    if not path.exists():
+        log(f"websearch: no .env at {path} — provider keys must come from the shell environment")
+        return env
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        env[key] = value
+    return env
+
+
+def get_key(name, dotenv):
+    """A shell-exported var always wins over .env, even if exported empty —
+    this is how later checkpoints force a provider to be skipped in tests
+    without editing the .env file."""
+    if name in os.environ:
+        return os.environ[name]
+    return dotenv.get(name, "")
+
+
+def _sleep_monotonic(seconds):
+    """Sleep for `seconds`, timed off the monotonic clock rather than one
+    blind time.sleep(seconds) call. This is deliberately a different clock
+    from the one used for the on-disk throttle stamp (see _throttle_wait):
+    the stamp has to be wall-clock (time.time()) because it is written by
+    one process invocation and read back by a completely separate, later
+    one — a monotonic clock's zero point is arbitrary per-process and
+    cannot be compared across a process restart at all. But once *this*
+    process is actually waiting out a duration it already computed, the
+    wall clock is the wrong tool: if it jumps mid-sleep (NTP sync, DST,
+    a manual clock change), a wall-clock-based wait could wake up early or
+    late. The monotonic clock never jumps, so re-checking the deadline
+    against it in a loop guarantees we've waited at least `seconds`
+    regardless of what the wall clock does in the meantime."""
+    if seconds <= 0:
+        return
+    deadline = time.monotonic() + seconds
+    remaining = seconds
+    while remaining > 0:
+        time.sleep(remaining)
+        remaining = deadline - time.monotonic()
+
+
+def _fetch_with_retry(name, req, body_log_chars=500):
+    """Perform req, retrying on HTTP 429/5xx with exponential backoff
+    (0.5s, 1.0s, ...) up to MAX_RETRIES times, then giving up. Any other
+    outcome — a 4xx that isn't 429, a network-level failure, or retries
+    exhausted — is logged exactly once, here, and signalled to the caller
+    by returning None. Callers must not log anything further about the
+    same failure: that double-reporting (a logged network error followed
+    by a separate "zero results" message for the same one cause) was a 1B
+    bug, fixed by concentrating all "this attempt failed" logging in this
+    one place. Returns (status, body) on success."""
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            body = e.read()
+            retryable = e.code == 429 or e.code >= 500
+            if retryable and attempt < MAX_RETRIES:
+                wait = RETRY_BACKOFF_BASE_SECONDS * (2 ** attempt)
+                log(f"{name}: HTTP {e.code}, retrying in {wait:.1f}s ({attempt + 1}/{MAX_RETRIES})")
+                _sleep_monotonic(wait)
+                attempt += 1
+                continue
+            log(f"{name}: HTTP {e.code}: {body[:body_log_chars]!r}")
+            return None
+        except urllib.error.URLError as e:
+            log(f"{name}: network error: {e}")
+            return None
+
+
+def _cache_key(provider, query, count):
+    """sha1 over provider + query + count, so --count 3 and --count 5 on
+    the same query never collide, and a cached Tavily result is never
+    handed back under Brave's or DuckDuckGo's name."""
+    digest = hashlib.sha1(f"{provider}|{query}|{count}".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _cache_path(key):
+    return CACHE_DIR / f"{key}.json"
+
+
+def _load_cache(key):
+    """Return the cached payload dict for `key` if it exists and is younger
+    than CACHE_TTL_SECONDS, else None. Any read or parse problem (missing
+    file, corrupt/half-written JSON) is treated as a plain cache miss, not
+    an error — a bad cache file must never crash a search, only cause it to
+    be re-fetched and overwritten."""
+    path = _cache_path(key)
+    if not path.exists():
+        return None
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    stored_at = stored.get("stored_at")
+    payload = stored.get("payload")
+    if not isinstance(stored_at, (int, float)) or payload is None:
+        return None
+    if time.time() - stored_at > CACHE_TTL_SECONDS:
+        return None
+    return payload
+
+
+def _save_cache(key, payload):
+    """Write payload under `key`, wall-clock timestamped so a later
+    _load_cache can check its age. Written to a temp file and renamed into
+    place (POSIX rename is atomic) so a concurrent reader never observes a
+    half-written cache file."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _cache_path(key)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(
+        json.dumps({"stored_at": time.time(), "payload": payload}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+
+
+def _throttle_wait(name):
+    """Block, if needed, so at least THROTTLE_MIN_INTERVAL_SECONDS[name]
+    (plus DuckDuckGo's jitter) has elapsed since the last request this
+    script sent to `name` — from any process, not just this one, since the
+    state is a file, not an in-memory value. Only waits for the *missing*
+    difference: a provider that was not called recently enough is not
+    throttled at all, per the plan ("ждать нужно только недостающую
+    разницу"). Wall clock vs. monotonic clock: see _sleep_monotonic for the
+    on-disk-stamp-is-wall-clock, sleep-is-monotonic split and why."""
+    min_interval = THROTTLE_MIN_INTERVAL_SECONDS.get(name)
+    if min_interval is None:
+        return
+    if name == "duckduckgo":
+        min_interval += random.uniform(0, 1.0)
+
+    stamp_path = CACHE_DIR / f"throttle_{name}.ts"
+    last_call = None
+    if stamp_path.exists():
+        try:
+            last_call = float(stamp_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            last_call = None
+
+    if last_call is not None:
+        elapsed = time.time() - last_call
+        remaining = min_interval - elapsed
+        if remaining > 0:
+            log(f"{name}: throttling, waiting {remaining:.2f}s")
+            _sleep_monotonic(remaining)
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    stamp_path.write_text(repr(time.time()), encoding="utf-8")
+
+
+def search_tavily(query, count, api_key):
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": count,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    result = _fetch_with_retry("tavily", req)
+    if result is None:
+        return None
+    status, body = result
+
+    if status >= 400:
+        log(f"tavily: HTTP {status}: {body[:500]!r}")
+        return None
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as e:
+        log(f"tavily: could not parse response as JSON: {e}")
+        return None
+
+    raw_results = parsed.get("results") or []
+    results = []
+    for r in raw_results[:count]:
+        results.append({
+            "title": r.get("title") or "",
+            "url": r.get("url") or "",
+            "snippet": r.get("content") or r.get("snippet") or "",
+        })
+    return results
+
+
+def search_brave(query, count, api_key):
+    params = urllib.parse.urlencode({"q": query, "count": count})
+    url = f"https://api.search.brave.com/res/v1/web/search?{params}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "X-Subscription-Token": api_key,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    result = _fetch_with_retry("brave", req)
+    if result is None:
+        return None
+    status, body = result
+
+    if status >= 400:
+        log(f"brave: HTTP {status}: {body[:500]!r}")
+        return None
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as e:
+        log(f"brave: could not parse response as JSON: {e}")
+        return None
+
+    raw_results = (parsed.get("web") or {}).get("results") or []
+    results = []
+    for r in raw_results[:count]:
+        # Brave highlights matched terms in title/description with literal
+        # <strong>...</strong> markup (documented API behaviour, not HTML we
+        # scrape) — strip that and unescape entities so the field is plain
+        # text like every other provider's.
+        title = html.unescape(r.get("title") or "").replace("<strong>", "").replace("</strong>", "")
+        snippet = html.unescape(r.get("description") or "").replace("<strong>", "").replace("</strong>", "")
+        results.append({
+            "title": title,
+            "url": r.get("url") or "",
+            "snippet": snippet,
+        })
+    return results
+
+
+def _unwrap_ddg_url(href):
+    """DuckDuckGo's HTML result page wraps outbound links in a redirect:
+    //duckduckgo.com/l/?uddg=<url-encoded target>&rut=<token>. Pull the real
+    URL back out. Some responses (e.g. via POST) already give the direct
+    URL with no wrapper — pass those through unchanged."""
+    if not href:
+        return ""
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urllib.parse.urlparse(href)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path == "/l/":
+        qs = urllib.parse.parse_qs(parsed.query)
+        target = qs.get("uddg")
+        if target:
+            return urllib.parse.unquote(target[0])
+    return href
+
+
+class _DDGResultParser(HTMLParser):
+    """Pulls (title, url, snippet) triples out of the DuckDuckGo HTML
+    results page using the standard library's html.parser — no regex over
+    markup, per the plan. Each result is a <a class="result__a"> (title +
+    href) followed later by a <a class="result__snippet"> (blurb text,
+    which may contain nested <b> highlight tags)."""
+
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self._mode = None  # "title" | "snippet" | None
+        self._title_text = []
+        self._snippet_text = []
+        self._pending = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "a":
+            return
+        attrs_dict = dict(attrs)
+        classes = attrs_dict.get("class", "").split()
+        if "result__a" in classes:
+            self._mode = "title"
+            self._title_text = []
+            self._pending = {"title": "", "url": _unwrap_ddg_url(attrs_dict.get("href", "")), "snippet": ""}
+        elif "result__snippet" in classes:
+            self._mode = "snippet"
+            self._snippet_text = []
+
+    def handle_data(self, data):
+        if self._mode == "title":
+            self._title_text.append(data)
+        elif self._mode == "snippet":
+            self._snippet_text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag != "a":
+            return
+        if self._mode == "title" and self._pending is not None:
+            self._pending["title"] = "".join(self._title_text).strip()
+            self._mode = None
+        elif self._mode == "snippet" and self._pending is not None:
+            self._pending["snippet"] = "".join(self._snippet_text).strip()
+            self.results.append(self._pending)
+            self._pending = None
+            self._mode = None
+
+
+def search_duckduckgo(query, count, api_key):
+    # POST, not GET: this is what DuckDuckGo's own <form action="/html/"
+    # method="post"> uses, and it was verified by hand (curl, 2026-07-10)
+    # to return plain, already-resolved result URLs — no //duckduckgo.com
+    # /l/?uddg= wrapper at all, unlike the GET/query-string form of the same
+    # request, which does wrap every link. POST is therefore both the more
+    # "native" transport and the one that needs the unwrap step least often;
+    # _unwrap_ddg_url() is kept regardless so a wrapped link (or a future
+    # change back to wrapping) still resolves to a real URL instead of a
+    # useless duckduckgo.com redirect.
+    url = "https://html.duckduckgo.com/html/"
+    data = urllib.parse.urlencode({"q": query}).encode("utf-8")
+    headers = {
+        # DuckDuckGo returns an empty/blocked-looking page without a
+        # plausible browser User-Agent (verified by hand, 2026-07-10).
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    result = _fetch_with_retry("duckduckgo", req, body_log_chars=300)
+    if result is None:
+        return None
+    status, body = result
+
+    if status >= 400:
+        log(f"duckduckgo: HTTP {status}")
+        return None
+
+    parser = _DDGResultParser()
+    parser.feed(body.decode("utf-8", errors="replace"))
+    return parser.results[:count]
+
+
+# The chain the main loop walks, in order. Each entry names the provider,
+# the .env/environment variable that holds its key (None if no key is
+# needed, as is the case for duckduckgo, which needs no API key at all),
+# and the function that performs the search.
+PROVIDERS = [
+    {"name": "tavily", "key_env": "TAVILY_API_KEY", "func": search_tavily},
+    {"name": "brave", "key_env": "BRAVE_API_KEY", "func": search_brave},
+    {"name": "duckduckgo", "key_env": None, "func": search_duckduckgo},
+]
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="websearch",
+        description="Provider-chained web search (Tavily -> Brave -> DuckDuckGo).",
+    )
+    parser.add_argument("query", nargs="+", help="search query (unquoted words are joined with spaces)")
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument("--json", action="store_true", help="print JSON to stdout (default)")
+    output_group.add_argument("--text", action="store_true", help="print human-readable text instead of JSON")
+    parser.add_argument("--count", type=int, default=5, help="number of results to request (default: 5)")
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="bypass the on-disk cache entirely — no read, no write",
+    )
+    # argparse.error() calls parser.exit(2, ...) internally, so a missing
+    # query or an unknown flag already produces exit code 2 without any
+    # extra handling here — that satisfies the plan's contract for granted.
+    return parser.parse_args(argv)
+
+
+def emit(result, args):
+    if args.text:
+        print(f"provider: {result['provider']}  (cached: {result['cached']})")
+        print(f"query: {result['query']}")
+        for r in result["results"]:
+            print(f"- {r['title']}\n  {r['url']}\n  {r['snippet']}")
+    else:
+        print(json.dumps(result, ensure_ascii=False))
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    query = " ".join(args.query)
+    dotenv = load_dotenv(ENV_PATH)
+
+    for provider in PROVIDERS:
+        name = provider["name"]
+        key_env = provider["key_env"]
+
+        api_key = None
+        if key_env is not None:
+            api_key = get_key(key_env, dotenv)
+            if not api_key:
+                log(f"{name}: skipped, no {key_env} in .env or environment")
+                continue
+
+        # Cache is checked before throttling, deliberately: a cache hit
+        # must never touch the network, and must never pay a throttle
+        # sleep either — sleeping and then serving from cache would be
+        # exactly the wasted wait the plan calls out.
+        cache_key = _cache_key(name, query, args.count)
+        if not args.no_cache:
+            cached_payload = _load_cache(cache_key)
+            if cached_payload is not None:
+                cached_payload = dict(cached_payload)
+                cached_payload["cached"] = True
+                emit(cached_payload, args)
+                return 0
+
+        _throttle_wait(name)
+
+        try:
+            results = provider["func"](query, args.count, api_key)
+        except Exception as e:
+            log(f"{name}: unexpected error: {e}")
+            continue
+
+        if results is None:
+            # The provider function (via _fetch_with_retry) already logged
+            # the specific cause — HTTP error, network error, retries
+            # exhausted, bad JSON. Logging "zero results" on top of that
+            # would be a second message for the one same failure.
+            continue
+
+        if not results:
+            log(f"{name}: zero results")
+            continue
+
+        result = {
+            "provider": name,
+            "query": query,
+            "results": results,
+            "cached": False,
+        }
+        if not args.no_cache:
+            _save_cache(cache_key, result)
+        emit(result, args)
+        return 0
+
+    log("websearch: all providers exhausted with no results")
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())
