@@ -46,6 +46,8 @@ Each project keeps its AI working files under `<project>/ai/`:
 - `plans/<slug>.md` — phased, resumable plans (checked by `plan-gate`).
 - `decisions/<subject>.md` — append-only "why" log per subject, so the reasoning behind a decision outlives the plan that is deleted when the task closes.
 
+Memory is the deliberate exception to "per-project": it is not kept under `<project>/ai/`, it is one shared store — see "Memory — one store for every project" below.
+
 The knowledge base itself — a `kb/` Obsidian vault — is maintained in the thinking tool, not turn-by-turn here; touch it only when a plan calls for it. New projects are scaffolded from `templates/kb-skeleton/`.
 
 The slash-commands Alex drives me with are skill files under `skills/`, one folder per command, with their reference table in `ai_readme.md`: `/p` (write a phased plan to disk), `/s` (send the plan to the `scope` agent), `/q` (a question — answer, do not act), and `/f` (append a miss to `harness/fuckups.md`).
@@ -54,9 +56,13 @@ The slash-commands Alex drives me with are skill files under `skills/`, one fold
 
 `bin/websearch` in this repository is a search script, called directly or through the `web-search` skill whenever Alex says "погугли" or "search the web". It tries providers in order — Tavily, then Brave, then DuckDuckGo — caches each answer for fifteen minutes so a repeated query never re-hits the network, and reports what happened through its exit code: `0` success, `2` bad arguments, `3` every provider failed (the caller then falls back to the built-in `WebSearch` tool).
 
-## Granular working-style facts (imported below)
+## Memory — one store for every project
 
-The core non-negotiable rules now live in the sections above, in this file. The two imported files below carry the remaining situational practices that do not belong in every-turn rules. The granular store is `~/.claude/memory/` (one fact per file, maintained by the `user-profiler` agent); project-specific facts stay in each project's own memory directory, not here. To add a user-level fact, write the file in `~/.claude/memory/`, update that directory's `MEMORY.md` index, and add an `@import` line below.
+There is exactly one memory store: `~/Dev/ai/memory/` (reachable as `~/.claude/memory`, and as `~/.claude/projects/<slug>/memory` — every one of those is a symlink to it). It is version-controlled and reaches every project and both machines. **There is no such thing as project-level memory.** The `memory-store-guard.sh` hook refuses any write whose real path lands in a project memory directory that is not this store, and `bootstrap.sh` creates the symlinks on any machine — so writing "to a project's memory" always writes to the one store, and there is no way to do otherwise. Rationale and rejected alternatives: `decisions/memory-one-store.md`.
+
+The boundary this draws is between **memory** and **a project's documents**, not between "shared" and "project" memory. Memory answers *how Claude works* — what Alex requires, where he corrected me, which tool to use for what — and belongs in the one store. What *a project decided* — its architecture, its trade-offs — belongs in that project's own `ai/decisions/` and `ai/arch/`, versioned with the code; and **plans stay in the project they describe** (`plan-gate` reads the plan named to the executor, so project plans work unchanged). A memory that is about method but true only inside one project carries a `scope: <project>` field rather than living in a second store.
+
+To add a fact: write the file in `~/Dev/ai/memory/`, add one line to that directory's `MEMORY.md` index, and — only for the three preference files whose bodies must be in context every session — add an `@import` line below (the index loads on its own; `@import` also strips YAML frontmatter, so it is reserved for the files that need their bodies loaded verbatim). One fact per file.
 
 @memory/feedback_reusable_tooling.md
 @memory/feedback_reviewer_agent.md

@@ -103,6 +103,63 @@ symlink "$CLAUDE_DIR/skills"                 "$REPO_DIR/skills"
 symlink "$CLAUDE_DIR/statusline-command.sh"  "$REPO_DIR/statusline-command.sh"
 symlink "$CLAUDE_DIR/settings.json"          "$REPO_DIR/settings.json"
 
+# ---------------------------------------------------------------------------
+# Per-project memory symlinks
+#
+# Why this exists: the harness gives every project its own real directory at
+# ~/.claude/projects/<slug>/memory the first time it needs one. But there is
+# only ONE memory store for all projects — $CLAUDE_DIR/memory, symlinked to
+# $REPO_DIR/memory above — because a lesson learned in one project (how
+# Claude should behave, where Alex corrected it) is not project-specific and
+# should be visible everywhere. So every <slug>/memory directory must itself
+# be a symlink to that same store, not a separate real directory. This also
+# matters for the memory-store-guard.sh PreToolUse hook: it only allows
+# writes whose real path resolves inside $REPO_DIR/memory, so a project
+# whose memory/ is still a real directory would have every write to it
+# rejected until this symlink is in place.
+#
+# We only ever repair two known-safe cases here: a real directory that is
+# already empty (nothing to lose), and a symlink pointing at the wrong
+# place (e.g. a stale/broken path from before a project was renamed — this
+# happened for Validité, whose old symlink pointed at a since-abandoned
+# path). A real, non-empty memory/ directory is deliberately left alone: we
+# don't know whether its contents are safe to discard or need a human to
+# merge them by hand, so we hand it to symlink()'s own "exists and is not a
+# symlink" branch, which warns and skips rather than guessing.
+# ---------------------------------------------------------------------------
+link_project_memories() {
+  local projects_dir="$CLAUDE_DIR/projects"
+  local shared_memory="$REPO_DIR/memory"
+
+  if [[ ! -d "$projects_dir" ]]; then
+    return
+  fi
+
+  shopt -s nullglob
+  local mem_dir
+  for mem_dir in "$projects_dir"/*/memory; do
+    # A real (non-symlink) directory with nothing in it can be safely
+    # cleared out of the way so that symlink() below takes its normal
+    # "target doesn't exist yet -> create" path, instead of its "target
+    # exists and is not a symlink -> warn and skip" path. This emptiness
+    # check is new logic symlink() doesn't have; the actual protective
+    # decision (touch it or not) is still made entirely inside symlink()
+    # itself, not duplicated here.
+    if [[ -d "$mem_dir" && ! -L "$mem_dir" && -z "$(ls -A "$mem_dir" 2>/dev/null)" ]]; then
+      if [[ $DRY_RUN -eq 0 ]]; then
+        rmdir "$mem_dir"
+      else
+        echo "[dry-run] Would replace empty dir with symlink: $mem_dir -> $shared_memory"
+        continue
+      fi
+    fi
+    symlink "$mem_dir" "$shared_memory"
+  done
+  shopt -u nullglob
+}
+
+link_project_memories
+
 echo ""
 if [[ $DRY_RUN -eq 0 ]]; then
   echo "Done. Verify with: readlink ~/.claude/{CLAUDE.md,memory,agents,hooks,skills,statusline-command.sh,settings.json}"
