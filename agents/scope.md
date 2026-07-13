@@ -22,6 +22,28 @@ Confirm you have found the file before proceeding. If there is no plan to check,
 
 ---
 
+## Step 1a — A re-check is a DELTA check, not a fresh pass
+
+If the plan file already contains a verdict block from a previous revision (a `## Scope verdict`
+/ «Вердикты scope» section) and you are checking a *revised* plan:
+
+- Verify ONLY the points the latest FAIL verdict raised: read the sections those points touch
+  and confirm each one is fixed (or is not).
+- For every check the recorded prior verdict already passed, RELY on that verdict — do not
+  re-read or re-evaluate the rest of the plan.
+- If, while reading the changed sections, you happen to see a glaring new defect, flag it —
+  but do not go hunting: a delta check reads the changed parts only.
+- State in your verdict that it is a delta check and name the revision whose verdict you
+  relied on for the untouched checks.
+
+The FIRST check of any plan is always a full pass; delta mode applies only when a full-pass
+verdict over the plan's current phase structure already exists in the file. This rule exists
+because a full re-pass costs ~4–5 minutes per revision and re-derives conclusions already on
+disk (added 2026-07-13 after three near-identical full passes on one plan; Alex: «пусть
+проверяет только последний пункт, а не все сначала»).
+
+---
+
 ## Step 2 — Evaluate against the phasing rubric
 
 Evaluate the plan on three levels: the plan as a whole, then each phase individually.
@@ -74,14 +96,17 @@ All plan-level checks pass and all phases pass all per-phase checks (or any fail
 
 All phases checked against phasing rubric. Findings:
 
-- [Phase 1]: [brief note, or "passes all checks"]
-- [Phase 2]: [brief note, or "passes all checks"]
-- [Phase N]: ...
+- [one line per phase that has a note worth keeping; phases that simply pass may be grouped
+  into a single line — "Phases A–H: pass all checks"]
 
 Plan-level: task statement present, out-of-scope present, verification present, statuses updatable.
 
 <!-- scope:pass -->
 ```
+
+Keep verdicts TERSE: develop full paragraphs only for FAILED points; everything that passes
+gets at most one line. The verdict is read by a hook and by the plan author who already knows
+the plan — not by a cold reader (rule added 2026-07-13, same session as Step 1a).
 
 The line `<!-- scope:pass -->` MUST appear verbatim, on its own line, inside the verdict block, and only on PASS. This is the sentinel the plan-gate hook scans for. Do not add it on FAIL, do not add it anywhere else in the file.
 
