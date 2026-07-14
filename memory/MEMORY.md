@@ -25,6 +25,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Reusable tooling](feedback_reusable_tooling.md) — commit the helper once as a documented script; a script decides what happens, a skill decides when to call it
 - [Stage exactly your own files](feedback_git_staging.md) — commit by naming paths; a blind `git add -A` sweeps in other sessions' work
 - [Record only confirmed decisions](record-only-confirmed-decisions.md) — proposals stay in chat; nothing lands in a durable record until Alex confirms it
+- [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
 - [The AI config repo](reference_ai_config_repo.md) — the versioned source of truth is `~/Dev/ai`; commit configuration there, never straight into `~/.claude`
 - [Reproduce the design, don't improvise](design-reproduce-not-improvise.md) — Validité website only: match the design files exactly, interview to full clarity first
 - [Enter the knowledge base through its index](kb-entry-via-index.md) — Validité knowledge base only: start at `kb/_index.md`, never a blind grep
