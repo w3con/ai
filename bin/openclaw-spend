@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""openclaw-spend — cost and context-prefix report for Validité-OS (OpenClaw).
+
+Reads the message-level usage records straight out of the session logs on the
+VPS (ssh valios), prices them locally, and prints total spend, a breakdown by
+model and by cost component, spend per day, and — the number every context-diet
+phase is measured against — the fixed prefix size (input + cacheRead +
+cacheWrite of the first call of each session), as min/median/max.
+
+Why this exists rather than OpenClaw's own usage surfaces: the bundled
+`model-usage` skill summarises CodexBar's local cost logs (macOS-only,
+cost-only, no per-session breakdown), and `/status` / `/usage cost` report
+session-level or aggregate spend — neither reports the median first-call
+prefix per session, which is the quantity the context-diet plan needs to move.
+That number only exists in the raw per-call usage records, hence this script.
+
+Usage:
+    ai/bin/openclaw-spend                          last 30 days
+    ai/bin/openclaw-spend --from 2026-06-15 --to 2026-07-06
+
+Source: message.usage records in
+    /home/openclaw/.openclaw/agents/main/sessions/*.jsonl
+on valios (excludes *.trajectory.jsonl, which duplicates the same calls at a
+different granularity). Reading the directory requires sudo as the `openclaw`
+user (ubuntu has passwordless sudo there); the script never prints secrets —
+it only ever touches usage/cost fields, never openclaw.json or secrets.env.
+"""
+import argparse
+import datetime as dt
+import json
+import subprocess
+import sys
+from collections import defaultdict
+
+SSH_HOST = "valios"
+SESSIONS_DIR = "/home/openclaw/.openclaw/agents/main/sessions"
+
+# USD per 1M tokens. Correct here if Anthropic's published rates change.
+PRICES = {
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cacheWrite": 3.75, "cacheRead": 0.30},
+    "claude-opus-4-8":   {"input": 15.00, "output": 75.00, "cacheWrite": 18.75, "cacheRead": 1.50},
+}
+
+# Emits one JSON line per model_change event and per message-with-usage event,
+# tagged with its source file, so the whole session-log directory can be swept
+# in a single ssh + jq round trip instead of one connection per file.
+#
+# A session that hits `openclaw session reset` gets its live "<id>.jsonl"
+# renamed to "<id>.jsonl.reset.<timestamp>" — the pre-reset history then only
+# exists under that renamed name, so both patterns must be swept or whole
+# sessions' worth of calls silently disappear. "*.trajectory.jsonl" is
+# excluded because it duplicates the same calls at a different granularity.
+REMOTE_CMD = (
+    "sudo -iu openclaw bash -c '"
+    "find {dir} -maxdepth 1 \\( -name \"*.jsonl\" -o -name \"*.jsonl.reset.*\" \\) "
+    "! -name \"*.trajectory.jsonl\" -print0 "
+    "| xargs -0 jq -c \"{{file: input_filename, type: .type, "
+    "ts: (.timestamp // .message.timestamp), model: .modelId, musage: .message.usage}} "
+    "| select(.type==\\\"model_change\\\" or .musage != null)\"'"
+).format(dir=SESSIONS_DIR)
+
+
+def fetch_events():
+    proc = subprocess.run(
+        ["ssh", SSH_HOST, REMOTE_CMD],
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        sys.exit(f"ssh/jq failed (exit {proc.returncode}): {proc.stderr.strip()}")
+    events = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line:
+            events.append(json.loads(line))
+    return events
+
+
+def parse_ts(ts):
+    """Session logs store timestamps either as ISO-8601 strings or as epoch
+    milliseconds (int) — both forms are seen in practice, so accept either."""
+    if isinstance(ts, (int, float)):
+        return dt.datetime.fromtimestamp(ts / 1000, tz=dt.timezone.utc)
+    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def build_calls(events):
+    """Walk each session file's events in log order, attaching the active
+    model (from the most recent model_change in that file) to every usage
+    record, and flagging the first usage record of each file as that
+    session's first call — the one whose size is the fixed prefix."""
+    current_model = {}
+    seen_first = set()
+    calls = []
+    for ev in events:
+        f = ev["file"]
+        if ev["type"] == "model_change":
+            current_model[f] = ev["model"]
+            continue
+        usage = ev.get("musage")
+        if not usage:
+            continue
+        is_first = f not in seen_first
+        seen_first.add(f)
+        calls.append({
+            "file": f,
+            "ts": parse_ts(ev["ts"]),
+            "model": current_model.get(f),
+            "input": usage.get("input", 0),
+            "output": usage.get("output", 0),
+            "cacheRead": usage.get("cacheRead", 0),
+            "cacheWrite": usage.get("cacheWrite", 0),
+            "is_first": is_first,
+        })
+    return calls
+
+
+def cost_components(call):
+    """Return the {component: usd} breakdown for one call, or all-zero for an
+    unpriced/unknown model rather than raising."""
+    price = PRICES.get(call["model"])
+    if not price:
+        return {"input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0}
+    return {
+        "input": call["input"] * price["input"] / 1_000_000,
+        "output": call["output"] * price["output"] / 1_000_000,
+        "cacheRead": call["cacheRead"] * price["cacheRead"] / 1_000_000,
+        "cacheWrite": call["cacheWrite"] * price["cacheWrite"] / 1_000_000,
+    }
+
+
+def median(values):
+    if not values:
+        return 0
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Cost and context-prefix report for Validité-OS session logs.")
+    ap.add_argument("--from", dest="date_from", default=None,
+                     help="YYYY-MM-DD, default: 30 days ago")
+    ap.add_argument("--to", dest="date_to", default=None,
+                     help="YYYY-MM-DD, default: today")
+    args = ap.parse_args()
+
+    today = dt.datetime.now(dt.timezone.utc).date()
+    date_to = dt.date.fromisoformat(args.date_to) if args.date_to else today
+    date_from = (dt.date.fromisoformat(args.date_from) if args.date_from
+                 else date_to - dt.timedelta(days=30))
+
+    calls = build_calls(fetch_events())
+    in_range = [c for c in calls if date_from <= c["ts"].date() <= date_to]
+
+    if not in_range:
+        print(f"No calls found between {date_from} and {date_to}.")
+        return
+
+    by_model = defaultdict(lambda: {"cost": 0.0, "calls": 0})
+    by_component = defaultdict(float)
+    by_day = defaultdict(float)
+    total_cost = 0.0
+
+    for c in in_range:
+        comp = cost_components(c)
+        cost = sum(comp.values())
+        total_cost += cost
+        model = c["model"] or "unknown"
+        by_model[model]["cost"] += cost
+        by_model[model]["calls"] += 1
+        for k, v in comp.items():
+            by_component[k] += v
+        by_day[c["ts"].date().isoformat()] += cost
+
+    prefixes = [c["input"] + c["cacheRead"] + c["cacheWrite"]
+                for c in in_range if c["is_first"]]
+
+    print(f"openclaw-spend  {date_from} .. {date_to}")
+    print(f"  total spend:   ${total_cost:,.2f}  over {len(in_range)} calls")
+    print()
+    print("  by model:")
+    for model, d in sorted(by_model.items(), key=lambda kv: -kv[1]["cost"]):
+        pct = 100 * d["cost"] / total_cost if total_cost else 0
+        print(f"    {model:<22} ${d['cost']:>7.2f}  ({pct:4.1f}%)  {d['calls']} calls")
+    print()
+    print("  by cost component:")
+    for comp in ("input", "output", "cacheRead", "cacheWrite"):
+        v = by_component[comp]
+        pct = 100 * v / total_cost if total_cost else 0
+        print(f"    {comp:<12} ${v:>7.2f}  ({pct:4.1f}%)")
+    print()
+    print("  spend per day:")
+    for day in sorted(by_day):
+        print(f"    {day}   ${by_day[day]:>6.2f}")
+    print()
+    if prefixes:
+        print("  fixed prefix — first call of each session (input+cacheRead+cacheWrite):")
+        print(f"    min:    {min(prefixes):,} tok")
+        print(f"    median: {median(prefixes):,.0f} tok")
+        print(f"    max:    {max(prefixes):,} tok")
+    else:
+        print("  no session first-calls in range.")
+
+
+if __name__ == "__main__":
+    main()
