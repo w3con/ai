@@ -54,6 +54,7 @@ Evaluate the plan on three levels: the plan as a whole, then each phase individu
 - **Out-of-scope section present.** There is an explicit list of what must NOT be touched. "None" is acceptable only if the task is genuinely atomic with no temptation-of-scope.
 - **Verification or acceptance criteria at plan level.** There is something to check at the end — a behavior, an output, a file state — that confirms the whole task is done.
 - **Status field is updatable.** The plan has a `Status:` field in its header and each phase has a status column that can transition through `pending → in_progress → done / failed`.
+- **Registry ID and masterplan stage named.** The plan names a registry work ID in the form `PREFIX-number` (e.g. `MAT-7`) and states which stage of the project's `ai/MASTERPLAN.md` the work belongs to. Before judging this check, read that project's `ai/MASTERPLAN.md` (the file lives in the same repository as the plan) and confirm the named stage matches the current stage recorded there, or that the plan quotes Alex's explicit words authorising work outside the current stage. If the project has no `ai/MASTERPLAN.md` file at all, this check does not apply — skip it and say so in the verdict.
 
 ### Per-phase checks (apply to every phase)
 

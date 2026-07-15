@@ -50,7 +50,7 @@ Memory is the deliberate exception to "per-project": it is not kept under `<proj
 
 The knowledge base itself — a `kb/` Obsidian vault — is maintained in the thinking tool, not turn-by-turn here; touch it only when a plan calls for it. New projects are scaffolded from `templates/kb-skeleton/`.
 
-The slash-commands Alex drives me with are skill files under `skills/`, one folder per command, with their reference table in `ai_readme.md`: `/p` (write a phased plan to disk), `/s` (send the plan to the `scope` agent), `/q` (a question — answer, do not act), and `/f` (append a miss to `harness/fuckups.md`).
+Skills live under `skills/`, one folder per skill, with their reference table in `ai_readme.md`. The current set is `grill-with-docs`, `handoff`, and `web-search`; the experimental single-letter commands (`/p`, `/s`, `/q`, `/f`) were removed on 2026-07-02 (commit `da706ee`) as unused stubs — project-specific skills belong in that project's own `.claude/skills/`.
 
 ## Web search tool
 

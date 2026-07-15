@@ -3,6 +3,10 @@
 # THE PLAN HANDED TO THAT AGENT carries a scope-agent PASS verdict
 # (sentinel: <!-- scope:pass --> on a line of its own).
 #
+# If the plan's header carries the line "Type: feat", the gate additionally
+# requires a ready-agent PASS verdict (sentinel: <!-- ready:pass --> on a line
+# of its own). Plans without "Type: feat" in their header are unaffected.
+#
 # What IS gated:   Task / Agent spawns (build and implementation agents).
 # What is NOT gated: Bash commands of any kind. Read, Edit, Write, Grep, Glob,
 #                    and every other non-spawn tool.
@@ -86,6 +90,14 @@ DENY_NO_SENTINEL = (
     "Plans examined: {}"
 )
 
+DENY_FEAT_GATES = (
+    "Blocked by plan-gate: the plan named in the agent prompt has 'Type: feat' in its header, "
+    "which requires BOTH gate sentinels before a build agent may spawn — "
+    "'<!-- ready:pass -->' (ready agent) and '<!-- scope:pass -->' (scope agent). "
+    "Missing: {}. Run the missing agent(s) on this plan first; each writes its own sentinel "
+    "into the plan file on a genuine PASS. Plans examined: {}"
+)
+
 DENY_ERROR = "Blocked by plan-gate: gate error, failing closed."
 
 # --- parse stdin ---
@@ -123,8 +135,14 @@ if subagent_type in ALLOWLISTED_SUBTYPES or agent_name in {s.lower() for s in AL
     sys.exit(0)
 
 # --- find the plan(s) the agent was handed ---
-SENTINEL = "<!-- scope:pass -->"
+SENTINEL_SCOPE = "<!-- scope:pass -->"
+SENTINEL_READY = "<!-- ready:pass -->"
 MAX_PLAN_BYTES = 2 * 1024 * 1024   # a plan is prose; anything larger is not one
+
+# A plan's header carries "Type: feat" (optionally wrapped in markdown bold,
+# e.g. "**Type:** feat"); only the first HEADER_MAX_LINES lines count as header.
+TYPE_FEAT_RE = re.compile(r'^\s*\*{0,2}Type:\*{0,2}\s*feat\b', re.IGNORECASE)
+HEADER_MAX_LINES = 40
 
 # Any token that ends in .md. Deliberately permissive about the leading part so
 # that ~, $HOME-style absolutes, ./ and bare names all get picked up; each
@@ -153,19 +171,36 @@ def resolve(token, roots):
             out.append(os.path.normpath(os.path.join(root, "ai", "plans", t)))
     return out
 
-def has_sentinel(path):
+def is_type_feat(path):
     try:
-        if not os.path.isfile(path):
-            return False
         if os.path.getsize(path) > MAX_PLAN_BYTES:
             return False
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if line.strip() == SENTINEL:
+            for i, line in enumerate(f):
+                if i >= HEADER_MAX_LINES:
+                    break
+                if TYPE_FEAT_RE.match(line):
                     return True
     except OSError:
         return False
     return False
+
+def found_sentinels(path):
+    """Which of {'scope', 'ready'} sentinels are present in this plan file."""
+    found = set()
+    try:
+        if os.path.getsize(path) > MAX_PLAN_BYTES:
+            return found
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.strip()
+                if s == SENTINEL_SCOPE:
+                    found.add("scope")
+                elif s == SENTINEL_READY:
+                    found.add("ready")
+    except OSError:
+        pass
+    return found
 
 try:
     roots = [r for r in search_roots.split(":") if r]
@@ -183,14 +218,21 @@ try:
         sys.exit(0)
 
     existing = []       # named .md files that actually exist — reported on denial
+    best = None         # (path, is_feat, missing_gates) for the most informative denial
     for token in tokens:
         for path in resolve(token, roots):
             if os.path.isfile(path):
                 if path not in existing:
                     existing.append(path)
-                if has_sentinel(path):
+                feat = is_type_feat(path)
+                required = ["scope", "ready"] if feat else ["scope"]
+                found = found_sentinels(path)
+                missing = [g for g in required if g not in found]
+                if not missing:
                     print(ALLOW_JSON)
                     sys.exit(0)
+                if best is None:
+                    best = (path, feat, missing)
 
     if not existing:
         print(deny_json(DENY_NO_PLAN_NAMED))
@@ -199,7 +241,12 @@ try:
     shown = ", ".join(existing[:5])
     if len(existing) > 5:
         shown += ", … (+%d more)" % (len(existing) - 5)
-    print(deny_json(DENY_NO_SENTINEL.format(shown)))
+
+    _, best_feat, best_missing = best
+    if best_feat:
+        print(deny_json(DENY_FEAT_GATES.format(", ".join(best_missing), shown)))
+    else:
+        print(deny_json(DENY_NO_SENTINEL.format(shown)))
     sys.exit(0)
 
 except Exception:

@@ -21,11 +21,15 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Maintainability never sacrificed](feedback-maintainability-never-sacrificed.md) — Alex's standing order: clarity beats everything, contest even his own instructions when they would trade it away
 - [Check the checker](feedback-check-the-checker.md) — read a gate's criteria before writing against it, prove a safeguard actually fires before trusting it, and never route around a denial by switching tool
 - [Verify the executor's model](feedback-verify-executor-model.md) — resuming a subagent silently moves it onto the session model; read the transcript's model field, never ask the agent
+- [Pace with visible progress](feedback-pacing-visible-progress.md) — don't burn 8 minutes in silent thinking then emit a one-liner; act in short visible steps, don't re-plan from scratch each async message
 - [Critic and research sub-agents](feedback_reviewer_agent.md) — whether you may spawn one at all: only on Alex's explicit word, never automatically
 - [Reusable tooling](feedback_reusable_tooling.md) — commit the helper once as a documented script; a script decides what happens, a skill decides when to call it
 - [Stage exactly your own files](feedback_git_staging.md) — commit by naming paths; a blind `git add -A` sweeps in other sessions' work
+- [No hard line-wraps in prose](feedback-no-hard-line-wraps.md) — paragraph = one physical line; Alex's viewers render wrap points as broken lines; put the rule into executor prompts too
+- [Tool files carry bare rules](feedback-tool-files-bare-rules.md) — agent/skill/hook files state what to do; no provenance citations, no rationale essays, no what-it-does-NOT-do paragraphs
 - [Record only confirmed decisions](record-only-confirmed-decisions.md) — proposals stay in chat; nothing lands in a durable record until Alex confirms it
 - [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
 - [The AI config repo](reference_ai_config_repo.md) — the versioned source of truth is `~/Dev/ai`; commit configuration there, never straight into `~/.claude`
 - [Reproduce the design, don't improvise](design-reproduce-not-improvise.md) — Validité website only: match the design files exactly, interview to full clarity first
 - [Enter the knowledge base through its index](kb-entry-via-index.md) — Validité knowledge base only: start at `kb/_index.md`, never a blind grep
+- [Parallel executors in a shared tree](feedback-parallel-executors-shared-tree.md) — overlap only across disjoint toolchains (frontend+backend), never two same-language gates; else give each a worktree
