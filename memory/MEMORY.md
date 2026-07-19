@@ -36,3 +36,4 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Parallel executors in a shared tree](feedback-parallel-executors-shared-tree.md) — overlap only across disjoint toolchains (frontend+backend), never two same-language gates; else give each a worktree
 - [Browser-verify: rAF sleeps in a background tab](browser-verify-raf-background-tab.md) — canvas/preview renders (and blob-download checks) need the tab foregrounded via a screenshot
 - [Living plan-journal, verify-first](feedback-living-plan-journal.md) — discuss and re-check against live systems before acting; keep a KB roadmap+journal per effort and update it as understanding grows
+- [Pilier's internal KB is a private repo](feedback_pilier_private_kb.md) — Pilier only: the blockchain repo is public, so internal reasoning/plans/decisions live in the private `cloud` repo (`pilier-org/cloud`) — read it for context and write internal docs there, never into `blockchain/ai/`
