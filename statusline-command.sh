@@ -28,11 +28,12 @@ WHITE=$'\033[37m'
 
 pct_color() {
   local n=$(printf '%.0f' "${1:-0}")
-  if   [ "$n" -ge 80 ]; then printf $'\033[35m'
-  elif [ "$n" -ge 60 ]; then printf $'\033[31m'
-  elif [ "$n" -ge 40 ]; then printf $'\033[38;5;208m'
-  elif [ "$n" -ge 20 ]; then printf $'\033[33m'
-  else printf $'\033[90m'
+  if   [ "$n" -ge 90 ]; then printf $'\033[35m'   # 90-100%: purple
+  elif [ "$n" -ge 75 ]; then printf $'\033[31m'   # 75-89%:  red
+  elif [ "$n" -ge 50 ]; then printf $'\033[38;5;208m' # 50-74%: orange
+  elif [ "$n" -ge 40 ]; then printf $'\033[33m'   # 40-49%:  yellow
+  elif [ "$n" -ge 20 ]; then printf $'\033[37m'   # 20-39%:  white
+  else printf $'\033[90m'                          # 0-19%:   gray
   fi
 }
 

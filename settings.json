@@ -6,7 +6,7 @@
       "Bash(/Users/laptop/Dev/ai/bin/websearch:*)"
     ]
   },
-  "model": "claude-fable-5[1m]",
+  "model": "sonnet",
   "hooks": {
     "PreToolUse": [
       {
