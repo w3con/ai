@@ -20,7 +20,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 
 - [Maintainability never sacrificed](feedback-maintainability-never-sacrificed.md) — Alex's standing order: clarity beats everything, contest even his own instructions when they would trade it away
 - [Check the checker](feedback-check-the-checker.md) — read a gate's criteria before writing against it, prove a safeguard actually fires before trusting it, and never route around a denial by switching tool
-- [Verify the executor's model](feedback-verify-executor-model.md) — resuming a subagent silently moves it onto the session model; read the transcript's model field, never ask the agent
+- [Verify the executor's model](feedback-verify-executor-model.md) — reuse across phases is permitted again since the vendor fixed the model-drift defect on 2026-08-01, but an agent's self-report about its own model still proves nothing; read the transcript's model field when it matters, never ask the agent
 - [Pace with visible progress](feedback-pacing-visible-progress.md) — don't burn 8 minutes in silent thinking then emit a one-liner; act in short visible steps, don't re-plan from scratch each async message
 - [Critic and research sub-agents](feedback_reviewer_agent.md) — whether you may spawn one at all: only on Alex's explicit word, never automatically
 - [Reusable tooling](feedback_reusable_tooling.md) — commit the helper once as a documented script; a script decides what happens, a skill decides when to call it
@@ -37,3 +37,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Browser-verify: rAF sleeps in a background tab](browser-verify-raf-background-tab.md) — canvas/preview renders (and blob-download checks) need the tab foregrounded via a screenshot
 - [Living plan-journal, verify-first](feedback-living-plan-journal.md) — discuss and re-check against live systems before acting; keep a KB roadmap+journal per effort and update it as understanding grows
 - [Pilier's internal KB is a private repo](feedback_pilier_private_kb.md) — Pilier only: the blockchain repo is public, so internal reasoning/plans/decisions live in the private `cloud` repo (`pilier-org/cloud`) — read it for context and write internal docs there, never into `blockchain/ai/`
+- [No em-dashes in outgoing letters](feedback-no-em-dash-in-letters.md) — letters to real people must read as Alex's hand; rewrite with commas, colons, parentheses instead of the machine-tell dash
+- [Warmth isn't a commitment signal](feedback-warmth-not-a-commitment-signal.md) — a pleasant, enthusiastic-sounding call means nothing on its own; log names/dates/documents, not tone, and don't pin it on one contact's character
+- [No ciphers in chat](feedback-no-ciphers-in-chat.md) — write to Alex in plain words, never registry IDs/plan tags (MAT-4, PLT-6, R2, CF-24) as if they were common coin; explaining one once doesn't stop it being a cipher for the rest of the message, use the full phrase every time
+- [App: no real data yet, and DB access exists](project_app_no_real_data_yet.md) — `~/Dev/app` only: only test/demo records exist so far, and the coordinator CAN reach Mongo directly via docker exec — never repeat an old plan's "no access" claim untested
