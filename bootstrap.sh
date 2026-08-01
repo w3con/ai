@@ -160,6 +160,107 @@ link_project_memories() {
 
 link_project_memories
 
+# ---------------------------------------------------------------------------
+# VALIDITE_VAULT_ROOT — where the business knowledge base lives on THIS machine
+#
+# The business vault is a separate git repository (git@github.com:validite-eu/org.git)
+# checked out at a different absolute path on each of Alex's two machines, and
+# bin/card-context in the app repo needs to find it. Rather than guess from the
+# machine's name — which changes whenever the machine is renamed or reinstalled —
+# this looks for the vault by its own contents: a directory is the vault when it
+# holds both kb/CustDev and kb/Strategy. That signature also tells it apart from
+# the app repository, which has its own kb/ but none of those collections.
+#
+# The discovered path is exported from the shell profile, because Claude Code
+# initializes its shell from the profile and that is what puts the variable in
+# front of every later session. The block is delimited by sentinels so re-running
+# bootstrap replaces it in place instead of appending a second copy.
+# ---------------------------------------------------------------------------
+VAULT_MARKERS=("kb/CustDev" "kb/Strategy")
+VAULT_BEGIN="# >>> validite vault root (managed by bootstrap.sh — do not edit by hand) >>>"
+VAULT_END="# <<< validite vault root <<<"
+
+is_vault() {
+  local dir="$1" marker
+  [[ -n "$dir" && -d "$dir" ]] || return 1
+  for marker in "${VAULT_MARKERS[@]}"; do
+    [[ -d "$dir/$marker" ]] || return 1
+  done
+  return 0
+}
+
+find_vault() {
+  local candidates=(
+    "${VALIDITE_VAULT_ROOT:-}"
+    "$HOME/Documents/Validite"
+    "$HOME/Documents/Validité"
+    "$HOME/Dev/Validite"
+    "$HOME/Dev/Validité"
+    "$HOME/Validite"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if is_vault "$c"; then printf '%s\n' "$c"; return 0; fi
+  done
+
+  # Nothing at a known address: look for the signature itself, shallowly, in the
+  # few places a checkout plausibly lives. Depth 3 covers $HOME/<dir>/kb/CustDev.
+  local base hit dir
+  for base in "$HOME/Documents" "$HOME/Dev" "$HOME"; do
+    [[ -d "$base" ]] || continue
+    while IFS= read -r hit; do
+      dir="$(dirname "$(dirname "$hit")")"
+      if is_vault "$dir"; then printf '%s\n' "$dir"; return 0; fi
+    done < <(find "$base" -maxdepth 3 -type d -path '*/kb/CustDev' 2>/dev/null)
+  done
+  return 1
+}
+
+write_vault_export() {
+  local vault="$1"
+  local profile="$HOME/.zshrc"
+  local desired="${VAULT_BEGIN}
+export VALIDITE_VAULT_ROOT=\"${vault}\"
+${VAULT_END}"
+
+  if [[ -f "$profile" ]] && grep -qF "$VAULT_BEGIN" "$profile"; then
+    local current
+    current="$(awk -v b="$VAULT_BEGIN" -v e="$VAULT_END" '$0==b{f=1} f{print} $0==e{f=0}' "$profile")"
+    if [[ "$current" == "$desired" ]]; then
+      echo "[ok]     $profile already exports VALIDITE_VAULT_ROOT=$vault"
+      return
+    fi
+    if [[ $DRY_RUN -eq 0 ]]; then
+      local tmp
+      tmp="$(mktemp)"
+      awk -v b="$VAULT_BEGIN" -v e="$VAULT_END" '$0==b{f=1;next} $0==e{f=0;next} !f{print}' "$profile" > "$tmp"
+      printf '%s\n' "$desired" >> "$tmp"
+      mv "$tmp" "$profile"
+      echo "[update] $profile now exports VALIDITE_VAULT_ROOT=$vault"
+    else
+      echo "[dry-run] Would replace the existing block in $profile with VALIDITE_VAULT_ROOT=$vault"
+    fi
+    return
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    printf '\n%s\n' "$desired" >> "$profile"
+    echo "[create] $profile now exports VALIDITE_VAULT_ROOT=$vault"
+  else
+    echo "[dry-run] Would append to $profile: VALIDITE_VAULT_ROOT=$vault"
+  fi
+}
+
+echo ""
+if VAULT_PATH="$(find_vault)"; then
+  write_vault_export "$VAULT_PATH"
+else
+  echo "WARNING: the Validité business vault was not found on this machine." >&2
+  echo "         Looked for a directory holding both kb/CustDev and kb/Strategy under" >&2
+  echo "         ~/Documents, ~/Dev and ~ (depth 3). Clone git@github.com:validite-eu/org.git" >&2
+  echo "         and re-run this script, or export VALIDITE_VAULT_ROOT yourself." >&2
+fi
+
 echo ""
 if [[ $DRY_RUN -eq 0 ]]; then
   echo "Done. Verify with: readlink ~/.claude/{CLAUDE.md,memory,agents,hooks,skills,statusline-command.sh,settings.json}"
