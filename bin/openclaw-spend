@@ -32,7 +32,7 @@ import subprocess
 import sys
 from collections import defaultdict
 
-SSH_HOST = "valios"
+SSH_HOST = "validios"
 SESSIONS_DIR = "/home/openclaw/.openclaw/agents/main/sessions"
 
 # USD per 1M tokens. Correct here if Anthropic's published rates change.
