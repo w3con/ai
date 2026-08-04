@@ -1,0 +1,59 @@
+# Decision log — does a `PreToolUse` hook reach a subagent's tool calls
+
+## 2026-08-04 — Measured: yes, a hook fires on a subagent's own tool call, its refusal actually stops that call, and a hook can reliably tell a subagent's call from the coordinator's own by checking for the `agent_id` field
+
+**Measured by:** the HRN-46 executor, an ordinary subagent spawned by the coordinator inside the `app` repository's session on 2026-08-04, using its own Bash and Read tool calls as the test subject rather than building anything new. The full task card is `ai/harness/tasks/HRN-46_a-hook-fires-on-a-subagent-tool-call-or-it-does-not-and-this-is-measured-before-anything-is-built-on-it.md` in that repository, and the verbatim gate evidence quoted below is duplicated there in the card's own `## Gate evidence` section.
+
+**Question one: does a `PreToolUse` hook fire on a tool call made by a subagent at all, or only on the coordinator's own calls?** It fires. Two long-installed hooks were provoked from inside the subagent's own Bash tool, each with a command chosen to be harmless even if it had been allowed to run. The first targeted `settings-write-guard`, a hook installed since 2026-07-10 and therefore not an artefact of anything set up for this measurement, using a command that names a `settings.json` path which does not exist:
+
+```
+$ rm /Users/laptop/.claude/jobs/59f29fa0/tmp/settings.json
+```
+
+```
+Blocked by settings-write-guard: this Bash command writes to a settings.json. Settings files must be edited with the Edit or Write tool, never through the shell — otherwise a denial on those tools can be sidestepped by switching tool. If Edit/Write is itself denied for this file, that denial IS the answer: stop and ask Alex rather than routing around it. Reading the file is not blocked.
+```
+
+The second targeted a throwaway probe hook the coordinator had installed for this measurement only, `hrn46-probe.sh`, registered under the matcher `Bash|Read|Edit|Write|Grep|Glob|Task|Agent` and set to deny any Bash command containing the literal token `HRN46-DENY-ME`:
+
+```
+$ echo HRN46-DENY-ME
+```
+
+```
+Blocked by hrn46-probe: the HRN46-DENY-ME token was present. This is the deliberate refusal HRN-46 provokes.
+```
+
+Both hooks produced their refusal message in response to a call made by the subagent itself, not by the coordinator. The answer to question one is yes, without qualification.
+
+**Question two: does the refusal actually stop the call, or does it only annotate a call that runs anyway?** It stops the call. In both cases above there is no code path in this harness by which a Bash tool call returns a "Blocked by …" error and also executes the command; the error is returned in place of execution. This is directly observable in the first case because the target path names a file that did not exist before the call and still does not exist after it, so nothing else could have removed it. It is observable in the second case because the literal text `HRN46-DENY-ME` never appeared anywhere in the tool's returned output — only the blocking error did, where a successful `echo` would have printed the token back. The answer to question two is yes: a hook's refusal is a real refusal, not a note attached to a call that still happened.
+
+**Question three: can a hook reliably tell a subagent's call from the coordinator's own, and by which field?** Yes, and the field is `agent_id`. The coordinator had installed the same probe hook to append one JSON line per tool call, from any caller, to `/Users/laptop/.claude/jobs/59f29fa0/tmp/hrn46-probe.log`. Reading that log showed that every line logged for a subagent's own tool call carries an `agent_id` key and an `agent_type` key, and every line logged for the coordinator's own calls — including the coordinator's own call to the `Agent` tool that spawns a subagent in the first place — carries neither. Three lines make the contrast directly. This is the coordinator's own line for the `Agent` tool call that spawned the HRN-46 subagent, with no `agent_id` present because at that instant the caller is still the coordinator:
+
+```
+{"session_id": "59f29fa0-de84-480d-b483-64555a2af808", "transcript_path": "/Users/laptop/.claude/projects/-Users-laptop-Dev-app/59f29fa0-de84-480d-b483-64555a2af808.jsonl", "cwd": "/Users/laptop/Dev/app", "prompt_id": "5a1bd8bd-b09c-4148-ba9b-73d0fb0b6441", "permission_mode": "acceptEdits", "effort": {"level": "high"}, "hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_use_id": "toolu_01TTqfnjNdWn9bQCfHFkZL4Y", "_at": "2026-08-04T14:19:14", "_pid_ppid": [59364, 22878], "tool_input_head": {"description": "HRN-46 hook measurement", "prompt": "You are the executor for one task card. You implement exactly what the card says, and nothing else.\n\n1. Your brief is th", "subagent_type": "general-purpose", "model": "sonnet"}}
+```
+
+This is the very next line, the newly spawned subagent's own first tool call, a `Read` of its own card a few seconds later, carrying `"agent_id": "a7a079becca4583fa"` and `"agent_type": "general-purpose"`:
+
+```
+{"session_id": "59f29fa0-de84-480d-b483-64555a2af808", "transcript_path": "/Users/laptop/.claude/projects/-Users-laptop-Dev-app/59f29fa0-de84-480d-b483-64555a2af808.jsonl", "cwd": "/Users/laptop/Dev/app", "prompt_id": "5a1bd8bd-b09c-4148-ba9b-73d0fb0b6441", "permission_mode": "acceptEdits", "agent_id": "a7a079becca4583fa", "agent_type": "general-purpose", "effort": {"level": "high"}, "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_use_id": "toolu_01EXi1PqCXaRtbRHW561H9kR", "_at": "2026-08-04T14:19:18", "_pid_ppid": [59484, 22878], "tool_input_head": {"file_path": "/Users/laptop/Dev/app/ai/harness/tasks/HRN-46_a-hook-fires-on-a-subagent-tool-call-or-it-does-not-and-this-is-measured-b"}}
+```
+
+A second subagent, spawned moments later by the coordinator to work the unrelated card HRN-50 concurrently in the same session, carries a different value, `"aabdbf667a6f549f8"`, on its own lines:
+
+```
+{"session_id": "59f29fa0-de84-480d-b483-64555a2af808", "transcript_path": "/Users/laptop/.claude/projects/-Users-laptop-Dev-app/59f29fa0-de84-480d-b483-64555a2af808.jsonl", "cwd": "/Users/laptop/Dev/app", "prompt_id": "5a1bd8bd-b09c-4148-ba9b-73d0fb0b6441", "permission_mode": "acceptEdits", "agent_id": "aabdbf667a6f549f8", "agent_type": "general-purpose", "effort": {"level": "high"}, "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_use_id": "toolu_01XQUHYHN7tAnkeUR3Ph57G8", "_at": "2026-08-04T14:19:44", "_pid_ppid": [59622, 22878], "tool_input_head": {"file_path": "/Users/laptop/Dev/app/bin/card-context"}}
+```
+
+Four other candidate fields were checked and rejected as unable to distinguish anything: `session_id`, `transcript_path`, `cwd` and `prompt_id` are identical across the coordinator's lines and both subagents' lines throughout, because they identify the session and the coordinator's own turn rather than the process making the call; and `_pid_ppid` changes on every single line, coordinator included, with the `ppid` half of it staying at `22878` across coordinator and both subagents alike, so it separates nothing either. The answer to question three is yes, and the field is `agent_id`: present and non-empty means a subagent made the call, absent means the coordinator did, and the specific value tells one concurrently-running subagent apart from another.
+
+**What this means for the three cards waiting on this measurement, and for the ceiling mechanism they were both written to protect.**
+
+HRN-47 (an executor is refused every further tool call once it reaches the ceiling written on its card) rests on the same backbone just confirmed — a hook fires on the subagent's own calls, its refusal stops them, and `agent_id` tells which specific subagent is calling — and none of that stands in the way of building it. Two further pieces that HRN-47 needs were not tested here and remain open. First, whether a hook script, which is invoked fresh and stateless on every single tool call, can maintain a running count of how many calls a given `agent_id` has made so far: the probe hook used in this measurement already demonstrates the general shape of the answer, because it appends one line per call to a shared log file that any later invocation of the same hook can re-read and count, but no test in this card actually counted matching lines and compared the count to a limit. Second, and less answered by anything measured here, whether a hook can discover which specific task card a given `agent_id` is working, so it can look up the ceiling number written on that card rather than applying one fixed number to every executor: the coordinator's own `Agent`-call line does carry the card's identity in its `description` field ("HRN-46 hook measurement" was the value seen for this session), but that line is logged before the spawned subagent's `agent_id` even exists, and nothing observed in this measurement ties that description back to the `agent_id` assigned moments later. HRN-47 is buildable as designed on the mechanism measured here; the per-`agent_id` call-counting and the `agent_id`-to-card lookup are additional pieces its own build will need to establish, not contradicted by anything found in this card but also not proven by it.
+
+HRN-48 (an executor cannot run the whole test suite, only the single test it is writing) is buildable as designed on exactly the mechanism measured here, with no gap left open. It is the same shape of hook as the two provoked in question one and two above: a `PreToolUse` hook matched on `Bash` that inspects the command text for a pattern — here, something recognisable as a whole-suite invocation such as `go test ./...`, `npm test`, or the project's own `scripts/test.sh` run in full mode, in place of `settings-write-guard`'s check for a `settings.json` path or the probe's check for the literal token `HRN46-DENY-ME` — and refuses the call outright when it matches. Both of those were shown in this measurement to fire on a subagent's own call and to actually stop it. The only work HRN-48 adds beyond the mechanism itself is deciding the exact set of command patterns that count as "the whole suite" for this codebase's several toolchains, which is a design detail, not an open question about whether the mechanism reaches subagents.
+
+HRN-49 (an executor that has not touched its card in twenty tool calls is refused until it does) needs the same backbone confirmed here plus the same two open pieces named for HRN-47: a persistent per-`agent_id` count of tool calls, this time to detect twenty calls without an Edit or Write to a particular file rather than to detect a ceiling being crossed, and a way to know which card file counts as "its own card" for a given `agent_id` so the hook can check whether any of the last twenty calls touched that specific file. Everything this measurement established about a hook reaching, identifying, and stopping a subagent's call applies unchanged; the state-keeping and the card-association are, again, not tested here and are the concrete next things to establish before building it.
+
+Taken together, the ceiling mechanism referred to in HRN-46's own card — meaning HRN-47 itself, the rate limiter the other cards were written to make possible — is not blocked by anything found in this measurement. The part of it proven here is the part that was actually in doubt: that a `PreToolUse` hook reaches a subagent's tool calls at all, that its refusal is real, and that it can single out one executor from the coordinator and from every other concurrently-running executor. The part left open is ordinary implementation work — persisting a count across stateless hook invocations, and associating a running subagent with the one card it is executing — rather than a question about whether the mechanism this whole card was built to test actually exists.

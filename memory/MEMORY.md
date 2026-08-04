@@ -22,6 +22,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Check the checker](feedback-check-the-checker.md) — read a gate's criteria before writing against it, prove a safeguard actually fires before trusting it, and never route around a denial by switching tool
 - [Verify the executor's model](feedback-verify-executor-model.md) — reuse across phases is permitted again since the vendor fixed the model-drift defect on 2026-08-01, but an agent's self-report about its own model still proves nothing; read the transcript's model field when it matters, never ask the agent
 - [Pace with visible progress](feedback-pacing-visible-progress.md) — don't burn 8 minutes in silent thinking then emit a one-liner; act in short visible steps, don't re-plan from scratch each async message
+- [Caffeinate before long runs](feedback-caffeinate-before-long-runs.md) — start caffeinate when you hand work over, not after the first agent dies; a sleeping Mac kills every executor at once
 - [Critic and research sub-agents](feedback_reviewer_agent.md) — whether you may spawn one at all: only on Alex's explicit word, never automatically
 - [Reusable tooling](feedback_reusable_tooling.md) — commit the helper once as a documented script; a script decides what happens, a skill decides when to call it
 - [Stage exactly your own files](feedback_git_staging.md) — commit by naming paths; a blind `git add -A` sweeps in other sessions' work
@@ -30,14 +31,17 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Tool files carry bare rules](feedback-tool-files-bare-rules.md) — agent/skill/hook files state what to do; no provenance citations, no rationale essays, no what-it-does-NOT-do paragraphs
 - [Record only confirmed decisions](record-only-confirmed-decisions.md) — proposals stay in chat; nothing lands in a durable record until Alex confirms it
 - [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
+- [Never size work in human hours](feedback-no-human-hour-estimates.md) — agents build everything here; argue about context, file collisions and what's on the path, never "it's sixty hours" or "it's too big"
 - [The AI config repo](reference_ai_config_repo.md) — the versioned source of truth is `~/Dev/ai`; commit configuration there, never straight into `~/.claude`
 - [Reproduce the design, don't improvise](design-reproduce-not-improvise.md) — Validité website only: match the design files exactly, interview to full clarity first
 - [Enter the knowledge base through its index](kb-entry-via-index.md) — Validité knowledge base only: start at `kb/_index.md`, never a blind grep
+- [Size a card to one executor](feedback-executor-card-size.md) — one card ≈ one phase and one toolchain; swap agents at a phase boundary, never mid-phase, and never on the last checkpoint where the check output still lives only in the agent's context
 - [Parallel executors in a shared tree](feedback-parallel-executors-shared-tree.md) — overlap only across disjoint toolchains (frontend+backend), never two same-language gates; else give each a worktree
 - [Browser-verify: rAF sleeps in a background tab](browser-verify-raf-background-tab.md) — canvas/preview renders (and blob-download checks) need the tab foregrounded via a screenshot
 - [Living plan-journal, verify-first](feedback-living-plan-journal.md) — discuss and re-check against live systems before acting; keep a KB roadmap+journal per effort and update it as understanding grows
 - [Pilier's internal KB is a private repo](feedback_pilier_private_kb.md) — Pilier only: the blockchain repo is public, so internal reasoning/plans/decisions live in the private `cloud` repo (`pilier-org/cloud`) — read it for context and write internal docs there, never into `blockchain/ai/`
 - [No em-dashes in outgoing letters](feedback-no-em-dash-in-letters.md) — letters to real people must read as Alex's hand; rewrite with commas, colons, parentheses instead of the machine-tell dash
 - [Warmth isn't a commitment signal](feedback-warmth-not-a-commitment-signal.md) — a pleasant, enthusiastic-sounding call means nothing on its own; log names/dates/documents, not tone, and don't pin it on one contact's character
+- [Name roles, not people](feedback-name-roles-not-people.md) — process documents define owner/coordinator/executor/reviewer in a short glossary and never say "Alex"
 - [No ciphers in chat](feedback-no-ciphers-in-chat.md) — write to Alex in plain words, never registry IDs/plan tags (MAT-4, PLT-6, R2, CF-24) as if they were common coin; explaining one once doesn't stop it being a cipher for the rest of the message, use the full phrase every time
 - [App: no real data yet, and DB access exists](project_app_no_real_data_yet.md) — `~/Dev/app` only: only test/demo records exist so far, and the coordinator CAN reach Mongo directly via docker exec — never repeat an old plan's "no access" claim untested
