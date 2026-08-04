@@ -6,7 +6,7 @@
       "Bash(/Users/laptop/Dev/ai/bin/websearch:*)"
     ]
   },
-  "model": "sonnet",
+  "model": "opus",
   "hooks": {
     "PreToolUse": [
       {
@@ -53,15 +53,11 @@
     "command": "bash ~/.claude/statusline-command.sh"
   },
   "enabledPlugins": {
-    "stitch-build@google-labs-code-stitch-skills": true,
-    "stitch-design@google-labs-code-stitch-skills": true,
-    "stitch-utilities@google-labs-code-stitch-skills": true,
     "frontend-design@claude-plugins-official": true,
-    "skill-creator@claude-plugins-official": true,
-    "ralph-loop@claude-plugins-official": true,
-    "rust-analyzer-lsp@claude-plugins-official": true
+    "skill-creator@claude-plugins-official": false,
+    "ralph-loop@claude-plugins-official": false
   },
   "theme": "auto",
-  "preferredNotifChannel": "terminal_bell",
+  "preferredNotifChannel": "kitty",
   "skipAutoPermissionPrompt": true
 }
