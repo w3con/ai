@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""plan-check — validate a plain plan card and sign it for plan-gate.
+
+Usage:  plan-check <card.md> [--check]
+
+Writes the line `<!-- card:ready -->` at the end of the card when every rule below
+holds, and removes any marker already there when one does not. `--check` reports
+without touching the file.
+
+For cards that carry a registry identifier and link to requirement, feature and
+test pages, use `card-context` instead; this checks the plain shape used by
+projects with no task-card registry.
+
+Rules, all of which must hold:
+  1. A `**Status:**` line exists, says the card is approved or signed off, and
+     does not still say it is awaiting approval.
+  2. A section whose heading names what must not be touched exists and is not empty.
+  3. A section whose heading names the acceptance criteria exists and is not empty.
+  4. A `## Checkpoints` section exists and holds at least one checkpoint.
+  5. Every checkpoint line reads `- [ ] N.n — text` or `- [x] N.n — text`.
+  6. Every filesystem path the card names in backticks resolves to a real file.
+
+Paths are resolved against, in order: the card's own directory, the repository
+root the card declares in a `**Repository the work happens in:** ` line, and the
+root of the git repository holding the card. A leading `~` is expanded.
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+MARKER = "<!-- card:ready -->"
+
+HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*$")
+LIST_ITEM = re.compile(r"^\s*[-*]\s")
+CHECKPOINT = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+\d+\.\d+\s+[—–-]\s+\S")
+STATUS = re.compile(r"^\*\*Status:\*\*\s*(.+)$", re.MULTILINE)
+DECLARED_ROOT = re.compile(r"\*\*Repository the work happens in:\*\*\s*`([^`]+)`")
+BACKTICKED = re.compile(r"`([^`\n]+)`")
+
+# A backticked token is treated as a path only when it contains a directory
+# separator and ends in one of these. Extension-less tokens are command names,
+# package names, or route stubs, and are not checked.
+PATH_SUFFIXES = (
+    ".md", ".ts", ".tsx", ".js", ".mjs", ".astro", ".go", ".py", ".sh",
+    ".json", ".yaml", ".yml", ".css", ".html", ".toml", ".rs", ".sql",
+)
+
+
+def git_root(start):
+    try:
+        out = subprocess.run(
+            ["git", "-C", start, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def sections(lines):
+    """Map heading text (lowercased) to the list of body lines beneath it."""
+    found, current, body = {}, None, []
+    for line in lines:
+        m = HEADING.match(line)
+        if m:
+            if current is not None:
+                found[current] = body
+            current, body = m.group(1).strip().lower(), []
+        elif current is not None:
+            body.append(line)
+    if current is not None:
+        found[current] = body
+    return found
+
+
+def find_section(found, *words):
+    """The body of the first section whose heading contains all the given words."""
+    for heading, body in found.items():
+        if all(w in heading for w in words):
+            return heading, body
+    return None, None
+
+
+def non_empty(body):
+    return any(line.strip() for line in (body or []))
+
+
+def candidate_paths(text):
+    seen, out = set(), []
+    for token in BACKTICKED.findall(text):
+        token = token.strip()
+        if "/" not in token or " " in token:
+            continue
+        if not token.endswith(PATH_SUFFIXES):
+            continue
+        if token.startswith(("http://", "https://")):
+            continue
+        if token not in seen:
+            seen.add(token)
+            out.append(token)
+    return out
+
+
+def resolve(token, roots):
+    expanded = os.path.expanduser(token)
+    if os.path.isabs(expanded):
+        return os.path.exists(expanded)
+    return any(os.path.exists(os.path.join(root, expanded)) for root in roots)
+
+
+def validate(card_path, text):
+    lines = text.splitlines()
+    found = sections(lines)
+    problems = []
+
+    status = STATUS.search(text)
+    if not status:
+        problems.append("no `**Status:**` line — the card must record its approval state")
+    else:
+        value = status.group(1).lower()
+        if "awaiting" in value or "not signed off" in value:
+            problems.append(f"the status line still says the card is unapproved: {status.group(1).strip()}")
+        elif not any(w in value for w in ("approved", "signed off", "approuv")):
+            problems.append(f"the status line does not record an approval: {status.group(1).strip()}")
+
+    heading, body = find_section(found, "must not", "touched")
+    if heading is None:
+        problems.append("no section saying what must not be touched")
+    elif not non_empty(body):
+        problems.append(f"the section '{heading}' is empty")
+
+    heading, body = find_section(found, "acceptance", "criteria")
+    if heading is None:
+        problems.append("no acceptance criteria section")
+    elif not non_empty(body):
+        problems.append(f"the section '{heading}' is empty")
+
+    heading, body = find_section(found, "checkpoints")
+    if heading is None:
+        problems.append("no checkpoints section")
+    else:
+        items = [line for line in body if LIST_ITEM.match(line)]
+        if not items:
+            problems.append("the checkpoints section holds no checkpoints")
+        for item in items:
+            if not CHECKPOINT.match(item):
+                problems.append(f"malformed checkpoint, expected `- [ ] N.n — text`: {item.strip()}")
+
+    roots = [os.path.dirname(os.path.abspath(card_path))]
+    declared = DECLARED_ROOT.search(text)
+    if declared:
+        roots.append(os.path.expanduser(declared.group(1).strip()))
+    root = git_root(roots[0])
+    if root:
+        roots.append(root)
+
+    for token in candidate_paths(text):
+        if not resolve(token, roots):
+            problems.append(f"path named in the card does not resolve: {token}")
+
+    return problems
+
+
+def write_marker(card_path, text, passed):
+    stripped = "\n".join(
+        line for line in text.splitlines() if line.strip() != MARKER
+    ).rstrip("\n")
+    new = stripped + "\n" + (f"\n{MARKER}\n" if passed else "")
+    if new != text:
+        with open(card_path, "w", encoding="utf-8") as fh:
+            fh.write(new)
+        return True
+    return False
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "--check"]
+    check_only = "--check" in sys.argv[1:]
+    if len(args) != 1:
+        print(__doc__.strip().splitlines()[2], file=sys.stderr)
+        return 2
+
+    card_path = os.path.expanduser(args[0])
+    if not card_path.endswith(".md") or not os.path.isfile(card_path):
+        print(f"plan-check: not a markdown file: {card_path}", file=sys.stderr)
+        return 2
+
+    with open(card_path, encoding="utf-8") as fh:
+        text = fh.read()
+
+    problems = validate(card_path, text)
+
+    if problems:
+        print(f"plan-check: {card_path} is not ready, {len(problems)} problem(s):")
+        for p in problems:
+            print(f"  - {p}")
+        if not check_only and write_marker(card_path, text, False):
+            print("  (an existing pass marker was removed)")
+        return 1
+
+    if check_only:
+        print(f"plan-check: {card_path} would pass")
+        return 0
+
+    write_marker(card_path, text, True)
+    print(f"plan-check: {card_path} passes; {MARKER} written")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
