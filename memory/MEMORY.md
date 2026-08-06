@@ -33,6 +33,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
 - [Decide technical details yourself](feedback-decide-technical-details-yourself.md) — never hand Alex a choice with no product consequence; choose on the merits, act, and tell him afterwards
 - [Never size work in human hours](feedback-no-human-hour-estimates.md) — agents build everything here; argue about context, file collisions and what's on the path, never "it's sixty hours" or "it's too big"
+- [French names stay in French](feedback-french-names-in-french.md) — never transliterate `Camille Ernould` or `Tourcoing` into Cyrillic in a Russian reply; he has to type the real spelling back into mail and calendar
 - [The AI config repo](reference_ai_config_repo.md) — the versioned source of truth is `~/Dev/ai`; commit configuration there, never straight into `~/.claude`
 - [Reproduce the design, don't improvise](design-reproduce-not-improvise.md) — Validité website only: match the design files exactly, interview to full clarity first
 - [Enter the knowledge base through its index](kb-entry-via-index.md) — Validité knowledge base only: start at `kb/_index.md`, never a blind grep
@@ -45,4 +46,6 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Warmth isn't a commitment signal](feedback-warmth-not-a-commitment-signal.md) — a pleasant, enthusiastic-sounding call means nothing on its own; log names/dates/documents, not tone, and don't pin it on one contact's character
 - [Name roles, not people](feedback-name-roles-not-people.md) — process documents define owner/coordinator/executor/reviewer in a short glossary and never say "Alex"
 - [No ciphers in chat](feedback-no-ciphers-in-chat.md) — write to Alex in plain words, never registry IDs/plan tags (MAT-4, PLT-6, R2, CF-24) as if they were common coin; explaining one once doesn't stop it being a cipher for the rest of the message, use the full phrase every time
+- [An unanswered question was explained badly](feedback-unanswered-question-means-unclear.md) — asked twice with no answer means rewrite the explanation from the subject up, never re-ask the same words or carry a bare "needs a conversation" line
 - [App: no real data yet, and DB access exists](project_app_no_real_data_yet.md) — `~/Dev/app` only: only test/demo records exist so far, and the coordinator CAN reach Mongo directly via docker exec — never repeat an old plan's "no access" claim untested
+- [A reported failure is a work order](feedback-reported-failure-is-a-work-order.md) — when Alex pastes a broken deploy or build, start the fix and report it; do not ask whether to begin
