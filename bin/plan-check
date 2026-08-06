@@ -192,10 +192,11 @@ def validate(card_path, text):
             "or a `status:` field in its frontmatter"
         )
 
-    if PLACEHOLDER in text:
-        for number, line in enumerate(lines, start=1):
-            if PLACEHOLDER in line:
-                problems.append(f"line {number} still carries an unfilled {PLACEHOLDER} slot: {line.strip()}")
+    # An occurrence inside backticks is the card talking *about* the marker — a
+    # card describing the template legitimately names it — so only bare ones count.
+    for number, line in enumerate(lines, start=1):
+        if PLACEHOLDER in BACKTICKED.sub("", line):
+            problems.append(f"line {number} still carries an unfilled {PLACEHOLDER} slot: {line.strip()}")
 
     heading, body = find_section(found, ("out of scope",), ("must not", "touch"))
     if heading is None:
