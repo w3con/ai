@@ -33,6 +33,8 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
 - [Decide technical details yourself](feedback-decide-technical-details-yourself.md) — never hand Alex a choice with no product consequence; choose on the merits, act, and tell him afterwards
 - [Never size work in human hours](feedback-no-human-hour-estimates.md) — agents build everything here; argue about context, file collisions and what's on the path, never "it's sixty hours" or "it's too big"
+- [Cut slop, keep depth](feedback-cut-slop-keep-depth.md) — explaining a problem at length is wanted; ornamental phrasing is not, and reading "too wordy" as "explain less" is the wrong correction
+- [English for non-native readers](feedback-english-level-for-french-readers.md) — letters in English go to French readers and to Alex; intermediate vocabulary, short sentences, no literary constructions
 - [French names stay in French](feedback-french-names-in-french.md) — never transliterate `Camille Ernould` or `Tourcoing` into Cyrillic in a Russian reply; he has to type the real spelling back into mail and calendar
 - [The AI config repo](reference_ai_config_repo.md) — the versioned source of truth is `~/Dev/ai`; commit configuration there, never straight into `~/.claude`
 - [Reproduce the design, don't improvise](design-reproduce-not-improvise.md) — Validité website only: match the design files exactly, interview to full clarity first
