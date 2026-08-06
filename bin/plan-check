@@ -12,13 +12,19 @@ test pages, use `card-context` instead; this checks the plain shape used by
 projects with no task-card registry.
 
 Rules, all of which must hold:
-  1. A `**Status:**` line exists, says the card is approved or signed off, and
-     does not still say it is awaiting approval.
+  1. The card records its approval, in either of two shapes. A `**Status:**` line
+     says the card is approved or signed off and does not still say it is awaiting
+     approval; or the card's YAML frontmatter carries `status:` set to a value that
+     means the owner has decided the work will be done (`todo`, `approved`,
+     `in_progress`, `done`), as opposed to `idea`, which means it has not.
   2. A section whose heading names what must not be touched exists and is not empty.
   3. A section whose heading names the acceptance criteria exists and is not empty.
   4. A `## Checkpoints` section exists and holds at least one checkpoint.
-  5. Every checkpoint line reads `- [ ] N.n — text` or `- [x] N.n — text`.
+  5. Every checkpoint line reads `- [ ] N.n — text`, or the same with the card's own
+     identifier in front of the number (`- [ ] WEB-1.2 — text`), or either with `[x]`.
   6. Every filesystem path the card names in backticks resolves to a real file.
+  7. The word `PLACEHOLDER` appears nowhere in the card. Templates write it into every
+     mandatory slot, so one left behind is an unfilled section rather than an answer.
 
 Paths are resolved against, in order: the card's own directory, the repository
 root the card declares in a `**Repository the work happens in:** ` line, and the
@@ -34,8 +40,16 @@ MARKER = "<!-- card:ready -->"
 
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*$")
 LIST_ITEM = re.compile(r"^\s*[-*]\s")
-CHECKPOINT = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+\d+\.\d+\s+[—–-]\s+\S")
+# `- [ ] 1.2 — …`, or the same with a card identifier in front: `- [ ] WEB-1.2 — …`.
+CHECKPOINT = re.compile(
+    r"^\s*[-*]\s+\[[ xX]\]\s+(?:[A-Za-z][A-Za-z0-9]*-\d+\.\d+|\d+\.\d+)\s+[—–-]\s+\S"
+)
 STATUS = re.compile(r"^\*\*Status:\*\*\s*(.+)$", re.MULTILINE)
+# `status: todo` inside the YAML frontmatter block at the very top of the file.
+FRONTMATTER_STATUS = re.compile(r"\A---\n.*?^status:\s*(\S+)\s*$.*?^---\s*$", re.MULTILINE | re.DOTALL)
+# Statuses that mean the owner has decided the work will be done. `idea` does not.
+APPROVED_STATUSES = ("todo", "approved", "in_progress", "done")
+PLACEHOLDER = "PLACEHOLDER"
 DECLARED_ROOT = re.compile(r"\*\*Repository the work happens in:\*\*\s*`([^`]+)`")
 BACKTICKED = re.compile(r"`([^`\n]+)`")
 
@@ -77,11 +91,16 @@ def sections(lines):
     return found
 
 
-def find_section(found, *words):
-    """The body of the first section whose heading contains all the given words."""
-    for heading, body in found.items():
-        if all(w in heading for w in words):
-            return heading, body
+def find_section(found, *wordsets):
+    """The body of the first section whose heading matches any one of the given
+    word sets. Each word set is a tuple of words that must all appear in the
+    heading; several are accepted because the same section is spelled differently
+    by different templates ("Out of scope — do not touch" against "What must not
+    be touched")."""
+    for wordset in wordsets:
+        for heading, body in found.items():
+            if all(w in heading for w in wordset):
+                return heading, body
     return None, None
 
 
@@ -118,28 +137,44 @@ def validate(card_path, text):
     problems = []
 
     status = STATUS.search(text)
-    if not status:
-        problems.append("no `**Status:**` line — the card must record its approval state")
-    else:
+    frontmatter = FRONTMATTER_STATUS.search(text)
+    if status:
         value = status.group(1).lower()
         if "awaiting" in value or "not signed off" in value:
             problems.append(f"the status line still says the card is unapproved: {status.group(1).strip()}")
         elif not any(w in value for w in ("approved", "signed off", "approuv")):
             problems.append(f"the status line does not record an approval: {status.group(1).strip()}")
+    elif frontmatter:
+        value = frontmatter.group(1).strip().strip("\"'").lower()
+        if value not in APPROVED_STATUSES:
+            problems.append(
+                f"the frontmatter status is `{value}` — the card is not yet decided; "
+                f"set it to one of {', '.join(APPROVED_STATUSES)} once the owner has said the work will be done"
+            )
+    else:
+        problems.append(
+            "the card records no approval — it must carry either a `**Status:**` line "
+            "or a `status:` field in its frontmatter"
+        )
 
-    heading, body = find_section(found, "must not", "touched")
+    if PLACEHOLDER in text:
+        for number, line in enumerate(lines, start=1):
+            if PLACEHOLDER in line:
+                problems.append(f"line {number} still carries an unfilled {PLACEHOLDER} slot: {line.strip()}")
+
+    heading, body = find_section(found, ("out of scope",), ("must not", "touch"))
     if heading is None:
         problems.append("no section saying what must not be touched")
     elif not non_empty(body):
         problems.append(f"the section '{heading}' is empty")
 
-    heading, body = find_section(found, "acceptance", "criteria")
+    heading, body = find_section(found, ("acceptance", "criteria"))
     if heading is None:
         problems.append("no acceptance criteria section")
     elif not non_empty(body):
         problems.append(f"the section '{heading}' is empty")
 
-    heading, body = find_section(found, "checkpoints")
+    heading, body = find_section(found, ("checkpoints",))
     if heading is None:
         problems.append("no checkpoints section")
     else:
