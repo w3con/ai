@@ -104,6 +104,41 @@ def find_section(found, *wordsets):
     return None, None
 
 
+def section_with_subsections(lines, *words):
+    """The lines under the first heading containing all `words`, including the
+    bodies of any deeper headings beneath it. `## Checkpoints` is routinely split
+    into `### Phase 1 — …` groups, and the checkpoint lines then sit under the
+    phase headings rather than directly under `## Checkpoints`."""
+    level, collecting, body = None, False, []
+    for line in lines:
+        m = HEADING.match(line)
+        if m:
+            this_level = len(line) - len(line.lstrip("#"))
+            if collecting and this_level <= level:
+                break
+            if not collecting and all(w in m.group(1).strip().lower() for w in words):
+                level, collecting = this_level, True
+            continue
+        if collecting:
+            body.append(line)
+    return body if collecting else None
+
+
+def ancestors(start, stop):
+    """`start` and each directory above it, up to and including `stop`."""
+    out, current = [], os.path.abspath(start)
+    stop = os.path.abspath(stop) if stop else None
+    while True:
+        out.append(current)
+        parent = os.path.dirname(current)
+        if parent == current or (stop and current == stop):
+            break
+        if stop and not current.startswith(stop):
+            break
+        current = parent
+    return out
+
+
 def non_empty(body):
     return any(line.strip() for line in (body or []))
 
@@ -174,8 +209,8 @@ def validate(card_path, text):
     elif not non_empty(body):
         problems.append(f"the section '{heading}' is empty")
 
-    heading, body = find_section(found, ("checkpoints",))
-    if heading is None:
+    body = section_with_subsections(lines, "checkpoints")
+    if body is None:
         problems.append("no checkpoints section")
     else:
         items = [line for line in body if LIST_ITEM.match(line)]
@@ -185,13 +220,15 @@ def validate(card_path, text):
             if not CHECKPOINT.match(item):
                 problems.append(f"malformed checkpoint, expected `- [ ] N.n — text`: {item.strip()}")
 
-    roots = [os.path.dirname(os.path.abspath(card_path))]
+    card_dir = os.path.dirname(os.path.abspath(card_path))
+    root = git_root(card_dir)
+    # Every directory from the card up to the git root, because one repository
+    # may hold several projects side by side (a site under `~/Dev/web/<site>/`),
+    # and a card's paths are written relative to its own project, not the root.
+    roots = ancestors(card_dir, root)
     declared = DECLARED_ROOT.search(text)
     if declared:
         roots.append(os.path.expanduser(declared.group(1).strip()))
-    root = git_root(roots[0])
-    if root:
-        roots.append(root)
 
     for token in candidate_paths(text):
         if not resolve(token, roots):
