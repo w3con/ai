@@ -60,7 +60,15 @@
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 SEARCH_ROOTS="${PLAN_GATE_SEARCH_ROOTS:-${PROJECT_DIR}:${PWD}}"
-HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# HRN-121: the shared helper module brief_reader.py is importable only from the real
+# hooks/ directory, so it is found at one fixed location, HOOK_INSTALL_HOOKS_DIR — the
+# exact env var bin/hook-install itself already reads for "the real hooks directory",
+# defaulting to the same literal path — rather than derived from where THIS script file
+# happens to sit. That derivation ("beside itself", via BASH_SOURCE) is correct once
+# installed, because an installed hook and brief_reader.py sit in the same directory, but
+# wrong for a candidate under test, which sits in candidates/ instead. Shared verbatim
+# with hooks/card-touch-gate.sh.
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-/Users/laptop/Dev/ai/hooks}"
 
 # Read stdin fully before passing to python3
 STDIN_DATA="$(cat)"
@@ -75,7 +83,29 @@ stdin_data   = sys.argv[2]
 hooks_dir    = sys.argv[3]
 
 sys.path.insert(0, hooks_dir)
-import brief_reader  # HRN-109: the brief-path reading shared with card-touch-gate.sh
+try:
+    import brief_reader  # HRN-109: the brief-path reading shared with card-touch-gate.sh
+except ImportError as exc:
+    # HRN-121, AC2: a helper that cannot be loaded is reported plainly rather than being
+    # absorbed into a silent decision. plan-gate.sh fails CLOSED on any other unexpected
+    # error (see the file header), so this follows the same posture: an explicit deny,
+    # naming the helper, the directory it was sought in, and the underlying error, rather
+    # than an uncaught traceback that leaves the caller with no valid decision at all.
+    print(f"plan-gate: HELPER LOAD FAILURE — could not import 'brief_reader' from "
+          f"'{hooks_dir}': {exc}. Failing closed (deny) rather than an uncaught crash.",
+          file=sys.stderr)
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "Blocked by plan-gate: internal error — could not load its shared "
+                f"helper module 'brief_reader' from '{hooks_dir}' ({exc}); failing "
+                "closed rather than deciding with no working brief-resolution logic."
+            ),
+        }
+    }))
+    sys.exit(0)
 
 # --- output helpers ---
 
