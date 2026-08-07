@@ -13,19 +13,36 @@
 #   completely uncounted, by the ABSENCE of an "agent_id" key in the hook payload — the
 #   same discriminator HRN-46 measured and confirmed: present and non-empty means a
 #   subagent made the call, absent means the coordinator did.
-# What resets the count to zero: an Edit or Write tool call whose file_path is the one
-#   task-card-shaped path (ai/timeline/tasks/*.md or ai/harness/tasks/*.md) this specific
-#   agent_id has been seen touching. The FIRST time a given agent_id's calls mention such
-#   a path at all — in an Edit/Write's file_path, a Read's file_path, or a Bash command's
-#   text — that path is remembered as "this agent's own card" for the rest of its run; in
-#   ordinary use this is the very first call an executor makes, because every executor's
-#   own standing instructions require it to read its brief before doing anything else.
-# What is NOT gated: the coordinator's own calls (no agent_id present), and a card edited
-#   through Bash (a heredoc, sed, or similar) rather than through the Edit or Write tool —
-#   a stated, known gap rather than a hidden one: every executor is separately instructed
-#   to tick a checkpoint through the Edit tool, so a Bash-based card edit is not the
-#   realistic path this project's own executors take, unlike the settings.json case
-#   settings-write-guard.sh exists to close.
+# What resets the count to zero: an Edit or Write tool call whose file_path is the run's
+#   own card — the ONE task-card-shaped path (ai/timeline/tasks/*.md or
+#   ai/harness/tasks/*.md) named in the brief this agent_id was actually spawned with, read
+#   through hooks/brief_reader.py (HRN-109), never guessed from any tool call the agent
+#   makes on its own. That brief is recovered from the coordinator's own durable session
+#   transcript (transcript_path in this hook's own payload), which records every Task/Agent
+#   spawn as a toolUseResult object carrying the spawned agent's agentId, prompt and
+#   description — the very same prompt hooks/plan-gate.sh already read at spawn time, run
+#   through the very same brief_tokens()/canonical_card() pair, so the two gates cannot
+#   disagree about which file is a run's brief. This is established once, on whichever call
+#   is the first one this hook processes for a given agent_id, and never re-derived or
+#   replaced afterwards (see the "once established, never replaced" state-handling note
+#   below), so a run that reads, greps or edits some unrelated card along the way is never
+#   mistaken for owning that card, and is never asked to edit it.
+# What is NOT gated: the coordinator's own calls (no agent_id present), any run whose brief
+#   cannot be recovered at all (no readable transcript record for its agent_id, or a brief
+#   that names no task-card-shaped path — see "Fail open when the brief can't be read"
+#   below), and a card edited through Bash (a heredoc, sed, or similar) rather than through
+#   the Edit or Write tool — a stated, known gap rather than a hidden one: every executor is
+#   separately instructed to tick a checkpoint through the Edit tool, so a Bash-based card
+#   edit is not the realistic path this project's own executors take, unlike the
+#   settings.json case settings-write-guard.sh exists to close.
+#
+# Fail open when the brief can't be read: an agent whose card this hook could never
+# recover — the transcript record for its agent_id is missing, unreadable, or names no
+# task-card-shaped path at all — is allowed past the threshold indefinitely, the same way an
+# agent that has never been identified as one of this project's executors always has been.
+# Refusing a run this hook cannot name a card for would tell it to edit a card it does not
+# have and cannot produce, which is a permanent freeze with no way out, not a nudge — the
+# one thing this hook's own header already says it must never do.
 #
 # Why this hook fails OPEN (allows) rather than closed on any internal error, unlike
 # plan-gate.sh, settings-write-guard.sh and memory-store-guard.sh, which all fail closed.
@@ -64,8 +81,9 @@
 THRESHOLD=20
 
 STDIN_DATA="$(cat)"
+HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
-exec python3 - "$STDIN_DATA" <<'PYEOF'
+exec python3 - "$STDIN_DATA" "$HOOKS_DIR" <<'PYEOF'
 import sys
 import os
 import re
@@ -73,6 +91,10 @@ import json
 import tempfile
 
 stdin_data = sys.argv[1]
+hooks_dir  = sys.argv[2]
+
+sys.path.insert(0, hooks_dir)
+import brief_reader  # HRN-109: the brief-path reading shared with plan-gate.sh
 
 THRESHOLD = 20
 
@@ -103,47 +125,28 @@ DENY_TEMPLATE = (
 )
 
 NO_CARD_IDENTIFIED = (
-    "its own task card (not yet identified by this hook — its very first tool call "
-    "should have been reading the exact brief path it was handed, which is what lets "
-    "this hook learn which file is its card)"
-)
-
-# A task-card-shaped path: ai/timeline/tasks/<name>.md or ai/harness/tasks/<name>.md,
-# with or without a leading directory portion, absolute or relative alike. Deliberately
-# permissive about what comes before it, exactly as plan-gate.sh's own MD_PATH_RE is,
-# because the interesting part is the fixed suffix a real card path always carries.
-CARD_PATH_RE = re.compile(
-    r'([~\w./\\-]*ai/(?:timeline|harness)/tasks/[\w.-]+\.md)'
+    "its own task card (not yet identified by this hook — the brief this agent was "
+    "spawned with, recovered from the coordinator's own transcript, is what lets this "
+    "hook learn which file is its card; see establish_card() in this script)"
 )
 
 
-def canonical_card(token):
-    """The part of a card path that identifies the card and nothing else — everything from
-    ai/timeline/tasks/ or ai/harness/tasks/ onwards, with whatever directory prefix came
-    before it thrown away. Without this the gate could freeze an executor outright rather
-    than merely nudge it: an executor is handed its brief by its path in the shared
-    checkout, but it works inside its own copy of the repository, where the very same card
-    sits under a longer path. The two never matched, so the executor's own edits to its own
-    card were never recognised, the count never reset, and every further tool call was
-    refused — including the only kind of call that could have lifted the refusal. Repaired
-    2026-08-07 by the coordinator, after one executor was frozen this way; the fuller work
-    on how this gate identifies a card is HRN-109."""
-    m = re.search(r'ai/(?:timeline|harness)/tasks/[\w.-]+\.md', token or "")
-    return m.group(0) if m else token
-
-
-def find_card_token(tool_input):
-    """The first task-card-shaped path mentioned anywhere in this call's tool_input, or
-    None, reduced to the identifying part by canonical_card. Checked across every field a
-    path or a command could plausibly appear in, because different tools name their target
-    differently (file_path for Edit/Write/Read, command for Bash, prompt/description for
-    Task/Agent)."""
-    for key in ("file_path", "command", "prompt", "description", "notebook_path"):
-        v = tool_input.get(key)
-        if isinstance(v, str) and v:
-            m = CARD_PATH_RE.search(v)
-            if m:
-                return canonical_card(m.group(1))
+def establish_card(transcript_path, agent_id):
+    """The run's own card — the one task-card-shaped path named in the brief this agent_id
+    was actually spawned with (HRN-109), read through brief_reader.find_spawn_prompt() and
+    reduced to its canonical form. Returns None, never raises, when the brief cannot be
+    recovered at all: no transcript record yet for this agent_id (the transcript is written
+    asynchronously and may lag), a record naming no .md path, or one naming only a legacy
+    plan (plans/*.md, ai/plans/*.md) rather than a task card. None is exactly the signal
+    that makes this hook allow the call rather than gate it — see "Fail open when the
+    brief can't be read" in this script's own header."""
+    spawn = brief_reader.find_spawn_prompt(transcript_path, agent_id)
+    if not spawn:
+        return None
+    for token in brief_reader.brief_tokens(spawn):
+        m = brief_reader.CARD_PATH_RE.search(token)
+        if m:
+            return m.group(1)
     return None
 
 
@@ -157,7 +160,7 @@ def touches_card(tool_name, tool_input, card_token):
     fp = tool_input.get("file_path")
     if not isinstance(fp, str) or not fp:
         return False
-    return canonical_card(fp) == canonical_card(card_token)
+    return brief_reader.canonical_card(fp) == brief_reader.canonical_card(card_token)
 
 
 try:
@@ -182,6 +185,7 @@ if not agent_id:
 
 tool_name = data.get("tool_name") or ""
 tool_input = data.get("tool_input") or {}
+transcript_path = data.get("transcript_path")
 
 try:
     # CARD_TOUCH_GATE_STATE_DIR overrides where per-agent state is kept — used by this
@@ -206,26 +210,19 @@ try:
             pass  # a corrupt state file is treated as a fresh start, not an error to deny on
 
     if not state.get("card"):
-        token = find_card_token(tool_input)
-        if token:
-            state["card"] = token
+        # Identified through brief_reader alone — the brief this agent_id was actually
+        # spawned with, recovered from the coordinator's transcript — and through nothing
+        # else: never from this call's own file_path, command, prompt or description,
+        # which is precisely the "first card-shaped path it happens to see" guess HRN-109
+        # replaces. Once set here, this branch never runs again for this agent_id: a card
+        # established for a run is never replaced, which is what stops the tracked card
+        # drifting to whichever card the run happens to touch last (repaired 2026-08-07,
+        # commit cfbd25d, kept unchanged by this restructuring).
+        card = establish_card(transcript_path, agent_id)
+        if card:
+            state["card"] = card
 
     touched = bool(state.get("card")) and touches_card(tool_name, tool_input, state["card"])
-    if not touched and not state.get("card") and tool_name in ("Edit", "Write"):
-        # An Edit/Write straight to a card-shaped path, before this agent's card was ever
-        # otherwise identified, both establishes AND touches it in the same call — this is
-        # the case of an executor whose very first tracked action is ticking its own box.
-        # The "not state.get('card')" guard was added on 2026-08-07: without it, an edit to
-        # SOME OTHER card silently replaced the card this gate was watching, so the tracked
-        # card drifted to whichever card the run touched last and the gate's own record of
-        # what it had done was erased by ordinary use. Once a card is established for a run
-        # it is never replaced.
-        fp = tool_input.get("file_path")
-        if isinstance(fp, str):
-            m = CARD_PATH_RE.search(fp)
-            if m:
-                state["card"] = m.group(1)
-                touched = True
 
     if touched:
         state["count"] = 0

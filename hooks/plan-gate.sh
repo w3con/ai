@@ -60,18 +60,22 @@
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 SEARCH_ROOTS="${PLAN_GATE_SEARCH_ROOTS:-${PROJECT_DIR}:${PWD}}"
+HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # Read stdin fully before passing to python3
 STDIN_DATA="$(cat)"
 
-exec python3 - "$SEARCH_ROOTS" "$STDIN_DATA" <<'PYEOF'
+exec python3 - "$SEARCH_ROOTS" "$STDIN_DATA" "$HOOKS_DIR" <<'PYEOF'
 import sys
 import os
-import re
 import json
 
 search_roots = sys.argv[1]
 stdin_data   = sys.argv[2]
+hooks_dir    = sys.argv[3]
+
+sys.path.insert(0, hooks_dir)
+import brief_reader  # HRN-109: the brief-path reading shared with card-touch-gate.sh
 
 # --- output helpers ---
 
@@ -144,37 +148,6 @@ MARKER_CARD   = "<!-- card:ready -->"    # written by bin/card-context
 MARKER_LEGACY = "<!-- scope:pass -->"    # frozen plans in ai/plans/ only
 MAX_BRIEF_BYTES = 2 * 1024 * 1024        # a brief is prose; anything larger is not one
 
-# Any token that ends in .md. Deliberately permissive about the leading part so
-# that ~, $HOME-style absolutes, ./ and bare names all get picked up; each
-# candidate is then resolved and must exist on disk to matter.
-MD_PATH_RE = re.compile(r'[~\w./\\-]*[\w-]\.md\b')
-
-# Where briefs live, relative to a root. Cards first: that is where new work is.
-BRIEF_DIRS = ("ai/timeline/tasks", "ai/harness/tasks", "plans", "ai/plans")
-
-def candidate_texts(ti):
-    for key in ("prompt", "description"):
-        v = ti.get(key)
-        if isinstance(v, str) and v:
-            yield v
-
-def resolve(token, roots):
-    """Every plausible on-disk location for a path token, most specific first."""
-    t = os.path.expanduser(token)
-    if os.path.isabs(t):
-        return [os.path.normpath(t)]
-    out = []
-    for root in roots:
-        if not root:
-            continue
-        out.append(os.path.normpath(os.path.join(root, t)))
-        # Convention: a bare name is looked for in each brief directory.
-        stripped = t[2:] if t.startswith("./") else t
-        if "/" not in stripped:
-            for d in BRIEF_DIRS:
-                out.append(os.path.normpath(os.path.join(root, d, stripped)))
-    return out
-
 def has_marker(path):
     """True when the file carries an accepted pass marker on a line of its own."""
     try:
@@ -191,13 +164,7 @@ def has_marker(path):
 try:
     roots = [r for r in search_roots.split(":") if r]
 
-    tokens = []
-    for text in candidate_texts(tool_input):
-        tokens.extend(MD_PATH_RE.findall(text))
-
-    # De-duplicate, preserving order.
-    seen = set()
-    tokens = [t for t in tokens if not (t in seen or seen.add(t))]
+    tokens = brief_reader.brief_tokens(tool_input)
 
     if not tokens:
         print(deny_json(DENY_NO_BRIEF_NAMED))
@@ -205,7 +172,7 @@ try:
 
     existing = []       # named .md files that actually exist — reported on denial
     for token in tokens:
-        for path in resolve(token, roots):
+        for path in brief_reader.resolve(token, roots):
             if os.path.isfile(path):
                 if has_marker(path):
                     print(ALLOW_JSON)
