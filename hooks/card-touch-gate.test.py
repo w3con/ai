@@ -18,7 +18,10 @@ established therefore builds a small fixture transcript file with fake_transcrip
 passes its path as transcript_path, rather than putting a card-shaped path in the tool
 call's own file_path/command/prompt/description the way the pre-HRN-109 suite did.
 
-Run directly: python3 /Users/laptop/Dev/ai/hooks/card-touch-gate.test.py
+Run directly: python3 /Users/laptop/Dev/ai/hooks/card-touch-gate.test.py [candidate-path]
+With no argument this runs against the installed hook at
+/Users/laptop/Dev/ai/hooks/card-touch-gate.sh; given one argument it runs against that file
+instead, which is what bin/hook-install uses to test a candidate before installing it.
 Exit code 0 when every check passes, 1 when any fails (own PASS/FAIL harness, matching the
 two sibling *.test.py files in this directory rather than unittest).
 """
@@ -29,7 +32,7 @@ import subprocess
 import sys
 import tempfile
 
-HOOK = "/Users/laptop/Dev/ai/hooks/card-touch-gate.sh"
+HOOK = sys.argv[1] if len(sys.argv) > 1 else "/Users/laptop/Dev/ai/hooks/card-touch-gate.sh"
 
 fails = 0
 

@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# hook-install — the only way a hook under ~/Dev/ai/hooks/ is ever supposed to change.
+#
+# ~/.claude/hooks is a symbolic link straight into ~/Dev/ai/hooks, so every file there is
+# LIVE: it governs every tool call of every agent on this machine the moment the file is
+# saved, uncommitted and untested. Editing a live hook file in place means every agent on
+# the machine reads that file mid-write, and a hook that cannot start is read as a refusal
+# of every tool call. HRN-113 exists because that shape produced three freezes in one
+# evening on 2026-08-07 (see that card's own "Reasons to exist").
+#
+# This script is the missing installation step: a candidate file is assembled somewhere
+# else, tested here against the real hook's own test suite, and only once that suite
+# passes is it written onto the live path — via a write-under-a-temporary-name-then-rename
+# inside the hooks directory, so a reader of the live path only ever sees the old version
+# or the new one, never a partial write.
+#
+# usage: bin/hook-install <candidate-file> <hook-name>
+#        bin/hook-install -h | --help
+#
+# <hook-name> is the hook's bare name, with or without its .sh suffix — "card-touch-gate"
+# and "card-touch-gate.sh" both mean the file hooks/card-touch-gate.sh, tested against
+# hooks/card-touch-gate.test.py.
+#
+# Refuses, naming the reason, when: the candidate file does not exist; the candidate does
+# not parse; the named hook has no test suite; that test suite fails against the
+# candidate; or the live path is not a regular file. Only once none of those five holds
+# does it install.
+#
+# HOOK_INSTALL_HOOKS_DIR overrides the hooks directory this script reads and writes,
+# exactly the way CARD_TOUCH_GATE_STATE_DIR and PLAN_GATE_SEARCH_ROOTS let the hooks'
+# own test suites run against scratch state rather than the live directory; it exists so
+# this script's own refusals can be proved against a scratch copy without ever touching
+# the real ~/Dev/ai/hooks. Left unset, it defaults to the real directory.
+
+usage() {
+  cat <<'EOF'
+usage: bin/hook-install <candidate-file> <hook-name>
+       bin/hook-install -h | --help
+
+Installs <candidate-file> as the hook named <hook-name> under ~/Dev/ai/hooks/, the
+directory ~/.claude/hooks is symlinked to and that therefore governs every tool call of
+every agent on this machine.
+
+It refuses unless the candidate parses and unless that hook's own test suite
+(hooks/<hook-name>.test.py) passes when run against the candidate, and only then
+installs it: the candidate is written into hooks/ under a temporary name and renamed
+onto the live path in one atomic step, so no reader of the live path ever sees a
+partially written file.
+
+<hook-name> is the hook's bare name, with or without its .sh suffix (for example
+"card-touch-gate" or "card-touch-gate.sh").
+
+Environment:
+  HOOK_INSTALL_HOOKS_DIR   overrides the hooks directory (default: ~/Dev/ai/hooks),
+                           for proving this script's own refusals against a scratch
+                           copy instead of the live directory.
+EOF
+}
+
+# -h/--help is answered before anything else this script does, per HRN-73: asking a
+# script what it does must never make it run for real.
+for arg in "$@"; do
+  if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
+    usage
+    exit 0
+  fi
+done
+
+set -u
+
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-/Users/laptop/Dev/ai/hooks}"
+
+if [ "$#" -lt 2 ]; then
+  echo "hook-install: refuses — expected two arguments, a candidate file and a hook name; got $#. Run 'bin/hook-install -h' for usage." >&2
+  exit 1
+fi
+
+CANDIDATE="$1"
+HOOK_NAME="${2%.sh}"
+
+LIVE_PATH="$HOOKS_DIR/$HOOK_NAME.sh"
+TEST_PATH="$HOOKS_DIR/$HOOK_NAME.test.py"
+
+# Refusal 1: the candidate file does not exist.
+if [ ! -f "$CANDIDATE" ]; then
+  echo "hook-install: refuses — the candidate file '$CANDIDATE' does not exist." >&2
+  exit 1
+fi
+
+# Refusal 2: the candidate does not parse.
+parse_err=$(bash -n "$CANDIDATE" 2>&1)
+parse_status=$?
+if [ "$parse_status" -ne 0 ]; then
+  echo "hook-install: refuses — the candidate file '$CANDIDATE' does not parse as a shell script; 'bash -n' reported: $parse_err" >&2
+  exit 1
+fi
+
+# Refusal 3: the named hook has no test suite.
+if [ ! -f "$TEST_PATH" ]; then
+  echo "hook-install: refuses — the hook '$HOOK_NAME' has no test suite; expected one at '$TEST_PATH'." >&2
+  exit 1
+fi
+
+# Refusal 4: that test suite fails against the candidate.
+test_output=$(python3 "$TEST_PATH" "$CANDIDATE" 2>&1)
+test_status=$?
+if [ "$test_status" -ne 0 ]; then
+  echo "hook-install: refuses — the test suite '$TEST_PATH' failed against the candidate '$CANDIDATE':" >&2
+  echo "$test_output" >&2
+  exit 1
+fi
+
+# Refusal 5: the live path is not a regular file.
+if [ ! -f "$LIVE_PATH" ]; then
+  echo "hook-install: refuses — the live path '$LIVE_PATH' is not a regular file." >&2
+  exit 1
+fi
+
+# All five checks passed: install by writing under a temporary name inside the hooks
+# directory, then renaming onto the live path. Both the temporary write and the live
+# path are on the same filesystem (both inside HOOKS_DIR), so the rename is atomic — a
+# reader of LIVE_PATH sees either the old file or the new one, never a partial write.
+tmp_path=$(mktemp "$HOOKS_DIR/.hook-install.$HOOK_NAME.XXXXXX")
+cp "$CANDIDATE" "$tmp_path"
+chmod 755 "$tmp_path"
+mv -f "$tmp_path" "$LIVE_PATH"
+
+echo "hook-install: installed '$CANDIDATE' as '$LIVE_PATH' (test suite '$TEST_PATH' passed)."
+exit 0
