@@ -117,30 +117,47 @@ CARD_PATH_RE = re.compile(
 )
 
 
+def canonical_card(token):
+    """The part of a card path that identifies the card and nothing else — everything from
+    ai/timeline/tasks/ or ai/harness/tasks/ onwards, with whatever directory prefix came
+    before it thrown away. Without this the gate could freeze an executor outright rather
+    than merely nudge it: an executor is handed its brief by its path in the shared
+    checkout, but it works inside its own copy of the repository, where the very same card
+    sits under a longer path. The two never matched, so the executor's own edits to its own
+    card were never recognised, the count never reset, and every further tool call was
+    refused — including the only kind of call that could have lifted the refusal. Repaired
+    2026-08-07 by the coordinator, after one executor was frozen this way; the fuller work
+    on how this gate identifies a card is HRN-109."""
+    m = re.search(r'ai/(?:timeline|harness)/tasks/[\w.-]+\.md', token or "")
+    return m.group(0) if m else token
+
+
 def find_card_token(tool_input):
     """The first task-card-shaped path mentioned anywhere in this call's tool_input, or
-    None. Checked across every field a path or a command could plausibly appear in,
-    because different tools name their target differently (file_path for Edit/Write/Read,
-    command for Bash, prompt/description for Task/Agent)."""
+    None, reduced to the identifying part by canonical_card. Checked across every field a
+    path or a command could plausibly appear in, because different tools name their target
+    differently (file_path for Edit/Write/Read, command for Bash, prompt/description for
+    Task/Agent)."""
     for key in ("file_path", "command", "prompt", "description", "notebook_path"):
         v = tool_input.get(key)
         if isinstance(v, str) and v:
             m = CARD_PATH_RE.search(v)
             if m:
-                return m.group(1)
+                return canonical_card(m.group(1))
     return None
 
 
 def touches_card(tool_name, tool_input, card_token):
     """True when this call is an Edit or Write whose file_path names the same card this
-    agent has been tracked against — matched by suffix in either direction, since one side
-    may be absolute and the other a shorter relative fragment picked up from a prompt."""
+    agent has been tracked against, compared on the identifying part of each path alone, so
+    that the shared checkout's copy and an executor's own copy of one card count as the
+    same card."""
     if tool_name not in ("Edit", "Write"):
         return False
     fp = tool_input.get("file_path")
     if not isinstance(fp, str) or not fp:
         return False
-    return fp.endswith(card_token) or card_token.endswith(fp)
+    return canonical_card(fp) == canonical_card(card_token)
 
 
 try:
@@ -194,10 +211,15 @@ try:
             state["card"] = token
 
     touched = bool(state.get("card")) and touches_card(tool_name, tool_input, state["card"])
-    if not touched and tool_name in ("Edit", "Write"):
+    if not touched and not state.get("card") and tool_name in ("Edit", "Write"):
         # An Edit/Write straight to a card-shaped path, before this agent's card was ever
         # otherwise identified, both establishes AND touches it in the same call — this is
         # the case of an executor whose very first tracked action is ticking its own box.
+        # The "not state.get('card')" guard was added on 2026-08-07: without it, an edit to
+        # SOME OTHER card silently replaced the card this gate was watching, so the tracked
+        # card drifted to whichever card the run touched last and the gate's own record of
+        # what it had done was erased by ordinary use. Once a card is established for a run
+        # it is never replaced.
         fp = tool_input.get("file_path")
         if isinstance(fp, str):
             m = CARD_PATH_RE.search(fp)
