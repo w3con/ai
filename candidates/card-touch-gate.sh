@@ -157,24 +157,23 @@
 ALLOW_DECISION='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 
 STDIN_DATA="$(cat)"
-HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# HRN-121: a hook's shared helper modules (brief_reader.py, importable only from the real
+# hooks/ directory) are found at one fixed location, HOOK_INSTALL_HOOKS_DIR — the exact env
+# var bin/hook-install itself already reads for "the real hooks directory", defaulting to
+# the same literal path — rather than derived from where THIS script file happens to sit.
+# That derivation ("beside itself", via BASH_SOURCE) is correct once installed, because an
+# installed hook and brief_reader.py sit in the same directory, but wrong for a candidate
+# under test, which sits in candidates/ instead. HRN-121 replaces the per-candidate
+# try/import/fallback workaround this file used to carry (HRN-47.8) with this one fixed
+# arrangement, shared verbatim with hooks/plan-gate.sh, so a hook finds its helpers the same
+# way whether it is running installed or as a candidate.
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-/Users/laptop/Dev/ai/hooks}"
 
 GATE_TMP="${CARD_TOUCH_GATE_STATE_DIR:-${TMPDIR:-/tmp}/claude-card-touch-gate}"
 mkdir -p "$GATE_TMP" 2>/dev/null
 DECISION_FILE="$GATE_TMP/.decision.$$"
 
-# HRN-47.8's own finding: brief_reader.py lives only in the real hooks/ directory. Once
-# THIS file is installed there (bin/hook-install), HOOKS_DIR above already resolves to that
-# same directory and finds it immediately. Until then — while this file is still a candidate
-# sitting elsewhere, exactly where bin/hook-install's own design says a candidate is built
-# and tested — HOOKS_DIR resolves to the candidate's own directory instead, which has no
-# copy of brief_reader.py, and the import below would fail every time. LIVE_HOOKS_DIR is the
-# fallback: the same default bin/hook-install itself already uses for the real hooks
-# directory (HOOK_INSTALL_HOOKS_DIR, defaulting to the one real path), tried only if the
-# primary import fails, so a live, installed copy of this file never even looks at it.
-LIVE_HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-/Users/laptop/Dev/ai/hooks}"
-
-python3 - "$STDIN_DATA" "$HOOKS_DIR" "$LIVE_HOOKS_DIR" > "$DECISION_FILE" 2>>"$GATE_TMP/.stderr.log" <<'PYEOF'
+python3 - "$STDIN_DATA" "$HOOKS_DIR" > "$DECISION_FILE" 2>>"$GATE_TMP/.stderr.log" <<'PYEOF'
 import sys
 import os
 import re
@@ -183,16 +182,34 @@ import tempfile
 
 stdin_data = sys.argv[1]
 hooks_dir  = sys.argv[2]
-live_hooks_dir = sys.argv[3]
 
 sys.path.insert(0, hooks_dir)
 try:
     import brief_reader  # HRN-109: the brief-path reading shared with plan-gate.sh
-except ImportError:
-    # Not installed yet — see the shell comment above LIVE_HOOKS_DIR for why this fallback
-    # exists and when it is actually needed.
-    sys.path.insert(0, live_hooks_dir)
-    import brief_reader
+except ImportError as exc:
+    # HRN-121, AC2: a helper that cannot be loaded is reported plainly rather than being
+    # absorbed into a silent allow. The decision below is still "allow" — this hook fails
+    # open by design (see the file header) and that posture is not what this card changes —
+    # but the reason is no longer empty the way the shell's own last-resort ALLOW_DECISION
+    # fallback would leave it: it names the helper, the directory it was sought in, and the
+    # underlying error, so a test run that expected a refusal and got this instead shows the
+    # real cause in the very same line rather than looking like an unrelated logic bug.
+    print(f"card-touch-gate: HELPER LOAD FAILURE — could not import 'brief_reader' from "
+          f"'{hooks_dir}': {exc}. Falling open (allow) rather than blocking every call.",
+          file=sys.stderr)
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": (
+                "card-touch-gate: internal error — could not load its shared helper "
+                f"module 'brief_reader' from '{hooks_dir}' ({exc}); falling open (allow) "
+                "rather than blocking every call on this machine. This decision reflects "
+                "no TOUCH or PACE rule and must not be trusted as one."
+            ),
+        }
+    }))
+    sys.exit(0)
 
 # --- the TOUCH rule (HRN-49, unchanged) ---
 TOUCH_THRESHOLD = 20
