@@ -24,9 +24,11 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Pace with visible progress](feedback-pacing-visible-progress.md) — don't burn 8 minutes in silent thinking then emit a one-liner; act in short visible steps, don't re-plan from scratch each async message
 - [Caffeinate before long runs](feedback-caffeinate-before-long-runs.md) — start caffeinate when you hand work over, not after the first agent dies; a sleeping Mac kills every executor at once
 - [Critic and research sub-agents](feedback_reviewer_agent.md) — whether you may spawn one at all: only on Alex's explicit word, never automatically
+- [Resolve before reporting](feedback-resolve-before-reporting.md) — a blocked commit, a dirty tree, a missing tool is yours to fix; never hand Alex an obstacle you have not tried to clear
 - [Install what you need](feedback-install-what-you-need.md) — a missing tool gets installed, not reported and waited on; destructive or outward-facing actions still need his word
 - [Reusable tooling](feedback_reusable_tooling.md) — commit the helper once as a documented script; a script decides what happens, a skill decides when to call it
 - [Stage exactly your own files](feedback_git_staging.md) — commit by naming paths; a blind `git add -A` sweeps in other sessions' work
+- [Commit by naming paths](feedback-commit-by-naming-paths.md) — never `git add` then `git commit`; a parallel session's blind stage takes whatever sits staged in a shared checkout
 - [Commit periodically](feedback-commit-periodically.md) — land work at each milestone and remind Alex, don't let uncommitted changes pile up for hours
 - [No hard line-wraps in prose](feedback-no-hard-line-wraps.md) — paragraph = one physical line; Alex's viewers render wrap points as broken lines; put the rule into executor prompts too
 - [Tool files carry bare rules](feedback-tool-files-bare-rules.md) — agent/skill/hook files state what to do; no provenance citations, no rationale essays, no what-it-does-NOT-do paragraphs
