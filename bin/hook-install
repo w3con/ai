@@ -15,6 +15,7 @@
 # or the new one, never a partial write.
 #
 # usage: bin/hook-install <candidate-file> <hook-name>
+#        bin/hook-install --check
 #        bin/hook-install -h | --help
 #
 # <hook-name> is the hook's bare name, with or without its .sh suffix — "card-touch-gate"
@@ -26,6 +27,14 @@
 # candidate; or the live path is not a regular file. Only once none of those five holds
 # does it install.
 #
+# --check is the drift detector this install step exists to make possible: it reports
+# every file directly inside the hooks directory that either differs from that
+# directory's last commit (modified or plainly untracked, per 'git status --porcelain')
+# or fails to parse (bash -n for a .sh file, an AST parse for a .py file), and exits
+# non-zero the moment it finds one — because a live hook carrying an edit that was never
+# installed through this script, and never tested, is exactly the condition that produced
+# the three freezes HRN-113 was written after.
+#
 # HOOK_INSTALL_HOOKS_DIR overrides the hooks directory this script reads and writes,
 # exactly the way CARD_TOUCH_GATE_STATE_DIR and PLAN_GATE_SEARCH_ROOTS let the hooks'
 # own test suites run against scratch state rather than the live directory; it exists so
@@ -35,6 +44,7 @@
 usage() {
   cat <<'EOF'
 usage: bin/hook-install <candidate-file> <hook-name>
+       bin/hook-install --check
        bin/hook-install -h | --help
 
 Installs <candidate-file> as the hook named <hook-name> under ~/Dev/ai/hooks/, the
@@ -50,11 +60,74 @@ partially written file.
 <hook-name> is the hook's bare name, with or without its .sh suffix (for example
 "card-touch-gate" or "card-touch-gate.sh").
 
+--check reports every file directly inside the hooks directory that either differs
+from that directory's last commit or fails to parse, and exits non-zero the moment it
+finds one. It changes nothing; it only reads the directory and the git history behind
+it, so it is safe to run at any time.
+
 Environment:
   HOOK_INSTALL_HOOKS_DIR   overrides the hooks directory (default: ~/Dev/ai/hooks),
                            for proving this script's own refusals against a scratch
                            copy instead of the live directory.
 EOF
+}
+
+# --check: report every file directly inside HOOKS_DIR that either differs from the
+# hooks directory's own last commit (modified or untracked) or fails to parse, and
+# exit non-zero the moment one is found. Read-only: it writes nothing anywhere.
+run_check() {
+  local repo_root
+  repo_root=$(cd "$HOOKS_DIR" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)
+  if [ -z "$repo_root" ]; then
+    echo "hook-install: --check refuses — '$HOOKS_DIR' is not inside a git working tree." >&2
+    return 1
+  fi
+
+  local rel_dir
+  rel_dir=$(cd "$HOOKS_DIR" && git rev-parse --show-prefix)
+
+  local problem_found=0
+  local f base tracked_path status_line parse_err
+
+  for f in "$HOOKS_DIR"/*; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    case "$base" in
+      .hook-install.*) continue ;;  # this script's own transient install temp files
+    esac
+
+    tracked_path="${rel_dir}${base}"
+
+    status_line=$(git -C "$repo_root" status --porcelain -- "$tracked_path")
+    if [ -n "$status_line" ]; then
+      echo "hook-install: --check found '$f' differs from the last commit ($status_line)." >&2
+      problem_found=1
+    fi
+
+    case "$base" in
+      *.sh)
+        parse_err=$(bash -n "$f" 2>&1)
+        if [ $? -ne 0 ]; then
+          echo "hook-install: --check found '$f' does not parse; 'bash -n' reported: $parse_err" >&2
+          problem_found=1
+        fi
+        ;;
+      *.py)
+        parse_err=$(python3 -c 'import ast, sys
+ast.parse(open(sys.argv[1]).read(), filename=sys.argv[1])' "$f" 2>&1)
+        if [ $? -ne 0 ]; then
+          echo "hook-install: --check found '$f' does not parse; python reported: $parse_err" >&2
+          problem_found=1
+        fi
+        ;;
+    esac
+  done
+
+  if [ "$problem_found" -eq 0 ]; then
+    echo "hook-install: --check found no file in '$HOOKS_DIR' that differs from the last commit or fails to parse."
+    return 0
+  fi
+  return 1
 }
 
 # -h/--help is answered before anything else this script does, per HRN-73: asking a
@@ -69,6 +142,11 @@ done
 set -u
 
 HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-/Users/laptop/Dev/ai/hooks}"
+
+if [ "$#" -eq 1 ] && [ "$1" = "--check" ]; then
+  run_check
+  exit $?
+fi
 
 if [ "$#" -lt 2 ]; then
   echo "hook-install: refuses — expected two arguments, a candidate file and a hook name; got $#. Run 'bin/hook-install -h' for usage." >&2
