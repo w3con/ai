@@ -6,7 +6,7 @@
       "Bash(/Users/laptop/Dev/ai/bin/websearch:*)"
     ]
   },
-  "model": "opus",
+  "model": "claude-fable-5[1m]",
   "hooks": {
     "PreToolUse": [
       {
@@ -33,6 +33,15 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/memory-store-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/coordinator-source-gate.sh"
           }
         ]
       },
