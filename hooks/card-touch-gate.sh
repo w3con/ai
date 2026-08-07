@@ -124,6 +124,18 @@ import brief_reader  # HRN-109: the brief-path reading shared with plan-gate.sh
 
 THRESHOLD = 20
 
+# The hard ceiling on a whole run, counted across every tool call the agent makes and never
+# reset by anything. THRESHOLD above limits the gap between two card edits, which a run that
+# ticks its card often never trips however long it goes on; this one limits the run itself.
+# It exists because cost here is dominated by re-reading: every call re-reads the whole
+# accumulated conversation, so a run's price grows faster than its length, and nothing in
+# this project measured or capped that until now. 80 calls is set against bin/spend-stats:
+# the middle card spends about 15.2 calls per checkpoint, so 80 is roughly five checkpoints,
+# which is a whole phase. Past it the run is refused everything EXCEPT editing its own card,
+# so it can always record its Working state and stop; the remaining work is a fresh
+# executor's, exactly as a declared phase boundary already is.
+HARD_CAP = 80
+
 ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 
 def deny_json(reason):
@@ -148,6 +160,20 @@ DENY_TEMPLATE = (
     "tool calls per checkpoint, so {threshold} calls with no card edit at all is already "
     "more than a whole checkpoint's worth of unrecorded work. Any Edit or Write to that "
     "file resets this count to zero."
+)
+
+HARD_STOP_TEMPLATE = (
+    "Blocked by card-touch-gate: this run has made {total} tool calls, past the hard "
+    "ceiling of {cap} for a single run. Stop here — do not continue, do not start the "
+    "next checkpoint, and do not try to finish what you were in the middle of. Editing "
+    "your own card, {card}, is still allowed and is the only thing that is: tick the box "
+    "of every checkpoint you actually finished, and overwrite that card's '## Working "
+    "state' section with what this run established, which checks have passed, what turned "
+    "out to be a dead end, and exactly where the next executor should pick up. Then reply "
+    "saying you have reached the run ceiling, naming the last finished checkpoint. The "
+    "rest of this card is a fresh executor's work, not a continuation of yours, because "
+    "every further call re-reads this entire conversation and that is what the cost of "
+    "this project actually is."
 )
 
 NO_CARD_IDENTIFIED = (
@@ -250,11 +276,23 @@ try:
 
     touched = bool(state.get("card")) and touches_card(tool_name, tool_input, state["card"])
 
+    state["total"] = state.get("total", 0) + 1
+
     if touched:
         state["count"] = 0
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f)
         allow_and_exit()
+
+    if state["total"] > HARD_CAP and state.get("card"):
+        # Never refuses a card edit: the touched branch above has already returned for one,
+        # so a run past the ceiling can always record its state and stop, which is the whole
+        # point of stopping it here rather than letting it run to exhaustion.
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        print(deny_json(HARD_STOP_TEMPLATE.format(
+            total=state["total"], cap=HARD_CAP, card=state["card"])))
+        sys.exit(0)
 
     new_count = state.get("count", 0) + 1
     if new_count > THRESHOLD and state.get("card"):
