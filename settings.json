@@ -35,6 +35,15 @@
             "command": "~/.claude/hooks/memory-store-guard.sh"
           }
         ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/card-touch-gate.sh"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
