@@ -43,6 +43,24 @@
 #   exists only so a delegated search is bounded too, the same way the executor that
 #   spawned it already is.
 #
+#   A FOURTH rule (HRN-123): the BRAKE rule refuses the Nth Edit or Write of one and the
+#   same path within a single run — the single largest measured waste the archive showed
+#   (ai/harness/spend-audit_2026-08-08.md §4: one file edited 34 separate times in one run,
+#   each edit re-reading the whole conversation, when one rewrite would have done the same
+#   work in one call). It tracks a per-path edit count in the same per-agent state file,
+#   under its own field, and is evaluated on every Edit/Write call that does not touch the
+#   run's own card — a card touch already returns before this rule is reached, so the
+#   card itself is structurally exempt, never a special case inside the rule. Unlike the
+#   TOUCH and PACE rules, it does not require a card to be established at all: it is about
+#   one path being edited too many times within one run, not about a run's own pace
+#   relative to its checkpoints. N (BRAKE_THRESHOLD, 9) was set from the measured per-path
+#   edit-count distribution across archived EXECUTOR-run transcripts only, using the same
+#   executor/coordinator discriminator bin/agent-spend already uses (HRN-123.1): p50=3,
+#   p75=5, p90=9, p95=13, p99=26, p100=34 — a threshold at the p90 point catches only the
+#   wasteful tail (about one run in ten) while leaving the other nine untouched, and it
+#   would have refused the archive's own 34-, 31- and 28-edit cases well before they ran
+#   their course.
+#
 #   Both the touch rule and the pace rule are evaluated on every non-card-touching call an
 #   agent with an established card makes; either one denying is enough to refuse the call.
 #   The touch rule is checked first and, on the exact same terms as before this extension,
@@ -109,20 +127,24 @@
 # "Decide technical details yourself."
 #
 # State: one small JSON file per agent_id under $TMPDIR/claude-card-touch-gate/, holding
-# THREE fields now instead of two — {"card": ..., "count": ..., "total_count": ...} — all
-# three in the one file, so the touch rule and the pace rule share the same per-agent record
-# rather than each keeping a counter of its own on disk. "card" and "count" are exactly
-# HRN-49's original fields, read and written on exactly the same terms as before. "total_count"
-# is new: a plain running tally of every non-card-touching call this agent_id has made,
-# which a card touch never resets, unlike "count". A read-only search agent (the third,
-# card-independent mechanism above) uses a fourth field, "search_count", in the same file,
-# so that if an agent_id were ever somehow seen under both roles the two tallies still never
-# collide. Never cleaned up automatically — a stray handful of small JSON files per executor
-# run is an accepted, stated cost, not an oversight. agent_id values are treated as unique
-# on their own, with no session_id folded in, matching how HRN-46 already found them used (a
-# fresh, effectively-random id per spawned subagent); a same-day collision between two
-# entirely unrelated agents is possible in principle and would only ever cause one run's own
-# counts to be read by another, which is a minor mixed count, never a refusal of a call that
+# FIVE fields now instead of two — {"card": ..., "count": ..., "total_count": ...,
+# "search_count": ..., "path_edits": ...} — all five in the one file, so every rule shares
+# the same per-agent record rather than each keeping a counter of its own on disk. "card"
+# and "count" are exactly HRN-49's original fields, read and written on exactly the same
+# terms as before. "total_count" is the PACE rule's running tally of every non-card-touching
+# call this agent_id has made, which a card touch never resets, unlike "count".
+# "search_count" is the read-only search agent's own flat budget, in the same file, so that
+# if an agent_id were ever somehow seen under both roles the tallies still never collide.
+# "path_edits" (HRN-123) is a small object mapping each distinct file_path this run has
+# edited (through Edit or Write, excluding the run's own card) to how many times it has
+# been edited so far in this run — the BRAKE rule's own count, compared against
+# BRAKE_THRESHOLD on every further Edit/Write of that same path. Never cleaned up
+# automatically — a stray handful of small JSON files per executor run is an accepted,
+# stated cost, not an oversight. agent_id values are treated as unique on their own, with
+# no session_id folded in, matching how HRN-46 already found them used (a fresh,
+# effectively-random id per spawned subagent); a same-day collision between two entirely
+# unrelated agents is possible in principle and would only ever cause one run's own counts
+# to be read by another, which is a minor mixed count, never a refusal of a call that
 # should have been allowed outright or an allowance of one that should not.
 #
 # Bypass: CLAUDE_GATE_BYPASS=1 (shared with the other hooks in this directory).
@@ -227,6 +249,14 @@ REFUSE_RATIO = DEFAULT_REFUSE_RATE / DEFAULT_RELAY_RATE  # 1.4, preserved when a
 SEARCH_AGENT_TYPES = {"Explore", "Plan", "trace-audit"}
 SEARCH_AGENT_CEILING = int(DEFAULT_REFUSE_RATE)  # 28: one checkpoint's worth at the REFUSE rate
 
+# --- the BRAKE rule (HRN-123, new) ---
+# Set from the measured per-path edit-count distribution across archived executor-run
+# transcripts only (HRN-123.1): p50=3, p75=5, p90=9, p95=13, p99=26, p100=34. 9 sits at the
+# p90 point — it refuses only the wasteful tail (about one run in ten reaches it at all)
+# while every run whose own worst same-path count stays at 8 or below is never touched by
+# this rule.
+BRAKE_THRESHOLD = 9
+
 ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 
 def deny_json(reason):
@@ -298,6 +328,14 @@ SEARCH_AGENT_TEMPLATE = (
     "with its own task card. A delegated search is meant to be cheap and bounded; "
     "stopping here and reporting back with whatever has been found so far is the "
     "expected outcome, not a fault."
+)
+
+BRAKE_TEMPLATE = (
+    "Blocked by card-touch-gate's BRAKE rule: this run has now edited {path} {count} "
+    "times within this one run, past the threshold of {threshold}; rewrite the file in a "
+    "single call instead of continuing to edit it piece by piece. (This rule tracks one "
+    "file path at a time and is independent of the TOUCH, PACE and SEARCH-AGENT rules on "
+    "the same run; an edit of this run's own task card is never counted against it.)"
 )
 
 
@@ -439,7 +477,7 @@ try:
     safe_id = re.sub(r'[^A-Za-z0-9_-]', '_', agent_id)
     state_path = os.path.join(state_dir, safe_id + ".json")
 
-    state = {"card": None, "count": 0, "total_count": 0, "search_count": 0}
+    state = {"card": None, "count": 0, "total_count": 0, "search_count": 0, "path_edits": {}}
     if os.path.isfile(state_path):
         try:
             with open(state_path, "r", encoding="utf-8") as f:
@@ -483,14 +521,39 @@ try:
     if touched:
         # Resets the TOUCH rule's own count (unchanged from HRN-49) and advances the PACE
         # rule's own total — a card edit is still a call the PACE rule counts, it is just
-        # never one either rule denies.
+        # never one either rule denies. An edit of the run's own card never reaches the
+        # BRAKE rule below at all, by construction — this is the whole of how "the run's
+        # own card is never braked" holds, rather than a special case inside that rule.
         state["count"] = 0
         state["total_count"] = state.get("total_count", 0) + 1
         save_state()
         allow_and_exit()
 
-    # --- neither rule fires for a call whose card was never established at all: fail open,
-    # exactly as HRN-49 always has. ---
+    # --- Rule: the BRAKE rule (HRN-123, new) — refuses the Nth Edit/Write of one and the
+    # same path within this run. Evaluated here, before the "no card at all" fail-open
+    # branch below, because this rule needs no established card to make sense: it is about
+    # one path being rewritten piece by piece too many times in a single run, not about a
+    # run's pace against its own checkpoints. A malformed or missing file_path (not a
+    # string, or empty) is simply not trackable and falls through untouched, same as every
+    # other malformed-payload case this hook already fails open on. ---
+    if tool_name in ("Edit", "Write"):
+        fp = tool_input.get("file_path")
+        if isinstance(fp, str) and fp:
+            path_edits = state.get("path_edits")
+            if not isinstance(path_edits, dict):
+                path_edits = {}
+            new_path_count = path_edits.get(fp, 0) + 1
+            path_edits[fp] = new_path_count
+            state["path_edits"] = path_edits
+            save_state()
+            if new_path_count >= BRAKE_THRESHOLD:
+                print(deny_json(BRAKE_TEMPLATE.format(
+                    path=fp, count=new_path_count, threshold=BRAKE_THRESHOLD)))
+                sys.exit(0)
+
+    # --- neither the TOUCH nor the PACE rule fires for a call whose card was never
+    # established at all: fail open, exactly as HRN-49 always has. The BRAKE rule above is
+    # independent of this and has already been evaluated regardless. ---
     if not state.get("card"):
         allow_and_exit()
 

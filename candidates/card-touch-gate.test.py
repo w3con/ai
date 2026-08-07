@@ -590,6 +590,95 @@ try:
         shutil.rmtree(proj, ignore_errors=True)
         os.remove(t)
 
+    # =====================================================================================
+    # New for HRN-123: the BRAKE rule, a fourth rule independent of TOUCH/PACE/SEARCH-AGENT,
+    # refusing the Nth Edit or Write of one and the same path within a single run. Set from
+    # the measured per-path edit distribution across archived executor-run transcripts only
+    # (HRN-123.1: p50=3, p75=5, p90=9, p95=13, p99=26, p100=34) — N=9, the p90 point.
+    # =====================================================================================
+
+    # --- the Nth same-path edit is refused; unlike the TOUCH and PACE rules, this needs no
+    # established card at all to function — no transcript_path is even given here, so
+    # state["card"] stays None throughout, and the brake still fires on the raw file_path
+    # alone ---
+    d = fresh_dir()
+    try:
+        for i in range(8):
+            check("allow", f"edit {i+1}/8 of the same unrelated path allows, no card "
+                           "established at all",
+                  "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
+                  agent_id="agentBrake1", state_dir=d)
+        check("deny", "the 9th edit of the same path is refused by the BRAKE rule",
+              "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
+              agent_id="agentBrake1", state_dir=d,
+              reason_contains="BRAKE rule")
+        check("deny", "the refusal names the path",
+              "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
+              agent_id="agentBrake1", state_dir=d,
+              reason_contains="/tmp/repeatedly-edited.vue")
+        check("deny", "the refusal names the count and the threshold",
+              "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
+              agent_id="agentBrake1", state_dir=d,
+              reason_contains="threshold of 9")
+        check("deny", "the refusal names the alternative: rewrite in one call",
+              "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
+              agent_id="agentBrake1", state_dir=d,
+              reason_contains="rewrite the file in a single call")
+        # a different path is tracked completely separately and still allows
+        check("allow", "a DIFFERENT path's own edit count is unaffected by the first "
+                       "path's having crossed the brake",
+              "Edit", {"file_path": "/tmp/a-different-file.vue"},
+              agent_id="agentBrake1", state_dir=d)
+        # Write is braked exactly the same as Edit — the rule fires on either tool
+        check("allow", "Write calls against a third path start their own count at 1/9",
+              "Write", {"file_path": "/tmp/a-third-file.vue", "content": "x"},
+              agent_id="agentBrake1", state_dir=d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # --- the run's own card is never braked, no matter how many times it is edited —
+    # exercised with the card established from the spawn brief, exactly the way a real
+    # executor's checkpoint-ticking edits happen ---
+    d = fresh_dir()
+    t = fake_transcript([{"agentId": "agentBrake2", "prompt": f"Implement {CARD}"}])
+    try:
+        check("allow", "agentBrake2 establishes its own card",
+              "Read", {"file_path": "/tmp/x"}, agent_id="agentBrake2", state_dir=d,
+              transcript_path=t)
+        for i in range(15):
+            check("allow", f"card edit {i+1}/15 — well past the BRAKE threshold of 9 — "
+                           "still allows, because a card touch never reaches the BRAKE "
+                           "rule at all",
+                  "Edit", {"file_path": "/Users/laptop/Dev/app/" + CARD},
+                  agent_id="agentBrake2", state_dir=d, transcript_path=t)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        os.remove(t)
+
+    # --- fail open on a malformed payload reaching the BRAKE rule specifically: a
+    # non-string file_path, and an Edit whose tool_input carries no file_path key at all —
+    # neither crashes the hook nor is ever counted, both simply allow ---
+    d = fresh_dir()
+    try:
+        check("allow", "a non-string file_path is not trackable and falls through to "
+                       "allow rather than erroring",
+              "Edit", {"file_path": 12345}, agent_id="agentBrake3", state_dir=d)
+        check("allow", "an Edit with no file_path key at all falls through to allow",
+              "Edit", {}, agent_id="agentBrake3", state_dir=d)
+        # neither malformed call above was ever counted against a real path, so nine
+        # further ordinary edits of a real path still take the full count to deny
+        for i in range(8):
+            check("allow", f"edit {i+1}/8 of a real path after the malformed calls above "
+                           "still allows",
+                  "Edit", {"file_path": "/tmp/after-malformed.vue"},
+                  agent_id="agentBrake3", state_dir=d)
+        check("deny", "the 9th edit of the real path still denies normally — the "
+                      "malformed calls above were never counted towards it",
+              "Edit", {"file_path": "/tmp/after-malformed.vue"},
+              agent_id="agentBrake3", state_dir=d, reason_contains="BRAKE rule")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
 finally:
     pass
 
