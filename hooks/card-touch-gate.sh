@@ -78,12 +78,38 @@
 # this project — see HRN-49's own "Reasons to exist" and its Comments section for the full
 # figure.
 
+# The fail-open promise made above lives INSIDE the Python program below, and therefore
+# cannot cover the one case where that program never starts at all. A missing helper module
+# or a syntax error makes Python exit before a single line of it runs: it prints a traceback
+# and no decision, and a PreToolUse hook that emits no decision is read as a REFUSAL rather
+# than as an allowance. The safety posture inverts in exactly the situation nobody tests for,
+# and on 2026-08-07 it did: while one executor was rewriting this very file in place, the
+# helper it had begun importing did not yet exist on disk, and for that window every tool
+# call by every agent on this machine was refused. Two executors were frozen outright, and
+# the coordinator froze itself the same way an hour later while repairing it.
+#
+# So the Python program's output is captured to a file rather than written straight to
+# standard output, and anything that is not a real decision — a traceback, an empty file, a
+# program that never ran — is replaced here, in the shell, by an explicit allowance. Its
+# standard error is kept, in the same directory as the per-agent state, so that a hook which
+# has silently stopped gating can still be diagnosed rather than merely noticed.
+#
+# This is also why this file must never be edited in place while any agent is running: a
+# shell reads a script incrementally, so a half-written file is a half-written program. A new
+# version is built elsewhere, tested there, and moved onto this path in one atomic step.
+
 THRESHOLD=20
+
+ALLOW_DECISION='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 
 STDIN_DATA="$(cat)"
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
-exec python3 - "$STDIN_DATA" "$HOOKS_DIR" <<'PYEOF'
+GATE_TMP="${CARD_TOUCH_GATE_STATE_DIR:-${TMPDIR:-/tmp}/claude-card-touch-gate}"
+mkdir -p "$GATE_TMP" 2>/dev/null
+DECISION_FILE="$GATE_TMP/.decision.$$"
+
+python3 - "$STDIN_DATA" "$HOOKS_DIR" > "$DECISION_FILE" 2>>"$GATE_TMP/.stderr.log" <<'PYEOF'
 import sys
 import os
 import re
@@ -251,3 +277,12 @@ except Exception:
     # Same fail-open decision as the JSON-parse case above, and for the same reason.
     allow_and_exit()
 PYEOF
+
+DECISION="$(cat "$DECISION_FILE" 2>/dev/null)"
+rm -f "$DECISION_FILE"
+
+case "$DECISION" in
+  *permissionDecision*) printf '%s\n' "$DECISION" ;;
+  *)                    printf '%s\n' "$ALLOW_DECISION" ;;
+esac
+exit 0
