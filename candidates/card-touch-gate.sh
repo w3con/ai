@@ -61,6 +61,29 @@
 #   would have refused the archive's own 34-, 31- and 28-edit cases well before they ran
 #   their course.
 #
+#   A FIFTH rule (HRN-123 phase B): the COORD rule gives the coordinator's own session — a
+#   call carrying no agent_id at all, the same absence that used to mean "left completely
+#   uncounted by every rule in this file" — a ceiling of its own, tracked per SESSION
+#   (keyed on transcript_path) rather than per run. COORD_CEILING (761) was set from the
+#   measured per-session distribution of the coordinator's own calls across every durable
+#   session transcript for this project (HRN-123.4): of 469 session files, 438 never made
+#   a single tool call and are excluded as meaningless for a call-count ceiling; among the
+#   31 that made at least one, p50=86, p75=188.5, p90=761, p95=888.5, p99=1517.7,
+#   p100=1773 — 761 sits at the p90 point and at a natural gap in the data (the next
+#   session down sits at 377, less than half), the same p90 reasoning the BRAKE rule above
+#   already uses. Past the ceiling, every further coordinator call is refused except an
+#   exemption list answering one question: what does a session need in order to land its
+#   current milestone and hand off to a fresh one? Three kinds of call are exempt —
+#   counted nowhere and always allowed regardless of the ceiling — coord_exempt() below:
+#   any Bash call that is a git invocation (version control, this card's own stated
+#   minimum); any Edit or Write under a directory literally called ai/ or kb/ (ai/ is the
+#   stated minimum, kb/ is added because it is the coordinator's only other legitimate
+#   writing surface — see coordinator-source-gate.sh's own allowlist, which draws exactly
+#   this line between the coordinator's document trees and an executor's application
+#   source); and any Bash call naming bin/session-start, the specific remedy this rule's
+#   own refusal message prescribes, exempted so the way out stays usable from the very
+#   session it is given to.
+#
 #   Both the touch rule and the pace rule are evaluated on every non-card-touching call an
 #   agent with an established card makes; either one denying is enough to refuse the call.
 #   The touch rule is checked first and, on the exact same terms as before this extension,
@@ -72,10 +95,13 @@
 #
 # What IS gated: every tool call made by a subagent (an executor) — the hook fires on any
 #   tool name, because an executor's own working pace is measured in tool calls of every
-#   kind, not only Edit/Write. A call is identified as the coordinator's own, and left
-#   completely uncounted by every rule above, by the ABSENCE of an "agent_id" key in the
-#   hook payload — the same discriminator HRN-46 measured and confirmed: present and
-#   non-empty means a subagent made the call, absent means the coordinator did.
+#   kind, not only Edit/Write — under the TOUCH, PACE, SEARCH-AGENT and BRAKE rules, and,
+#   since HRN-123 phase B, every tool call made by the coordinator itself, under the
+#   COORD rule alone (the fifth rule above), which is the only one of the five that ever
+#   looks at a call carrying no agent_id. A call is identified as the coordinator's own by
+#   the ABSENCE of an "agent_id" key in the hook payload — the same discriminator HRN-46
+#   measured and confirmed: present and non-empty means a subagent made the call, absent
+#   means the coordinator did.
 # What resets the TOUCH rule's own count to zero (and nothing else — see above): an Edit or
 #   Write tool call whose file_path names the run's own card — the ONE task-card-shaped path
 #   (ai/timeline/tasks/*.md or ai/harness/tasks/*.md) named in the brief this agent_id was
@@ -90,10 +116,14 @@
 #   re-derived or replaced afterwards, so a run that reads, greps or edits some unrelated
 #   card along the way is never mistaken for owning that card, and is never asked to edit
 #   it.
-# What is NOT gated: the coordinator's own calls (no agent_id present), any run whose brief
-#   cannot be recovered at all (no readable transcript record for its agent_id, or a brief
-#   that names no task-card-shaped path — see "Fail open when the brief can't be read"
-#   below), and a card edited through Bash (a heredoc, sed, or similar) rather than through
+# What is NOT gated: the coordinator's own calls that are either exempt under the COORD
+#   rule — a git command, an Edit/Write under ai/ or kb/, or a bin/session-start call, see
+#   coord_exempt() above — or made with no transcript_path at all to key a per-session
+#   ceiling against (fail open, the same posture this whole file takes whenever it cannot
+#   establish the state it needs); any run whose brief cannot be recovered at all (no
+#   readable transcript record for its agent_id, or a brief that names no task-card-shaped
+#   path — see "Fail open when the brief can't be read" below), and a card edited through Bash
+#   (a heredoc, sed, or similar) rather than through
 #   the Edit or Write tool — a stated, known gap rather than a hidden one: every executor is
 #   separately instructed to tick a checkpoint through the Edit tool, so a Bash-based card
 #   edit is not the realistic path this project's own executors take, unlike the
@@ -147,6 +177,15 @@
 # to be read by another, which is a minor mixed count, never a refusal of a call that
 # should have been allowed outright or an allowance of one that should not.
 #
+# A SIXTH kind of state file, added by HRN-123 phase B and unrelated to the per-agent file
+# above, tracks the COORD rule alone: one small JSON file per COORDINATOR SESSION — not per
+# agent_id, which a coordinator call never carries — at
+# $TMPDIR/claude-card-touch-gate/coord-<sanitized transcript_path basename>.json, holding a
+# single field {"coord_count": ...}, the count of non-exempt coordinator calls this session
+# has made. Kept in the same directory as the per-agent files but under its own "coord-"
+# prefix, so the two families of state can never collide even though they are named from
+# entirely different inputs (a sanitized transcript_path vs. a sanitized agent_id).
+#
 # Bypass: CLAUDE_GATE_BYPASS=1 (shared with the other hooks in this directory).
 # TOUCH_THRESHOLD: 20 tool calls since the card was last touched — unchanged from HRN-49.
 # PACE rates: RELAY 20, REFUSE 28 calls per checkpoint, both set against this project's own
@@ -154,6 +193,10 @@
 # checkpoint, a quarter of cards sit below ~11-12 and a quarter above ~19; RELAY (20) sits
 # just above that top-quartile boundary and REFUSE (28) is reached by only a small extreme
 # tail of the archive. Full figures in HRN-47's own card, checkpoint HRN-47.3.
+# COORD_CEILING: 761 tool calls in one coordinator session (HRN-123.4/.5) — the measured
+# p90 of the per-session distribution of the coordinator's own calls, with an exemption
+# list for version-control commands, ai/ or kb/ edits, and bin/session-start. See the
+# fifth rule above for the full measurement and reasoning.
 
 # The fail-open promise made above lives INSIDE the Python program below, and therefore
 # cannot cover the one case where that program never starts at all. A missing helper module
@@ -257,6 +300,19 @@ SEARCH_AGENT_CEILING = int(DEFAULT_REFUSE_RATE)  # 28: one checkpoint's worth at
 # this rule.
 BRAKE_THRESHOLD = 9
 
+# --- the COORD rule (HRN-123 phase B, new) ---
+# Set from the measured per-session distribution of the coordinator's own tool calls
+# across the durable session transcripts for this project (HRN-123.4): of 469 session
+# files under ~/.claude/projects/-Users-laptop-Dev-app/, 438 never made a single tool
+# call (short, tool-free conversations, excluded from the distribution below as
+# meaningless for a call-count ceiling); among the 31 that made at least one call,
+# p50=86, p75=188.5, p90=761, p95=888.5, p99=1517.7, p100=1773. 761 sits exactly at the
+# p90 point and at a natural gap in the data (the next session down sits at 377, less
+# than half) — it refuses only the small tail of unusually long coordinator sessions
+# while leaving the other roughly 90% of working sessions untouched, the same p90
+# reasoning the BRAKE rule above already uses.
+COORD_CEILING = 761
+
 ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 
 def deny_json(reason):
@@ -338,6 +394,19 @@ BRAKE_TEMPLATE = (
     "the same run; an edit of this run's own task card is never counted against it.)"
 )
 
+COORD_TEMPLATE = (
+    "Blocked by card-touch-gate's COORD rule: this coordinator session has made {count} "
+    "tool calls against its own ceiling of {ceiling}; land the current milestone (commit "
+    "and, if it is finished, push or merge what is done) and start a fresh session "
+    "through bin/session-start. (Version-control commands, any Edit or Write under ai/ "
+    "or kb/, and the bin/session-start call itself are exempt from this rule and from "
+    "its own count, so a session past this ceiling can still commit, write its task "
+    "cards and decisions, and hand off; every other call is refused until then. This "
+    "rule counts only the coordinator's own calls — those carrying no agent_id at all — "
+    "tracked per session rather than per run, and never touches an executor's own TOUCH, "
+    "PACE, SEARCH-AGENT or BRAKE budget on the same or any other run.)"
+)
+
 
 def establish_card(transcript_path, agent_id):
     """The run's own card — the one task-card-shaped path named in the brief this agent_id
@@ -369,6 +438,43 @@ def touches_card(tool_name, tool_input, card_token):
     if not isinstance(fp, str) or not fp:
         return False
     return brief_reader.canonical_card(fp) == brief_reader.canonical_card(card_token)
+
+
+def coord_exempt(tool_name, tool_input):
+    """True for the calls the COORD rule (HRN-123 phase B) never counts and always
+    allows, past its own ceiling or not — the answer to "what does a coordinator session
+    need in order to land its current milestone and hand off to a fresh one", the exact
+    question its own refusal message poses. Three kinds, each named in this card's own
+    acceptance criteria or the refusal message itself: (1) a Bash call that is a git
+    invocation — the tool name checked is literally "git" once any leading path (./git,
+    /usr/bin/git) is stripped, covering every subcommand rather than a chosen few, because
+    committing, pushing and merging are all "the version-control commands" the card names,
+    and a coordinator composing the right commit needs the read-only ones (status, diff,
+    log) too; (2) an Edit or Write whose path names a directory literally called ai/ or
+    kb/ — ai/ is this card's own stated minimum, kb/ is added because it is the only other
+    tree the coordinator legitimately writes directly (coordinator-source-gate.sh's own
+    allowlist draws exactly this line: task cards, decisions and knowledge-base pages are
+    the coordinator's, application source under dpp_demo/dpp_frontend/dpp-vldt is an
+    executor's); and (3) a Bash call naming bin/session-start — the specific remedy this
+    rule's own message prescribes, exempted so that prescription stays usable from the
+    very session it is given to rather than becoming a way out this rule itself blocks."""
+    if tool_name == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return False
+        if "bin/session-start" in command:
+            return True
+        tokens = command.strip().split()
+        if tokens and tokens[0].rsplit("/", 1)[-1] == "git":
+            return True
+        return False
+    if tool_name in ("Edit", "Write"):
+        fp = tool_input.get("file_path")
+        if not isinstance(fp, str) or not fp:
+            return False
+        segments = [s for s in fp.replace("\\", "/").split("/") if s]
+        return "ai" in segments or "kb" in segments
+    return False
 
 
 def resolve_card_path(card_token):
@@ -453,17 +559,56 @@ except Exception:
 if os.environ.get("CLAUDE_GATE_BYPASS") == "1":
     allow_and_exit()
 
-agent_id = data.get("agent_id")
-if not agent_id:
-    # No agent_id at all means this call is the coordinator's own (HRN-46's own finding):
-    # the coordinator is never counted, never gated, by design — untouched by every rule
-    # in this file, old or new.
-    allow_and_exit()
-
 tool_name = data.get("tool_name") or ""
 tool_input = data.get("tool_input") or {}
 transcript_path = data.get("transcript_path")
 agent_type = data.get("agent_type") or ""
+
+agent_id = data.get("agent_id")
+if not agent_id:
+    # No agent_id at all means this call is the coordinator's own (HRN-46's own finding).
+    # Until HRN-123 phase B this meant "never counted, never gated, by design" outright;
+    # now it means "judged only by the COORD rule, in its own try/except, entirely
+    # separate from the four agent-scoped rules below" — a coordinator call still never
+    # touches the TOUCH, PACE, SEARCH-AGENT or BRAKE rules, which all require an agent_id
+    # to key their own state on and none of which this branch ever reaches.
+    try:
+        if coord_exempt(tool_name, tool_input):
+            allow_and_exit()
+        if not transcript_path:
+            # No session identifier at all to key a per-session ceiling on: fail open,
+            # the same posture every other rule in this file takes when it cannot
+            # establish the state it needs to judge anything.
+            allow_and_exit()
+        coord_state_dir = os.environ.get("CARD_TOUCH_GATE_STATE_DIR") or \
+            os.path.join(tempfile.gettempdir(), "claude-card-touch-gate")
+        os.makedirs(coord_state_dir, exist_ok=True)
+        # Keyed on a sanitized transcript_path rather than on agent_id, which a
+        # coordinator call never carries — the "coord-" prefix keeps this family of
+        # state files from ever colliding with an agent's own <agent_id>.json file, even
+        # though the two are named from entirely different inputs.
+        safe_session = re.sub(r'[^A-Za-z0-9_-]', '_', os.path.basename(str(transcript_path)))
+        coord_state_path = os.path.join(coord_state_dir, "coord-" + safe_session + ".json")
+        coord_count = 0
+        if os.path.isfile(coord_state_path):
+            try:
+                with open(coord_state_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    coord_count = loaded.get("coord_count", 0)
+            except Exception:
+                coord_count = 0  # a corrupt state file is a fresh start, not an error to deny on
+        coord_count += 1
+        with open(coord_state_path, "w", encoding="utf-8") as f:
+            json.dump({"coord_count": coord_count}, f)
+        if coord_count > COORD_CEILING:
+            print(deny_json(COORD_TEMPLATE.format(count=coord_count, ceiling=COORD_CEILING)))
+            sys.exit(0)
+        allow_and_exit()
+    except Exception:
+        # Same fail-open decision the rest of this file makes on any internal error, and
+        # for the same reason — see the file header.
+        allow_and_exit()
 
 try:
     # CARD_TOUCH_GATE_STATE_DIR overrides where per-agent state is kept — used by this

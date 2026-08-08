@@ -43,6 +43,7 @@ sibling *.test.py files in this directory rather than unittest).
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -158,6 +159,23 @@ def check(expected, label, tool_name, tool_input, agent_id=None, state_dir=None,
 
 CARD = "ai/harness/tasks/ZZZ-1_fixture.md"
 OTHER_CARD = "ai/harness/tasks/ZZZ-2_unrelated.md"
+
+
+def seed_coord_state(state_dir, transcript_path, count):
+    """Pre-loads the COORD rule's own per-session counter to `count` by writing the same
+    coord-<session>.json file the hook itself would (HRN-123 phase B), keyed on the same
+    sanitized basename of transcript_path the hook computes — so a scenario can prove
+    behaviour right at the measured ceiling (761) without spawning 761 real subprocess
+    calls, which would make this suite impractically slow. The sanitization below is a
+    literal copy of the hook's own (non-alnum characters replaced with '_'); if the
+    hook's own version ever changes, this one has to change with it by hand — the same
+    known duplication SEARCH_AGENT_TYPES already carries against plan-gate.sh's own
+    allowlist, stated once here rather than hidden."""
+    safe_session = re.sub(r'[^A-Za-z0-9_-]', '_', os.path.basename(str(transcript_path)))
+    os.makedirs(state_dir, exist_ok=True)
+    path = os.path.join(state_dir, f"coord-{safe_session}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"coord_count": count}, f)
 
 
 def fresh_dir():
@@ -678,6 +696,117 @@ try:
               agent_id="agentBrake3", state_dir=d, reason_contains="BRAKE rule")
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+    # =====================================================================================
+    # HRN-123 phase B: the COORD rule — the coordinator's own per-session ceiling.
+    # coord_count is seeded directly via seed_coord_state() rather than reached by looping
+    # 761 real subprocess calls (see that helper's own docstring for why); every scenario
+    # below still exercises the hook's real decision path for the one or two calls each
+    # one actually needs to prove.
+    # =====================================================================================
+
+    # --- a coordinator call past the ceiling is refused, naming the COORD rule and the
+    # ceiling; the call that crosses it is the one right after the seeded count, proving
+    # the arithmetic (760 seeded + 1 this call = 761, not yet over; +1 more = 762, over) ---
+    d = fresh_dir()
+    t1 = "/fake/session/coord-session-one.jsonl"
+    try:
+        seed_coord_state(d, t1, 760)
+        check("allow", "coordinator call 761/761 — right at the ceiling — still allows",
+              "Bash", {"command": "echo hi"}, agent_id=None, state_dir=d, transcript_path=t1)
+        check("deny", "coordinator call 762 crosses the ceiling of 761 and is refused",
+              "Bash", {"command": "echo hi"}, agent_id=None, state_dir=d, transcript_path=t1,
+              reason_contains="COORD rule")
+        check("deny", "the refusal names bin/session-start as the way out",
+              "Bash", {"command": "echo hi"}, agent_id=None, state_dir=d, transcript_path=t1,
+              reason_contains="bin/session-start")
+
+        # --- an exempted landing call is allowed even past the ceiling: version control,
+        # an Edit/Write under ai/ or kb/, and the bin/session-start call itself ---
+        check("allow", "a git command is exempt and still allowed past the ceiling",
+              "Bash", {"command": "git status"}, agent_id=None, state_dir=d, transcript_path=t1)
+        check("allow", "a git command with a leading path is still recognised as git",
+              "Bash", {"command": "/usr/bin/git commit -m x"}, agent_id=None, state_dir=d,
+              transcript_path=t1)
+        check("allow", "an Edit under ai/ is exempt and still allowed past the ceiling",
+              "Edit", {"file_path": "/Users/laptop/Dev/app/ai/harness/tasks/ZZZ-3.md"},
+              agent_id=None, state_dir=d, transcript_path=t1)
+        check("allow", "a Write under kb/ is exempt and still allowed past the ceiling",
+              "Write", {"file_path": "/Users/laptop/Dev/app/kb/observability/overview.md"},
+              agent_id=None, state_dir=d, transcript_path=t1)
+        check("allow", "a bin/session-start call is exempt and still allowed past the ceiling",
+              "Bash", {"command": "bin/session-start"}, agent_id=None, state_dir=d,
+              transcript_path=t1)
+
+        # --- exempted calls are never counted: an ordinary call right after them still
+        # denies on exactly the same terms, proving they never advanced or reset coord_count ---
+        check("deny", "an ordinary call right after the exempt ones above still denies — "
+                      "the exempt calls were never counted",
+              "Bash", {"command": "echo still-over"}, agent_id=None, state_dir=d,
+              transcript_path=t1, reason_contains="COORD rule")
+
+        # --- CLAUDE_GATE_BYPASS overrides the COORD refusal, exactly as it already does
+        # for the TOUCH and PACE rules ---
+        check("allow", "CLAUDE_GATE_BYPASS=1 overrides the COORD refusal",
+              "Bash", {"command": "echo hi"}, agent_id=None, state_dir=d, transcript_path=t1,
+              extra_env={"CLAUDE_GATE_BYPASS": "1"})
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # --- per-session isolation: a second, unrelated coordinator session (a different
+    # transcript_path) starts its own count from zero and is completely unaffected by the
+    # first session having already crossed its own ceiling ---
+    d = fresh_dir()
+    t1 = "/fake/session/coord-session-two-a.jsonl"
+    t2 = "/fake/session/coord-session-two-b.jsonl"
+    try:
+        seed_coord_state(d, t1, 900)  # session A is already deep past its own ceiling
+        check("deny", "session A, already past its own ceiling, is refused",
+              "Bash", {"command": "echo hi"}, agent_id=None, state_dir=d, transcript_path=t1,
+              reason_contains="COORD rule")
+        for i in range(10):
+            check("allow", f"session B, an entirely different session, call {i+1}/10 — "
+                           "its own count starts fresh, unaffected by session A",
+                  "Bash", {"command": "echo hi"}, agent_id=None, state_dir=d,
+                  transcript_path=t2)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # --- fail open when no transcript_path is present at all: no session identifier to
+    # key a ceiling against, so every call allows, uncounted — this is the pre-existing
+    # "coordinator call N/30 is never gated" loop's own condition, restated here once more
+    # explicitly against the COORD rule by name, at a count well past COORD_CEILING ---
+    d = fresh_dir()
+    try:
+        for i in range(40):
+            check("allow", f"coordinator call {i+1}/40 with no transcript_path at all "
+                           "is never gated by the COORD rule",
+                  "Bash", {"command": "echo hi"}, agent_id=None, state_dir=d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # --- an executor's own call is never affected by the COORD rule or by any coordinator
+    # session's own state, even when it shares the very same state_dir and the very same
+    # transcript_path a coordinator session used above ---
+    d = fresh_dir()
+    t_shared = "/fake/session/coord-session-three.jsonl"
+    t_exec = fake_transcript([{"agentId": "agentCoord1", "prompt": f"Implement {CARD}"}])
+    try:
+        seed_coord_state(d, t_shared, 900)  # this "session" is already deep past COORD_CEILING
+        check("allow", "an executor call using the SAME transcript_path a refused "
+                       "coordinator session used is still allowed — it carries an "
+                       "agent_id, so it never reaches the COORD rule at all",
+              "Read", {"file_path": "/tmp/x"}, agent_id="agentCoord1", state_dir=d,
+              transcript_path=t_exec)
+        for i in range(15):
+            check("allow", f"executor agentCoord1 ordinary call {i+2}/20 — well within its "
+                           "own TOUCH/PACE budget, completely unaffected by the "
+                           "coordinator's own COORD ceiling",
+                  "Bash", {"command": "echo hi"}, agent_id="agentCoord1", state_dir=d,
+                  transcript_path=t_exec)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        os.remove(t_exec)
 
 finally:
     pass
