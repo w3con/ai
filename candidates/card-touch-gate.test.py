@@ -178,6 +178,26 @@ def seed_coord_state(state_dir, transcript_path, count):
         json.dump({"coord_count": count}, f)
 
 
+def seed_pace_state(state_dir, agent_id, card, total_count, count=0, search_count=0,
+                     path_edits=None):
+    """Pre-loads an agent's own per-agent state file directly (card, count, total_count,
+    search_count, path_edits) — analogous to seed_coord_state() above, for the same reason:
+    HRN-123.8's starting allowance (102) widens the PACE relay/refuse budgets by enough
+    that reaching them by looping real subprocess calls one at a time, the way the
+    pre-HRN-123.8 scenarios below used to, would make this suite impractically slow. Since
+    the hook only calls establish_card() when state["card"] is not already truthy, seeding
+    "card" here directly means a scenario using this helper for its own boundary checks
+    needs no transcript_path or fake_transcript() at all unless it also wants to test the
+    TOUCH rule in the same breath."""
+    os.makedirs(state_dir, exist_ok=True)
+    safe_id = re.sub(r'[^A-Za-z0-9_-]', '_', agent_id)
+    path = os.path.join(state_dir, safe_id + ".json")
+    state = {"card": card, "count": count, "total_count": total_count,
+             "search_count": search_count, "path_edits": path_edits or {}}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+
+
 def fresh_dir():
     return tempfile.mkdtemp(prefix="card-touch-gate-test-")
 
@@ -439,18 +459,32 @@ try:
                   agent_id="agentPace1", state_dir=d, transcript_path=t, project_dir=proj)
 
         # total is now 16 (1 + 3*5); 4 more ordinary calls bring it to 17, 18, 19, 20 — all
-        # still within the PACE relay budget of 20 (rate 20 x (0 ticked + 1))
+        # still within even the OLD PACE relay budget of 20 (rate 20 x (0 ticked + 1)),
+        # let alone HRN-123.8's own widened one
         for i in range(4):
             check("allow", f"post-cycles ordinary call {i+1}/4, PACE total now "
                            f"{17+i}/20, TOUCH's own count only {i+1}/20",
                   "Bash", {"command": "echo x"}, agent_id="agentPace1", state_dir=d,
                   transcript_path=t, project_dir=proj)
 
-        # the 21st total call crosses the PACE relay budget (20) while the TOUCH rule's own
-        # count is only 5 — nowhere near ITS OWN threshold of 20 — so this denial must be
-        # the PACE rule's, not the TOUCH rule's
-        check("deny", "PACE relay fires at total call 21 while the TOUCH rule's own count "
-                      "is only 5/20 — proof the two rules are independent",
+        # HRN-123.8: the starting allowance (102) widens this run's own relay budget from
+        # 20 to 20+102=122 — jump total_count ahead via seed_pace_state() rather than
+        # looping ~100 more real calls, keeping the TOUCH rule's own count (4, from the
+        # loop above) exactly where the real calls left it, so the "nowhere near its own
+        # threshold" claim below still holds under the new arithmetic
+        seed_pace_state(d, "agentPace1", CARD, total_count=121, count=4)
+
+        check("allow", "call 122/122 — exactly at the widened relay budget of "
+                       "20*(0+1)+102=122 — still allows",
+              "Bash", {"command": "echo x"}, agent_id="agentPace1", state_dir=d,
+              transcript_path=t, project_dir=proj)
+
+        # call 123 crosses the widened relay budget (122) while the TOUCH rule's own count
+        # is only 6 — nowhere near ITS OWN threshold of 20 — so this denial must be the
+        # PACE rule's, not the TOUCH rule's
+        check("deny", "call 123 crosses the widened relay budget (122) while the TOUCH "
+                      "rule's own count is only 6/20 — proof the two rules are still "
+                      "independent under the new arithmetic",
               "Bash", {"command": "echo x"}, agent_id="agentPace1", state_dir=d,
               transcript_path=t, project_dir=proj, reason_contains="PACE rule (relay",
               # the PACE message legitimately NAMES the TOUCH rule in passing, to explain
@@ -470,27 +504,37 @@ try:
         os.remove(t)
 
     # --- the PACE rule's relay tier and refuse tier, and the optional per-card `rate:`
-    # override (AC5), proved together against a card that overrides the default rate ---
+    # override (AC5), proved together against a card that overrides the default rate.
+    # HRN-123.8: START_ALLOWANCE (102) is a FLAT addition, unscaled by the card's own rate,
+    # so this card's own relay budget becomes 5*(0+1)+102=107 and its refuse budget becomes
+    # 5*1.4*(0+1)+102=109, rather than the pre-HRN-123.8 5/7 ---
     d = fresh_dir()
-    proj = fixture_project({CARD: {"ticked": 0, "rate": 5}})  # relay 5, refuse 5*1.4=7
+    proj = fixture_project({CARD: {"ticked": 0, "rate": 5}})  # relay 5+102=107, refuse 109
     t = fake_transcript([{"agentId": "agentPace2", "prompt": f"Implement {CARD}"}])
     try:
-        check("allow", "agentPace2 establishes the card under its own rate:5 (total 1/5)",
-              "Read", {"file_path": "/tmp/x"}, agent_id="agentPace2", state_dir=d,
+        check("allow", "agentPace2 establishes the card under its own rate:5 (total "
+                       "1/107)", "Read", {"file_path": "/tmp/x"}, agent_id="agentPace2",
+              state_dir=d, transcript_path=t, project_dir=proj)
+
+        # jump total_count ahead via seed_pace_state() rather than looping ~105 more real
+        # calls to reach the widened budget
+        seed_pace_state(d, "agentPace2", CARD, total_count=105)
+
+        check("allow", "call 106/107, still within the widened relay budget "
+                       "(5*(0+1)+102=107)", "Bash", {"command": "echo x"},
+              agent_id="agentPace2", state_dir=d, transcript_path=t, project_dir=proj)
+        check("allow", "call 107/107 — exactly at the widened relay budget — still allows",
+              "Bash", {"command": "echo x"}, agent_id="agentPace2", state_dir=d,
               transcript_path=t, project_dir=proj)
-        for i in range(4):
-            check("allow", f"ordinary call {i+2}/5, still within the card's own relay "
-                           "budget of 5", "Bash", {"command": "echo x"},
-                  agent_id="agentPace2", state_dir=d, transcript_path=t, project_dir=proj)
-        check("deny", "6th total call crosses the card's own relay budget (5) — relay "
-                      "tier, not refuse", "Bash", {"command": "echo x"},
-              agent_id="agentPace2", state_dir=d, transcript_path=t, project_dir=proj,
-              reason_contains="PACE rule (relay")
-        check("deny", "7th total call is still within the refuse ceiling (7) — relay "
+        check("deny", "call 108 crosses the widened relay budget (107) — relay tier, not "
+                      "refuse (widened refuse ceiling is 5*1.4*(0+1)+102=109)",
+              "Bash", {"command": "echo x"}, agent_id="agentPace2", state_dir=d,
+              transcript_path=t, project_dir=proj, reason_contains="PACE rule (relay")
+        check("deny", "call 109 is still within the widened refuse ceiling (109) — relay "
                       "tier again, not refuse", "Bash", {"command": "echo x"},
               agent_id="agentPace2", state_dir=d, transcript_path=t, project_dir=proj,
               reason_contains="PACE rule (relay")
-        check("deny", "8th total call crosses the refuse ceiling (7) — refuse tier",
+        check("deny", "call 110 crosses the widened refuse ceiling (109) — refuse tier",
               "Bash", {"command": "echo x"}, agent_id="agentPace2", state_dir=d,
               transcript_path=t, project_dir=proj, reason_contains="PACE rule (refuse")
         check("allow", "an Edit to the tracked card is still allowed through even at the "
@@ -502,28 +546,50 @@ try:
         os.remove(t)
 
     # --- ticking a checkpoint box widens the PACE budget live, on the very next call, off
-    # the same card file — no restart, no reset needed ---
+    # the same card file — no restart, no reset needed. HRN-123.8: this scenario is also
+    # this suite's proof that the starting allowance is spent only once per run rather than
+    # once per checkpoint — the ticked=1 budget below is exactly `rate` (5) higher than the
+    # ticked=0 budget, never `rate + START_ALLOWANCE` again ---
     d = fresh_dir()
-    proj = fixture_project({CARD: {"ticked": 0, "rate": 5}})  # relay 5, refuse 7
+    proj = fixture_project({CARD: {"ticked": 0, "rate": 5}})  # relay 5+102=107, refuse 109
     t = fake_transcript([{"agentId": "agentWiden", "prompt": f"Implement {CARD}"}])
     try:
         check("allow", "establish card (rate 5, ticked 0)", "Read", {"file_path": "/tmp/x"},
               agent_id="agentWiden", state_dir=d, transcript_path=t, project_dir=proj)
-        for i in range(4):
-            check("allow", f"ordinary call {i+2}/5", "Bash", {"command": "echo x"},
-                  agent_id="agentWiden", state_dir=d, transcript_path=t, project_dir=proj)
-        check("deny", "6th total call crosses the relay budget of 5 (ticked still 0)",
+
+        # jump ahead to the widened ticked=0 relay budget's own boundary rather than
+        # looping ~105 real calls
+        seed_pace_state(d, "agentWiden", CARD, total_count=106)
+        check("allow", "call 107 — exactly at the widened relay budget of "
+                       "5*(0+1)+102=107 (ticked still 0) — still allows",
+              "Bash", {"command": "echo x"}, agent_id="agentWiden", state_dir=d,
+              transcript_path=t, project_dir=proj)
+        check("deny", "call 108 crosses the widened relay budget (107) (ticked still 0)",
               "Bash", {"command": "echo x"}, agent_id="agentWiden", state_dir=d,
               transcript_path=t, project_dir=proj, reason_contains="PACE rule (relay")
 
         # simulate the executor ticking one checkpoint box on the real card file — the
-        # relay budget is now 5*(1+1)=10
+        # relay budget is now 5*(1+1)+102=112: exactly 5 (the rate) higher than the
+        # ticked=0 budget of 107, never 107+102=209 — proof the starting allowance was
+        # granted once, at the run's own start, and is not re-added at this second
+        # checkpoint
         write_fixture_card(proj, CARD, ticked=1, rate=5)
 
-        check("allow", "after the box tick widens the live budget to 5*(1+1)=10, the 7th "
-                       "total call is allowed again with no other change",
+        check("allow", "after the box tick widens the live budget to 5*(1+1)+102=112, the "
+                       "next total call (109) is allowed again with no other change",
               "Bash", {"command": "echo x"}, agent_id="agentWiden", state_dir=d,
               transcript_path=t, project_dir=proj)
+
+        # jump ahead again, to the new ticked=1 boundary itself, to prove it sits exactly
+        # at 112 and not at 112+102=214
+        seed_pace_state(d, "agentWiden", CARD, total_count=111)
+        check("allow", "call 112 — exactly at the ticked=1 budget of 5*(1+1)+102=112 — "
+                       "still allows", "Bash", {"command": "echo x"},
+              agent_id="agentWiden", state_dir=d, transcript_path=t, project_dir=proj)
+        check("deny", "call 113 crosses the ticked=1 budget (112) — proof the allowance "
+                      "was spent only once, not re-granted at this second checkpoint",
+              "Bash", {"command": "echo x"}, agent_id="agentWiden", state_dir=d,
+              transcript_path=t, project_dir=proj, reason_contains="PACE rule (relay")
     finally:
         shutil.rmtree(d, ignore_errors=True)
         shutil.rmtree(proj, ignore_errors=True)
@@ -807,6 +873,42 @@ try:
     finally:
         shutil.rmtree(d, ignore_errors=True)
         os.remove(t_exec)
+
+    # =====================================================================================
+    # HRN-123.8: the starting allowance — a fixed number of calls (measured at 102,
+    # HRN-123.7) granted once per run and added, unscaled, to both the relay and the refuse
+    # budget, so a run's very first checkpoint is not held to the archive's own median
+    # per-checkpoint rate while it is still paying the one-time cost of arriving. The
+    # rewritten agentPace1/agentPace2/agentWiden scenarios above already prove the exact
+    # new boundary numbers, including that the allowance is spent only once (agentWiden);
+    # this block adds the direct old-arithmetic-vs-new-arithmetic comparison at one fixed
+    # call count that the card's own acceptance criterion asks for by name.
+    # =====================================================================================
+    d = fresh_dir()
+    proj = fixture_project({CARD: {"ticked": 0}})  # default rate 20: old budget 20, new 122
+    t = fake_transcript([{"agentId": "agentAllowance", "prompt": f"Implement {CARD}"}])
+    try:
+        check("allow", "agentAllowance establishes the card (rate 20, ticked 0)", "Read",
+              {"file_path": "/tmp/x"}, agent_id="agentAllowance", state_dir=d,
+              transcript_path=t, project_dir=proj)
+
+        # jump total_count to 20 directly rather than looping 19 more real calls — this
+        # scenario is about the PACE rule's own arithmetic, not the TOUCH rule, and the
+        # TOUCH rule's own count is reset to 0 here for exactly that reason: at 20 real
+        # non-touching calls the TOUCH rule (its own, unrelated 20-call threshold) would
+        # otherwise deny this same 21st call first, for a completely different reason
+        seed_pace_state(d, "agentAllowance", CARD, total_count=20, count=0)
+
+        check("allow", "call 21 — exactly the call count the OLD arithmetic "
+                       "(rate*(ticked+1)=20, no starting allowance) would have refused, "
+                       "as the pre-HRN-123.8 version of this same scenario used to assert "
+                       "— is allowed under the NEW arithmetic (20+102=122) at this same "
+                       "call count", "Bash", {"command": "echo x"},
+              agent_id="agentAllowance", state_dir=d, transcript_path=t, project_dir=proj)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(proj, ignore_errors=True)
+        os.remove(t)
 
 finally:
     pass

@@ -61,6 +61,42 @@
 #   would have refused the archive's own 34-, 31- and 28-edit cases well before they ran
 #   their course.
 #
+#   A correction to the PACE rule's own arithmetic (HRN-123 phase C, not a sixth rule): the
+#   relay and refuse budgets now each carry a fixed STARTING ALLOWANCE on top of
+#   rate * (ticked + 1), granted once per run rather than once per checkpoint, because the
+#   cost it allows for — reading the card, finding a way around a copy of the repository
+#   cut minutes earlier, locating the files a run was sent to change — is paid once, at the
+#   start of a run, and never again. Before this correction, a run that had ticked nothing
+#   was held to exactly the archive's own median for one checkpoint, and because that
+#   figure is a median, roughly half of all first checkpoints exceeded it by construction,
+#   before any judgement about whether the run was actually wasteful; on the night of
+#   2026-08-08 three separate executors were relayed inside their very first checkpoint for
+#   exactly this reason. START_ALLOWANCE (102) was measured (HRN-123.7) from how many tool
+#   calls an archived executor run made before the first checkpoint-ticking edit it ever
+#   made — the same tick-finding rule bin/agent-spend's own find_ticks() uses (an Edit
+#   changing '- [ ]' to '- [x]' on a task-card file) and the same executor/coordinator
+#   discriminator bin/agent-spend already uses (HRN-123.1/.4) — across 155 executor runs
+#   that ticked at least one checkpoint (414 further executor runs that never ticked one at
+#   all were excluded, as meaningless for this measurement): p50=39, p75=62, p90=102,
+#   p95=130, p99=230, p100=1751. 102 sits at the p90 point, the same percentile the BRAKE
+#   and COORD constants above already use, chosen here for the opposite reason: it is
+#   generous enough that the ordinary cost of arriving is fully covered for roughly nine
+#   runs in ten, leaving only the small tail of unusually expensive arrivals still exposed
+#   to the archive's own median rate on their first checkpoint. (The single p100 outlier,
+#   1751, sits inside a durable session transcript whose project directory names a path
+#   under .claude/worktrees/ — the exact substring the executor/coordinator discriminator
+#   reads as "this is an executor run"; bin/session-start (HRN-115) also cuts a fresh
+#   worktree under that same directory for a second COORDINATOR session, which the
+#   discriminator has no way to tell apart from an executor's own worktree, so this one
+#   value may not be an executor run at all. It does not move the chosen p90 and is
+#   recorded here rather than quietly dropped.) START_ALLOWANCE is a flat addition, the
+#   same fixed number regardless of a card's own `rate:` override, because the cost it
+#   covers — arriving in an unfamiliar copy of the repository — does not scale with how
+#   many calls a card's own checkpoints are expected to cost; being a flat addition rather
+#   than a multiple of rate is also exactly what makes it "spent once": the very next
+#   checkpoint's own budget is still exactly rate higher than the one before it, never
+#   rate + START_ALLOWANCE again.
+#
 #   A FIFTH rule (HRN-123 phase B): the COORD rule gives the coordinator's own session — a
 #   call carrying no agent_id at all, the same absence that used to mean "left completely
 #   uncounted by every rule in this file" — a ceiling of its own, tracked per SESSION
@@ -193,6 +229,10 @@
 # checkpoint, a quarter of cards sit below ~11-12 and a quarter above ~19; RELAY (20) sits
 # just above that top-quartile boundary and REFUSE (28) is reached by only a small extreme
 # tail of the archive. Full figures in HRN-47's own card, checkpoint HRN-47.3.
+# START_ALLOWANCE: 102 calls (HRN-123.7/.8), added once per run — never once per checkpoint
+# — to both the relay and the refuse budget, so a run's first checkpoint is not held to the
+# archive's own median rate while it is still paying the one-time cost of arriving. See the
+# "correction to the PACE rule's own arithmetic" paragraph above for the full measurement.
 # COORD_CEILING: 761 tool calls in one coordinator session (HRN-123.4/.5) — the measured
 # p90 of the per-session distribution of the coordinator's own calls, with an exemption
 # list for version-control commands, ai/ or kb/ edits, and bin/session-start. See the
@@ -300,6 +340,19 @@ SEARCH_AGENT_CEILING = int(DEFAULT_REFUSE_RATE)  # 28: one checkpoint's worth at
 # this rule.
 BRAKE_THRESHOLD = 9
 
+# --- the starting allowance (HRN-123 phase C, new) ---
+# A fixed number of calls, granted once per run and added, unscaled, to both the relay and
+# the refuse budget (never multiplied by the ticked-checkpoint count), so a run's very
+# first checkpoint is not held to the archive's own median per-checkpoint rate while it is
+# still paying the one-time cost of arriving: reading the card, finding a way around a
+# copy of the repository cut minutes earlier, locating the files it was sent to change.
+# Measured (HRN-123.7) as how many tool calls an archived executor run made before the
+# first checkpoint-ticking edit it ever made, across 155 executor runs that ticked at
+# least one checkpoint (414 further executor runs that never ticked one at all were
+# excluded): p50=39, p75=62, p90=102, p95=130, p99=230, p100=1751. 102 sits at the p90
+# point, the same percentile the BRAKE and COORD constants above already use.
+START_ALLOWANCE = 102
+
 # --- the COORD rule (HRN-123 phase B, new) ---
 # Set from the measured per-session distribution of the coordinator's own tool calls
 # across the durable session transcripts for this project (HRN-123.4): of 469 session
@@ -351,7 +404,9 @@ TOUCH_RULE_TEMPLATE = (
 PACE_RELAY_TEMPLATE = (
     "Blocked by card-touch-gate's PACE rule (relay tier): this run has made {count} tool "
     "calls in total against a relay budget of {budget} on {card} — {rate} calls per "
-    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far. This is a relay, not a "
+    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far, plus a one-time starting "
+    "allowance of {allowance} calls for this run's own cold start, granted once per run "
+    "and never re-granted at a later checkpoint. This is a relay, not a "
     "failure: finish the checkpoint you are on, tick its box (change '- [ ]' to '- [x]') "
     "and add a short sentence saying what you actually did, and overwrite the card's own "
     "'## Working state' section — never append to it — with what this run has "
@@ -367,8 +422,9 @@ PACE_RELAY_TEMPLATE = (
 PACE_REFUSE_TEMPLATE = (
     "Blocked by card-touch-gate's PACE rule (refuse tier): this run has made {count} tool "
     "calls in total against a refuse ceiling of {budget} on {card} — {rate} calls per "
-    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far — well past its own relay "
-    "point. Every further call is refused outright, because a run this far above the "
+    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far, plus the same one-time "
+    "starting allowance of {allowance} calls the relay tier above already carries — well "
+    "past its own relay point. Every further call is refused outright, because a run this far above the "
     "ordinary pace is doing something nobody has noticed. The only calls still allowed "
     "are an Edit or Write to {card} itself: tick the checkpoint you are on and overwrite "
     "'## Working state' with where this run actually stands, then stop. (This is the "
@@ -733,18 +789,26 @@ try:
             if relay_rate is None:
                 relay_rate = DEFAULT_RELAY_RATE
             refuse_rate = relay_rate * REFUSE_RATIO
-            budget_relay = relay_rate * (ticked + 1)
-            budget_refuse = refuse_rate * (ticked + 1)
+            # HRN-123.8: START_ALLOWANCE is added flat, unscaled by (ticked + 1) — this is
+            # the whole of how it is "spent once per run" rather than "once per
+            # checkpoint": a flat additive term does not compound as ticked grows, so the
+            # very next checkpoint's own budget is still exactly relay_rate (or
+            # refuse_rate) higher than the one before it, never that plus START_ALLOWANCE
+            # again.
+            budget_relay = relay_rate * (ticked + 1) + START_ALLOWANCE
+            budget_refuse = refuse_rate * (ticked + 1) + START_ALLOWANCE
 
             if total_new_count > budget_refuse:
                 print(deny_json(PACE_REFUSE_TEMPLATE.format(
                     count=total_new_count, budget=fmt_num(budget_refuse),
-                    card=state["card"], rate=fmt_num(refuse_rate), ticked=ticked)))
+                    card=state["card"], rate=fmt_num(refuse_rate), ticked=ticked,
+                    allowance=fmt_num(START_ALLOWANCE))))
                 sys.exit(0)
             if total_new_count > budget_relay:
                 print(deny_json(PACE_RELAY_TEMPLATE.format(
                     count=total_new_count, budget=fmt_num(budget_relay),
-                    card=state["card"], rate=fmt_num(relay_rate), ticked=ticked)))
+                    card=state["card"], rate=fmt_num(relay_rate), ticked=ticked,
+                    allowance=fmt_num(START_ALLOWANCE))))
                 sys.exit(0)
 
     allow_and_exit()
