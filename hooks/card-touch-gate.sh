@@ -43,6 +43,83 @@
 #   exists only so a delegated search is bounded too, the same way the executor that
 #   spawned it already is.
 #
+#   A FOURTH rule (HRN-123): the BRAKE rule refuses the Nth Edit or Write of one and the
+#   same path within a single run — the single largest measured waste the archive showed
+#   (ai/harness/spend-audit_2026-08-08.md §4: one file edited 34 separate times in one run,
+#   each edit re-reading the whole conversation, when one rewrite would have done the same
+#   work in one call). It tracks a per-path edit count in the same per-agent state file,
+#   under its own field, and is evaluated on every Edit/Write call that does not touch the
+#   run's own card — a card touch already returns before this rule is reached, so the
+#   card itself is structurally exempt, never a special case inside the rule. Unlike the
+#   TOUCH and PACE rules, it does not require a card to be established at all: it is about
+#   one path being edited too many times within one run, not about a run's own pace
+#   relative to its checkpoints. N (BRAKE_THRESHOLD, 9) was set from the measured per-path
+#   edit-count distribution across archived EXECUTOR-run transcripts only, using the same
+#   executor/coordinator discriminator bin/agent-spend already uses (HRN-123.1): p50=3,
+#   p75=5, p90=9, p95=13, p99=26, p100=34 — a threshold at the p90 point catches only the
+#   wasteful tail (about one run in ten) while leaving the other nine untouched, and it
+#   would have refused the archive's own 34-, 31- and 28-edit cases well before they ran
+#   their course.
+#
+#   A correction to the PACE rule's own arithmetic (HRN-123 phase C, not a sixth rule): the
+#   relay and refuse budgets now each carry a fixed STARTING ALLOWANCE on top of
+#   rate * (ticked + 1), granted once per run rather than once per checkpoint, because the
+#   cost it allows for — reading the card, finding a way around a copy of the repository
+#   cut minutes earlier, locating the files a run was sent to change — is paid once, at the
+#   start of a run, and never again. Before this correction, a run that had ticked nothing
+#   was held to exactly the archive's own median for one checkpoint, and because that
+#   figure is a median, roughly half of all first checkpoints exceeded it by construction,
+#   before any judgement about whether the run was actually wasteful; on the night of
+#   2026-08-08 three separate executors were relayed inside their very first checkpoint for
+#   exactly this reason. START_ALLOWANCE (102) was measured (HRN-123.7) from how many tool
+#   calls an archived executor run made before the first checkpoint-ticking edit it ever
+#   made — the same tick-finding rule bin/agent-spend's own find_ticks() uses (an Edit
+#   changing '- [ ]' to '- [x]' on a task-card file) and the same executor/coordinator
+#   discriminator bin/agent-spend already uses (HRN-123.1/.4) — across 155 executor runs
+#   that ticked at least one checkpoint (414 further executor runs that never ticked one at
+#   all were excluded, as meaningless for this measurement): p50=39, p75=62, p90=102,
+#   p95=130, p99=230, p100=1751. 102 sits at the p90 point, the same percentile the BRAKE
+#   and COORD constants above already use, chosen here for the opposite reason: it is
+#   generous enough that the ordinary cost of arriving is fully covered for roughly nine
+#   runs in ten, leaving only the small tail of unusually expensive arrivals still exposed
+#   to the archive's own median rate on their first checkpoint. (The single p100 outlier,
+#   1751, sits inside a durable session transcript whose project directory names a path
+#   under .claude/worktrees/ — the exact substring the executor/coordinator discriminator
+#   reads as "this is an executor run"; bin/session-start (HRN-115) also cuts a fresh
+#   worktree under that same directory for a second COORDINATOR session, which the
+#   discriminator has no way to tell apart from an executor's own worktree, so this one
+#   value may not be an executor run at all. It does not move the chosen p90 and is
+#   recorded here rather than quietly dropped.) START_ALLOWANCE is a flat addition, the
+#   same fixed number regardless of a card's own `rate:` override, because the cost it
+#   covers — arriving in an unfamiliar copy of the repository — does not scale with how
+#   many calls a card's own checkpoints are expected to cost; being a flat addition rather
+#   than a multiple of rate is also exactly what makes it "spent once": the very next
+#   checkpoint's own budget is still exactly rate higher than the one before it, never
+#   rate + START_ALLOWANCE again.
+#
+#   A FIFTH rule (HRN-123 phase B): the COORD rule gives the coordinator's own session — a
+#   call carrying no agent_id at all, the same absence that used to mean "left completely
+#   uncounted by every rule in this file" — a ceiling of its own, tracked per SESSION
+#   (keyed on transcript_path) rather than per run. COORD_CEILING (761) was set from the
+#   measured per-session distribution of the coordinator's own calls across every durable
+#   session transcript for this project (HRN-123.4): of 469 session files, 438 never made
+#   a single tool call and are excluded as meaningless for a call-count ceiling; among the
+#   31 that made at least one, p50=86, p75=188.5, p90=761, p95=888.5, p99=1517.7,
+#   p100=1773 — 761 sits at the p90 point and at a natural gap in the data (the next
+#   session down sits at 377, less than half), the same p90 reasoning the BRAKE rule above
+#   already uses. Past the ceiling, every further coordinator call is refused except an
+#   exemption list answering one question: what does a session need in order to land its
+#   current milestone and hand off to a fresh one? Three kinds of call are exempt —
+#   counted nowhere and always allowed regardless of the ceiling — coord_exempt() below:
+#   any Bash call that is a git invocation (version control, this card's own stated
+#   minimum); any Edit or Write under a directory literally called ai/ or kb/ (ai/ is the
+#   stated minimum, kb/ is added because it is the coordinator's only other legitimate
+#   writing surface — see coordinator-source-gate.sh's own allowlist, which draws exactly
+#   this line between the coordinator's document trees and an executor's application
+#   source); and any Bash call naming bin/session-start, the specific remedy this rule's
+#   own refusal message prescribes, exempted so the way out stays usable from the very
+#   session it is given to.
+#
 #   Both the touch rule and the pace rule are evaluated on every non-card-touching call an
 #   agent with an established card makes; either one denying is enough to refuse the call.
 #   The touch rule is checked first and, on the exact same terms as before this extension,
@@ -54,10 +131,13 @@
 #
 # What IS gated: every tool call made by a subagent (an executor) — the hook fires on any
 #   tool name, because an executor's own working pace is measured in tool calls of every
-#   kind, not only Edit/Write. A call is identified as the coordinator's own, and left
-#   completely uncounted by every rule above, by the ABSENCE of an "agent_id" key in the
-#   hook payload — the same discriminator HRN-46 measured and confirmed: present and
-#   non-empty means a subagent made the call, absent means the coordinator did.
+#   kind, not only Edit/Write — under the TOUCH, PACE, SEARCH-AGENT and BRAKE rules, and,
+#   since HRN-123 phase B, every tool call made by the coordinator itself, under the
+#   COORD rule alone (the fifth rule above), which is the only one of the five that ever
+#   looks at a call carrying no agent_id. A call is identified as the coordinator's own by
+#   the ABSENCE of an "agent_id" key in the hook payload — the same discriminator HRN-46
+#   measured and confirmed: present and non-empty means a subagent made the call, absent
+#   means the coordinator did.
 # What resets the TOUCH rule's own count to zero (and nothing else — see above): an Edit or
 #   Write tool call whose file_path names the run's own card — the ONE task-card-shaped path
 #   (ai/timeline/tasks/*.md or ai/harness/tasks/*.md) named in the brief this agent_id was
@@ -72,10 +152,14 @@
 #   re-derived or replaced afterwards, so a run that reads, greps or edits some unrelated
 #   card along the way is never mistaken for owning that card, and is never asked to edit
 #   it.
-# What is NOT gated: the coordinator's own calls (no agent_id present), any run whose brief
-#   cannot be recovered at all (no readable transcript record for its agent_id, or a brief
-#   that names no task-card-shaped path — see "Fail open when the brief can't be read"
-#   below), and a card edited through Bash (a heredoc, sed, or similar) rather than through
+# What is NOT gated: the coordinator's own calls that are either exempt under the COORD
+#   rule — a git command, an Edit/Write under ai/ or kb/, or a bin/session-start call, see
+#   coord_exempt() above — or made with no transcript_path at all to key a per-session
+#   ceiling against (fail open, the same posture this whole file takes whenever it cannot
+#   establish the state it needs); any run whose brief cannot be recovered at all (no
+#   readable transcript record for its agent_id, or a brief that names no task-card-shaped
+#   path — see "Fail open when the brief can't be read" below), and a card edited through Bash
+#   (a heredoc, sed, or similar) rather than through
 #   the Edit or Write tool — a stated, known gap rather than a hidden one: every executor is
 #   separately instructed to tick a checkpoint through the Edit tool, so a Bash-based card
 #   edit is not the realistic path this project's own executors take, unlike the
@@ -109,21 +193,34 @@
 # "Decide technical details yourself."
 #
 # State: one small JSON file per agent_id under $TMPDIR/claude-card-touch-gate/, holding
-# THREE fields now instead of two — {"card": ..., "count": ..., "total_count": ...} — all
-# three in the one file, so the touch rule and the pace rule share the same per-agent record
-# rather than each keeping a counter of its own on disk. "card" and "count" are exactly
-# HRN-49's original fields, read and written on exactly the same terms as before. "total_count"
-# is new: a plain running tally of every non-card-touching call this agent_id has made,
-# which a card touch never resets, unlike "count". A read-only search agent (the third,
-# card-independent mechanism above) uses a fourth field, "search_count", in the same file,
-# so that if an agent_id were ever somehow seen under both roles the two tallies still never
-# collide. Never cleaned up automatically — a stray handful of small JSON files per executor
-# run is an accepted, stated cost, not an oversight. agent_id values are treated as unique
-# on their own, with no session_id folded in, matching how HRN-46 already found them used (a
-# fresh, effectively-random id per spawned subagent); a same-day collision between two
-# entirely unrelated agents is possible in principle and would only ever cause one run's own
-# counts to be read by another, which is a minor mixed count, never a refusal of a call that
+# FIVE fields now instead of two — {"card": ..., "count": ..., "total_count": ...,
+# "search_count": ..., "path_edits": ...} — all five in the one file, so every rule shares
+# the same per-agent record rather than each keeping a counter of its own on disk. "card"
+# and "count" are exactly HRN-49's original fields, read and written on exactly the same
+# terms as before. "total_count" is the PACE rule's running tally of every non-card-touching
+# call this agent_id has made, which a card touch never resets, unlike "count".
+# "search_count" is the read-only search agent's own flat budget, in the same file, so that
+# if an agent_id were ever somehow seen under both roles the tallies still never collide.
+# "path_edits" (HRN-123) is a small object mapping each distinct file_path this run has
+# edited (through Edit or Write, excluding the run's own card) to how many times it has
+# been edited so far in this run — the BRAKE rule's own count, compared against
+# BRAKE_THRESHOLD on every further Edit/Write of that same path. Never cleaned up
+# automatically — a stray handful of small JSON files per executor run is an accepted,
+# stated cost, not an oversight. agent_id values are treated as unique on their own, with
+# no session_id folded in, matching how HRN-46 already found them used (a fresh,
+# effectively-random id per spawned subagent); a same-day collision between two entirely
+# unrelated agents is possible in principle and would only ever cause one run's own counts
+# to be read by another, which is a minor mixed count, never a refusal of a call that
 # should have been allowed outright or an allowance of one that should not.
+#
+# A SIXTH kind of state file, added by HRN-123 phase B and unrelated to the per-agent file
+# above, tracks the COORD rule alone: one small JSON file per COORDINATOR SESSION — not per
+# agent_id, which a coordinator call never carries — at
+# $TMPDIR/claude-card-touch-gate/coord-<sanitized transcript_path basename>.json, holding a
+# single field {"coord_count": ...}, the count of non-exempt coordinator calls this session
+# has made. Kept in the same directory as the per-agent files but under its own "coord-"
+# prefix, so the two families of state can never collide even though they are named from
+# entirely different inputs (a sanitized transcript_path vs. a sanitized agent_id).
 #
 # Bypass: CLAUDE_GATE_BYPASS=1 (shared with the other hooks in this directory).
 # TOUCH_THRESHOLD: 20 tool calls since the card was last touched — unchanged from HRN-49.
@@ -132,6 +229,14 @@
 # checkpoint, a quarter of cards sit below ~11-12 and a quarter above ~19; RELAY (20) sits
 # just above that top-quartile boundary and REFUSE (28) is reached by only a small extreme
 # tail of the archive. Full figures in HRN-47's own card, checkpoint HRN-47.3.
+# START_ALLOWANCE: 102 calls (HRN-123.7/.8), added once per run — never once per checkpoint
+# — to both the relay and the refuse budget, so a run's first checkpoint is not held to the
+# archive's own median rate while it is still paying the one-time cost of arriving. See the
+# "correction to the PACE rule's own arithmetic" paragraph above for the full measurement.
+# COORD_CEILING: 761 tool calls in one coordinator session (HRN-123.4/.5) — the measured
+# p90 of the per-session distribution of the coordinator's own calls, with an exemption
+# list for version-control commands, ai/ or kb/ edits, and bin/session-start. See the
+# fifth rule above for the full measurement and reasoning.
 
 # The fail-open promise made above lives INSIDE the Python program below, and therefore
 # cannot cover the one case where that program never starts at all. A missing helper module
@@ -227,6 +332,40 @@ REFUSE_RATIO = DEFAULT_REFUSE_RATE / DEFAULT_RELAY_RATE  # 1.4, preserved when a
 SEARCH_AGENT_TYPES = {"Explore", "Plan", "trace-audit"}
 SEARCH_AGENT_CEILING = int(DEFAULT_REFUSE_RATE)  # 28: one checkpoint's worth at the REFUSE rate
 
+# --- the BRAKE rule (HRN-123, new) ---
+# Set from the measured per-path edit-count distribution across archived executor-run
+# transcripts only (HRN-123.1): p50=3, p75=5, p90=9, p95=13, p99=26, p100=34. 9 sits at the
+# p90 point — it refuses only the wasteful tail (about one run in ten reaches it at all)
+# while every run whose own worst same-path count stays at 8 or below is never touched by
+# this rule.
+BRAKE_THRESHOLD = 9
+
+# --- the starting allowance (HRN-123 phase C, new) ---
+# A fixed number of calls, granted once per run and added, unscaled, to both the relay and
+# the refuse budget (never multiplied by the ticked-checkpoint count), so a run's very
+# first checkpoint is not held to the archive's own median per-checkpoint rate while it is
+# still paying the one-time cost of arriving: reading the card, finding a way around a
+# copy of the repository cut minutes earlier, locating the files it was sent to change.
+# Measured (HRN-123.7) as how many tool calls an archived executor run made before the
+# first checkpoint-ticking edit it ever made, across 155 executor runs that ticked at
+# least one checkpoint (414 further executor runs that never ticked one at all were
+# excluded): p50=39, p75=62, p90=102, p95=130, p99=230, p100=1751. 102 sits at the p90
+# point, the same percentile the BRAKE and COORD constants above already use.
+START_ALLOWANCE = 102
+
+# --- the COORD rule (HRN-123 phase B, new) ---
+# Set from the measured per-session distribution of the coordinator's own tool calls
+# across the durable session transcripts for this project (HRN-123.4): of 469 session
+# files under ~/.claude/projects/-Users-laptop-Dev-app/, 438 never made a single tool
+# call (short, tool-free conversations, excluded from the distribution below as
+# meaningless for a call-count ceiling); among the 31 that made at least one call,
+# p50=86, p75=188.5, p90=761, p95=888.5, p99=1517.7, p100=1773. 761 sits exactly at the
+# p90 point and at a natural gap in the data (the next session down sits at 377, less
+# than half) — it refuses only the small tail of unusually long coordinator sessions
+# while leaving the other roughly 90% of working sessions untouched, the same p90
+# reasoning the BRAKE rule above already uses.
+COORD_CEILING = 761
+
 ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 
 def deny_json(reason):
@@ -265,7 +404,9 @@ TOUCH_RULE_TEMPLATE = (
 PACE_RELAY_TEMPLATE = (
     "Blocked by card-touch-gate's PACE rule (relay tier): this run has made {count} tool "
     "calls in total against a relay budget of {budget} on {card} — {rate} calls per "
-    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far. This is a relay, not a "
+    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far, plus a one-time starting "
+    "allowance of {allowance} calls for this run's own cold start, granted once per run "
+    "and never re-granted at a later checkpoint. This is a relay, not a "
     "failure: finish the checkpoint you are on, tick its box (change '- [ ]' to '- [x]') "
     "and add a short sentence saying what you actually did, and overwrite the card's own "
     "'## Working state' section — never append to it — with what this run has "
@@ -281,8 +422,9 @@ PACE_RELAY_TEMPLATE = (
 PACE_REFUSE_TEMPLATE = (
     "Blocked by card-touch-gate's PACE rule (refuse tier): this run has made {count} tool "
     "calls in total against a refuse ceiling of {budget} on {card} — {rate} calls per "
-    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far — well past its own relay "
-    "point. Every further call is refused outright, because a run this far above the "
+    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far, plus the same one-time "
+    "starting allowance of {allowance} calls the relay tier above already carries — well "
+    "past its own relay point. Every further call is refused outright, because a run this far above the "
     "ordinary pace is doing something nobody has noticed. The only calls still allowed "
     "are an Edit or Write to {card} itself: tick the checkpoint you are on and overwrite "
     "'## Working state' with where this run actually stands, then stop. (This is the "
@@ -298,6 +440,27 @@ SEARCH_AGENT_TEMPLATE = (
     "with its own task card. A delegated search is meant to be cheap and bounded; "
     "stopping here and reporting back with whatever has been found so far is the "
     "expected outcome, not a fault."
+)
+
+BRAKE_TEMPLATE = (
+    "Blocked by card-touch-gate's BRAKE rule: this run has now edited {path} {count} "
+    "times within this one run, past the threshold of {threshold}; rewrite the file in a "
+    "single call instead of continuing to edit it piece by piece. (This rule tracks one "
+    "file path at a time and is independent of the TOUCH, PACE and SEARCH-AGENT rules on "
+    "the same run; an edit of this run's own task card is never counted against it.)"
+)
+
+COORD_TEMPLATE = (
+    "Blocked by card-touch-gate's COORD rule: this coordinator session has made {count} "
+    "tool calls against its own ceiling of {ceiling}; land the current milestone (commit "
+    "and, if it is finished, push or merge what is done) and start a fresh session "
+    "through bin/session-start. (Version-control commands, any Edit or Write under ai/ "
+    "or kb/, and the bin/session-start call itself are exempt from this rule and from "
+    "its own count, so a session past this ceiling can still commit, write its task "
+    "cards and decisions, and hand off; every other call is refused until then. This "
+    "rule counts only the coordinator's own calls — those carrying no agent_id at all — "
+    "tracked per session rather than per run, and never touches an executor's own TOUCH, "
+    "PACE, SEARCH-AGENT or BRAKE budget on the same or any other run.)"
 )
 
 
@@ -331,6 +494,43 @@ def touches_card(tool_name, tool_input, card_token):
     if not isinstance(fp, str) or not fp:
         return False
     return brief_reader.canonical_card(fp) == brief_reader.canonical_card(card_token)
+
+
+def coord_exempt(tool_name, tool_input):
+    """True for the calls the COORD rule (HRN-123 phase B) never counts and always
+    allows, past its own ceiling or not — the answer to "what does a coordinator session
+    need in order to land its current milestone and hand off to a fresh one", the exact
+    question its own refusal message poses. Three kinds, each named in this card's own
+    acceptance criteria or the refusal message itself: (1) a Bash call that is a git
+    invocation — the tool name checked is literally "git" once any leading path (./git,
+    /usr/bin/git) is stripped, covering every subcommand rather than a chosen few, because
+    committing, pushing and merging are all "the version-control commands" the card names,
+    and a coordinator composing the right commit needs the read-only ones (status, diff,
+    log) too; (2) an Edit or Write whose path names a directory literally called ai/ or
+    kb/ — ai/ is this card's own stated minimum, kb/ is added because it is the only other
+    tree the coordinator legitimately writes directly (coordinator-source-gate.sh's own
+    allowlist draws exactly this line: task cards, decisions and knowledge-base pages are
+    the coordinator's, application source under dpp_demo/dpp_frontend/dpp-vldt is an
+    executor's); and (3) a Bash call naming bin/session-start — the specific remedy this
+    rule's own message prescribes, exempted so that prescription stays usable from the
+    very session it is given to rather than becoming a way out this rule itself blocks."""
+    if tool_name == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return False
+        if "bin/session-start" in command:
+            return True
+        tokens = command.strip().split()
+        if tokens and tokens[0].rsplit("/", 1)[-1] == "git":
+            return True
+        return False
+    if tool_name in ("Edit", "Write"):
+        fp = tool_input.get("file_path")
+        if not isinstance(fp, str) or not fp:
+            return False
+        segments = [s for s in fp.replace("\\", "/").split("/") if s]
+        return "ai" in segments or "kb" in segments
+    return False
 
 
 def resolve_card_path(card_token):
@@ -415,17 +615,56 @@ except Exception:
 if os.environ.get("CLAUDE_GATE_BYPASS") == "1":
     allow_and_exit()
 
-agent_id = data.get("agent_id")
-if not agent_id:
-    # No agent_id at all means this call is the coordinator's own (HRN-46's own finding):
-    # the coordinator is never counted, never gated, by design — untouched by every rule
-    # in this file, old or new.
-    allow_and_exit()
-
 tool_name = data.get("tool_name") or ""
 tool_input = data.get("tool_input") or {}
 transcript_path = data.get("transcript_path")
 agent_type = data.get("agent_type") or ""
+
+agent_id = data.get("agent_id")
+if not agent_id:
+    # No agent_id at all means this call is the coordinator's own (HRN-46's own finding).
+    # Until HRN-123 phase B this meant "never counted, never gated, by design" outright;
+    # now it means "judged only by the COORD rule, in its own try/except, entirely
+    # separate from the four agent-scoped rules below" — a coordinator call still never
+    # touches the TOUCH, PACE, SEARCH-AGENT or BRAKE rules, which all require an agent_id
+    # to key their own state on and none of which this branch ever reaches.
+    try:
+        if coord_exempt(tool_name, tool_input):
+            allow_and_exit()
+        if not transcript_path:
+            # No session identifier at all to key a per-session ceiling on: fail open,
+            # the same posture every other rule in this file takes when it cannot
+            # establish the state it needs to judge anything.
+            allow_and_exit()
+        coord_state_dir = os.environ.get("CARD_TOUCH_GATE_STATE_DIR") or \
+            os.path.join(tempfile.gettempdir(), "claude-card-touch-gate")
+        os.makedirs(coord_state_dir, exist_ok=True)
+        # Keyed on a sanitized transcript_path rather than on agent_id, which a
+        # coordinator call never carries — the "coord-" prefix keeps this family of
+        # state files from ever colliding with an agent's own <agent_id>.json file, even
+        # though the two are named from entirely different inputs.
+        safe_session = re.sub(r'[^A-Za-z0-9_-]', '_', os.path.basename(str(transcript_path)))
+        coord_state_path = os.path.join(coord_state_dir, "coord-" + safe_session + ".json")
+        coord_count = 0
+        if os.path.isfile(coord_state_path):
+            try:
+                with open(coord_state_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    coord_count = loaded.get("coord_count", 0)
+            except Exception:
+                coord_count = 0  # a corrupt state file is a fresh start, not an error to deny on
+        coord_count += 1
+        with open(coord_state_path, "w", encoding="utf-8") as f:
+            json.dump({"coord_count": coord_count}, f)
+        if coord_count > COORD_CEILING:
+            print(deny_json(COORD_TEMPLATE.format(count=coord_count, ceiling=COORD_CEILING)))
+            sys.exit(0)
+        allow_and_exit()
+    except Exception:
+        # Same fail-open decision the rest of this file makes on any internal error, and
+        # for the same reason — see the file header.
+        allow_and_exit()
 
 try:
     # CARD_TOUCH_GATE_STATE_DIR overrides where per-agent state is kept — used by this
@@ -439,7 +678,7 @@ try:
     safe_id = re.sub(r'[^A-Za-z0-9_-]', '_', agent_id)
     state_path = os.path.join(state_dir, safe_id + ".json")
 
-    state = {"card": None, "count": 0, "total_count": 0, "search_count": 0}
+    state = {"card": None, "count": 0, "total_count": 0, "search_count": 0, "path_edits": {}}
     if os.path.isfile(state_path):
         try:
             with open(state_path, "r", encoding="utf-8") as f:
@@ -483,14 +722,39 @@ try:
     if touched:
         # Resets the TOUCH rule's own count (unchanged from HRN-49) and advances the PACE
         # rule's own total — a card edit is still a call the PACE rule counts, it is just
-        # never one either rule denies.
+        # never one either rule denies. An edit of the run's own card never reaches the
+        # BRAKE rule below at all, by construction — this is the whole of how "the run's
+        # own card is never braked" holds, rather than a special case inside that rule.
         state["count"] = 0
         state["total_count"] = state.get("total_count", 0) + 1
         save_state()
         allow_and_exit()
 
-    # --- neither rule fires for a call whose card was never established at all: fail open,
-    # exactly as HRN-49 always has. ---
+    # --- Rule: the BRAKE rule (HRN-123, new) — refuses the Nth Edit/Write of one and the
+    # same path within this run. Evaluated here, before the "no card at all" fail-open
+    # branch below, because this rule needs no established card to make sense: it is about
+    # one path being rewritten piece by piece too many times in a single run, not about a
+    # run's pace against its own checkpoints. A malformed or missing file_path (not a
+    # string, or empty) is simply not trackable and falls through untouched, same as every
+    # other malformed-payload case this hook already fails open on. ---
+    if tool_name in ("Edit", "Write"):
+        fp = tool_input.get("file_path")
+        if isinstance(fp, str) and fp:
+            path_edits = state.get("path_edits")
+            if not isinstance(path_edits, dict):
+                path_edits = {}
+            new_path_count = path_edits.get(fp, 0) + 1
+            path_edits[fp] = new_path_count
+            state["path_edits"] = path_edits
+            save_state()
+            if new_path_count >= BRAKE_THRESHOLD:
+                print(deny_json(BRAKE_TEMPLATE.format(
+                    path=fp, count=new_path_count, threshold=BRAKE_THRESHOLD)))
+                sys.exit(0)
+
+    # --- neither the TOUCH nor the PACE rule fires for a call whose card was never
+    # established at all: fail open, exactly as HRN-49 always has. The BRAKE rule above is
+    # independent of this and has already been evaluated regardless. ---
     if not state.get("card"):
         allow_and_exit()
 
@@ -525,18 +789,26 @@ try:
             if relay_rate is None:
                 relay_rate = DEFAULT_RELAY_RATE
             refuse_rate = relay_rate * REFUSE_RATIO
-            budget_relay = relay_rate * (ticked + 1)
-            budget_refuse = refuse_rate * (ticked + 1)
+            # HRN-123.8: START_ALLOWANCE is added flat, unscaled by (ticked + 1) — this is
+            # the whole of how it is "spent once per run" rather than "once per
+            # checkpoint": a flat additive term does not compound as ticked grows, so the
+            # very next checkpoint's own budget is still exactly relay_rate (or
+            # refuse_rate) higher than the one before it, never that plus START_ALLOWANCE
+            # again.
+            budget_relay = relay_rate * (ticked + 1) + START_ALLOWANCE
+            budget_refuse = refuse_rate * (ticked + 1) + START_ALLOWANCE
 
             if total_new_count > budget_refuse:
                 print(deny_json(PACE_REFUSE_TEMPLATE.format(
                     count=total_new_count, budget=fmt_num(budget_refuse),
-                    card=state["card"], rate=fmt_num(refuse_rate), ticked=ticked)))
+                    card=state["card"], rate=fmt_num(refuse_rate), ticked=ticked,
+                    allowance=fmt_num(START_ALLOWANCE))))
                 sys.exit(0)
             if total_new_count > budget_relay:
                 print(deny_json(PACE_RELAY_TEMPLATE.format(
                     count=total_new_count, budget=fmt_num(budget_relay),
-                    card=state["card"], rate=fmt_num(relay_rate), ticked=ticked)))
+                    card=state["card"], rate=fmt_num(relay_rate), ticked=ticked,
+                    allowance=fmt_num(START_ALLOWANCE))))
                 sys.exit(0)
 
     allow_and_exit()
