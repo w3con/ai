@@ -681,44 +681,58 @@ try:
     # (HRN-123.1: p50=3, p75=5, p90=9, p95=13, p99=26, p100=34) — N=9, the p90 point.
     # =====================================================================================
 
-    # --- the Nth same-path edit is refused; unlike the TOUCH and PACE rules, this needs no
-    # established card at all to function — no transcript_path is even given here, so
-    # state["card"] stays None throughout, and the brake still fires on the raw file_path
-    # alone ---
+    # --- the Nth same-path edit is refused once a card IS established for this run (AC2:
+    # "a run whose card is established ... is still refused the ninth edit of any other
+    # file, with that refusal's wording unchanged"). HRN-139 moved the "no card at all"
+    # fail-open check ahead of the BRAKE rule, so this scenario now establishes its own
+    # card from a real spawn brief first — the no-card-at-all case this used to exercise by
+    # omission is covered on its own terms in the HRN-139 block further below instead ---
     d = fresh_dir()
+    t = fake_transcript([{"agentId": "agentBrake1", "prompt": f"Implement {CARD}"}])
     try:
+        check("allow", "agentBrake1 establishes its own card first, so the BRAKE rule "
+                       "below is exercised with a card established, not the no-card-at-"
+                       "all case HRN-139 covers separately",
+              "Read", {"file_path": "/tmp/x"}, agent_id="agentBrake1", state_dir=d,
+              transcript_path=t)
         for i in range(8):
-            check("allow", f"edit {i+1}/8 of the same unrelated path allows, no card "
-                           "established at all",
+            check("allow", f"edit {i+1}/8 of the same unrelated path allows",
                   "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
-                  agent_id="agentBrake1", state_dir=d)
+                  agent_id="agentBrake1", state_dir=d, transcript_path=t)
         check("deny", "the 9th edit of the same path is refused by the BRAKE rule",
               "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
-              agent_id="agentBrake1", state_dir=d,
+              agent_id="agentBrake1", state_dir=d, transcript_path=t,
               reason_contains="BRAKE rule")
         check("deny", "the refusal names the path",
               "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
-              agent_id="agentBrake1", state_dir=d,
+              agent_id="agentBrake1", state_dir=d, transcript_path=t,
               reason_contains="/tmp/repeatedly-edited.vue")
         check("deny", "the refusal names the count and the threshold",
               "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
-              agent_id="agentBrake1", state_dir=d,
+              agent_id="agentBrake1", state_dir=d, transcript_path=t,
               reason_contains="threshold of 9")
         check("deny", "the refusal names the alternative: rewrite in one call",
               "Edit", {"file_path": "/tmp/repeatedly-edited.vue"},
-              agent_id="agentBrake1", state_dir=d,
+              agent_id="agentBrake1", state_dir=d, transcript_path=t,
               reason_contains="rewrite the file in a single call")
         # a different path is tracked completely separately and still allows
         check("allow", "a DIFFERENT path's own edit count is unaffected by the first "
                        "path's having crossed the brake",
               "Edit", {"file_path": "/tmp/a-different-file.vue"},
-              agent_id="agentBrake1", state_dir=d)
+              agent_id="agentBrake1", state_dir=d, transcript_path=t)
         # Write is braked exactly the same as Edit — the rule fires on either tool
         check("allow", "Write calls against a third path start their own count at 1/9",
               "Write", {"file_path": "/tmp/a-third-file.vue", "content": "x"},
-              agent_id="agentBrake1", state_dir=d)
+              agent_id="agentBrake1", state_dir=d, transcript_path=t)
+        # the run's own tracked card stays exempt even after another path has already
+        # crossed the brake — AC2's other half, proved in the same run
+        check("allow", "the run's own card is still exempt from the brake even after "
+                       "another path has already crossed it",
+              "Edit", {"file_path": "/Users/laptop/Dev/app/" + CARD},
+              agent_id="agentBrake1", state_dir=d, transcript_path=t)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+        os.remove(t)
 
     # --- the run's own card is never braked, no matter how many times it is edited —
     # exercised with the card established from the spawn brief, exactly the way a real
@@ -741,27 +755,85 @@ try:
 
     # --- fail open on a malformed payload reaching the BRAKE rule specifically: a
     # non-string file_path, and an Edit whose tool_input carries no file_path key at all —
-    # neither crashes the hook nor is ever counted, both simply allow ---
+    # neither crashes the hook nor is ever counted, both simply allow. Card established
+    # first, same reason as agentBrake1 above: this scenario also proves the real-path
+    # denial at the end, which HRN-139 makes conditional on a card being established. ---
     d = fresh_dir()
+    t = fake_transcript([{"agentId": "agentBrake3", "prompt": f"Implement {CARD}"}])
     try:
+        check("allow", "agentBrake3 establishes its own card first",
+              "Read", {"file_path": "/tmp/x"}, agent_id="agentBrake3", state_dir=d,
+              transcript_path=t)
         check("allow", "a non-string file_path is not trackable and falls through to "
                        "allow rather than erroring",
-              "Edit", {"file_path": 12345}, agent_id="agentBrake3", state_dir=d)
+              "Edit", {"file_path": 12345}, agent_id="agentBrake3", state_dir=d,
+              transcript_path=t)
         check("allow", "an Edit with no file_path key at all falls through to allow",
-              "Edit", {}, agent_id="agentBrake3", state_dir=d)
+              "Edit", {}, agent_id="agentBrake3", state_dir=d, transcript_path=t)
         # neither malformed call above was ever counted against a real path, so nine
         # further ordinary edits of a real path still take the full count to deny
         for i in range(8):
             check("allow", f"edit {i+1}/8 of a real path after the malformed calls above "
                            "still allows",
                   "Edit", {"file_path": "/tmp/after-malformed.vue"},
-                  agent_id="agentBrake3", state_dir=d)
+                  agent_id="agentBrake3", state_dir=d, transcript_path=t)
         check("deny", "the 9th edit of the real path still denies normally — the "
                       "malformed calls above were never counted towards it",
               "Edit", {"file_path": "/tmp/after-malformed.vue"},
-              agent_id="agentBrake3", state_dir=d, reason_contains="BRAKE rule")
+              agent_id="agentBrake3", state_dir=d, transcript_path=t,
+              reason_contains="BRAKE rule")
     finally:
         shutil.rmtree(d, ignore_errors=True)
+        os.remove(t)
+
+    # =====================================================================================
+    # HRN-139: the BRAKE rule must never fire at all for a run whose card could never be
+    # established — the reported defect (this card's own origin field): an unidentified
+    # run (no recoverable brief, e.g. because the spawning coordinator session was cleared
+    # mid-run — see HRN-134) edited its own task card ten times and was refused by the
+    # BRAKE rule, despite the rule's own stated exemption for a run's own card, which never
+    # took effect because the run was never recognised as having a card at all. AC1: "A run
+    # whose card cannot be established edits one and the same file twenty times and is
+    # refused none of them." AC3: this is the test that reproduces the defect before the
+    # repair — it fails (asserts allow, gets deny) against the unrepaired candidate and
+    # passes once HRN-139.4 moves the no-card fail-open check ahead of the BRAKE rule.
+    # =====================================================================================
+
+    # --- no transcript_path at all, the plainest "brief cannot be recovered" shape ---
+    d = fresh_dir()
+    try:
+        for i in range(19):
+            check("allow", f"edit {i+1}/19 of the same path, no recoverable brief at all "
+                           "(no transcript_path given), still allows",
+                  "Edit", {"file_path": "/tmp/hrn139-repeatedly-edited.vue"},
+                  agent_id="agentHRN139", state_dir=d)
+        check("allow", "the 20th edit of the same path is still allowed — a run whose "
+                       "card could never be established is never braked at all, exactly "
+                       "as the touch and pace rules already fail open for it",
+              "Edit", {"file_path": "/tmp/hrn139-repeatedly-edited.vue"},
+              agent_id="agentHRN139", state_dir=d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # --- the same defect, reproduced against a transcript that DOES exist but never names
+    # this agent_id — the concrete shape HRN-139's own Working state found for the affected
+    # run (its per-agent state file's own "card" field was null even though a transcript
+    # file existed, because the record it needed lived in a different coordinator session
+    # — see HRN-134) ---
+    d = fresh_dir()
+    t = fake_transcript([{"agentId": "some-other-agent", "prompt": f"Implement {CARD}"}])
+    try:
+        for i in range(9):
+            check("allow", f"edit {i+1}/9 of the same path, transcript exists but holds "
+                           "no spawn record for THIS agent_id, still allows",
+                  "Edit", {"file_path": "/tmp/hrn139-other-transcript.vue"},
+                  agent_id="agentHRN139b", state_dir=d, transcript_path=t)
+        check("allow", "the 10th edit is still allowed, for the same reason",
+              "Edit", {"file_path": "/tmp/hrn139-other-transcript.vue"},
+              agent_id="agentHRN139b", state_dir=d, transcript_path=t)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        os.remove(t)
 
     # =====================================================================================
     # HRN-123 phase B: the COORD rule — the coordinator's own per-session ceiling.

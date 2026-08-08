@@ -50,10 +50,18 @@
 #   work in one call). It tracks a per-path edit count in the same per-agent state file,
 #   under its own field, and is evaluated on every Edit/Write call that does not touch the
 #   run's own card — a card touch already returns before this rule is reached, so the
-#   card itself is structurally exempt, never a special case inside the rule. Unlike the
-#   TOUCH and PACE rules, it does not require a card to be established at all: it is about
-#   one path being edited too many times within one run, not about a run's own pace
-#   relative to its checkpoints. N (BRAKE_THRESHOLD, 9) was set from the measured per-path
+#   card itself is structurally exempt, never a special case inside the rule. On its own
+#   terms the rule needs no established card to make sense — it is about one path being
+#   edited too many times within one run, not about a run's own pace relative to its
+#   checkpoints — but since HRN-139 it is reached only once a card HAS been established for
+#   the run, exactly like the TOUCH and PACE rules: a run this hook could never name a card
+#   for is not braked at all, on the same "cannot ask a run to edit a card it does not
+#   have" reasoning that already governs the TOUCH and PACE rules (see "Fail open when the
+#   brief can't be read" below). Before HRN-139 the no-card fail-open check sat only after
+#   this rule, so an unidentified run's own repeated edits of any path — including its own
+#   card, which is never recognised as "its own card" without an established state["card"]
+#   to compare against — were counted and could still be denied outright. N (BRAKE_THRESHOLD,
+#   9) was set from the measured per-path
 #   edit-count distribution across archived EXECUTOR-run transcripts only, using the same
 #   executor/coordinator discriminator bin/agent-spend already uses (HRN-123.1): p50=3,
 #   p75=5, p90=9, p95=13, p99=26, p100=34 — a threshold at the p90 point catches only the
@@ -170,12 +178,16 @@
 #
 # Fail open when the brief can't be read: an agent whose card this hook could never
 # recover — the transcript record for its agent_id is missing, unreadable, or names no
-# task-card-shaped path at all — is allowed past both the touch rule and the pace rule
-# indefinitely, the same way an agent that has never been identified as one of this
-# project's executors always has been. Refusing a run this hook cannot name a card for would
-# tell it to edit a card it does not have and cannot produce, which is a permanent freeze
-# with no way out, not a nudge — the one thing this hook's own header already says it must
-# never do.
+# task-card-shaped path at all — is allowed past the touch rule, the pace rule and, since
+# HRN-139, the brake rule as well, indefinitely, the same way an agent that has never been
+# identified as one of this project's executors always has been. Refusing a run this hook
+# cannot name a card for would tell it to edit a card it does not have and cannot produce,
+# which is a permanent freeze with no way out, not a nudge — the one thing this hook's own
+# header already says it must never do. Before HRN-139 the brake rule was the one
+# exception: it was evaluated regardless of whether a card had ever been established, so
+# an unidentified run's own repeated edits of any one path — including, in effect, its own
+# card, since a card can only be recognised as "its own" once state["card"] is set — could
+# still be denied outright even though this same header already promised the opposite.
 #
 # Why this hook fails OPEN (allows) rather than closed on any internal error, unlike
 # plan-gate.sh, settings-write-guard.sh and memory-store-guard.sh, which all fail closed.
@@ -730,13 +742,28 @@ try:
         save_state()
         allow_and_exit()
 
-    # --- Rule: the BRAKE rule (HRN-123, new) — refuses the Nth Edit/Write of one and the
-    # same path within this run. Evaluated here, before the "no card at all" fail-open
-    # branch below, because this rule needs no established card to make sense: it is about
-    # one path being rewritten piece by piece too many times in a single run, not about a
-    # run's pace against its own checkpoints. A malformed or missing file_path (not a
-    # string, or empty) is simply not trackable and falls through untouched, same as every
-    # other malformed-payload case this hook already fails open on. ---
+    # --- HRN-139: none of TOUCH, PACE or BRAKE fires for a run whose card was never
+    # established at all: fail open, exactly as HRN-49 always has for TOUCH and PACE. This
+    # check used to sit only after the BRAKE rule below, which let the BRAKE rule count and
+    # deny an unidentified run's repeated edits of any path — including its own card, which
+    # is never recognised as "its own card" without an established `state["card"]` to
+    # compare against (see touches_card() above) — even though this hook's own header says
+    # a card edit is always exempt from the brake. Moving this check ahead of the BRAKE
+    # rule makes that exemption hold structurally for the one case it used to miss: a run
+    # this hook could never name a card for is not merely un-braked on its own card, it is
+    # not braked at all, on the same "cannot ask a run to edit a card it does not have"
+    # reasoning the header already gives for the TOUCH and PACE rules. ---
+    if not state.get("card"):
+        allow_and_exit()
+
+    # --- Rule: the BRAKE rule (HRN-123) — refuses the Nth Edit/Write of one and the same
+    # path within this run. Reached only once a card has been established for this run
+    # (the check just above), even though the rule itself still needs no established card
+    # to make sense on its own terms: it is about one path being rewritten piece by piece
+    # too many times in a single run, not about a run's pace against its own checkpoints.
+    # A malformed or missing file_path (not a string, or empty) is simply not trackable and
+    # falls through untouched, same as every other malformed-payload case this hook already
+    # fails open on. ---
     if tool_name in ("Edit", "Write"):
         fp = tool_input.get("file_path")
         if isinstance(fp, str) and fp:
@@ -751,12 +778,6 @@ try:
                 print(deny_json(BRAKE_TEMPLATE.format(
                     path=fp, count=new_path_count, threshold=BRAKE_THRESHOLD)))
                 sys.exit(0)
-
-    # --- neither the TOUCH nor the PACE rule fires for a call whose card was never
-    # established at all: fail open, exactly as HRN-49 always has. The BRAKE rule above is
-    # independent of this and has already been evaluated regardless. ---
-    if not state.get("card"):
-        allow_and_exit()
 
     # --- Rule 1: the TOUCH rule (HRN-49, unchanged in every particular, including the
     # quirk that a denying call does not persist its own incremented count) ---
