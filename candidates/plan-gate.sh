@@ -13,8 +13,12 @@
 #                    and every other non-spawn tool.
 #
 # Allowlisted agent types (always allowed, no marker check):
-#   Explore, Plan, trace-audit — read-only agents that gather or review and
-#   never write, so gating them protects nothing.
+#   Explore, Plan, trace-audit, card-critic — read-only agents that gather or
+#   review and never write, so gating them protects nothing. card-critic
+#   (HRN-94, 2026-08-08) reads one task card alone, looking for planning
+#   faults no script can check, and is the recorded standing exception to the
+#   rule that every other agent runs only on the owner's word — spawned only
+#   by the coordinator, as part of signing a card with bin/economy-sign.
 #
 # ---------------------------------------------------------------------------
 # THE CONTRACT (path binding set 2026-07-10; marker changed 2026-08-01, both
@@ -124,7 +128,7 @@ DENY_NO_BRIEF_NAMED = (
     "absolute path preferred) in the agent's prompt. The gate then checks that "
     "THAT file carries the marker '<!-- card:ready -->', which bin/card-context "
     "writes only when the card validates. Read-only agents (Explore, Plan, "
-    "trace-audit) are exempt and need no brief."
+    "trace-audit, card-critic) are exempt and need no brief."
 )
 
 DENY_NO_MARKER = (
@@ -164,7 +168,7 @@ if tool_name not in ("Task", "Agent"):
 
 # --- allowlist: read-only agent types never need a brief ---
 # They gather or review and never write, so gating them protects nothing.
-ALLOWLISTED_SUBTYPES = {"Explore", "Plan", "trace-audit"}
+ALLOWLISTED_SUBTYPES = {"Explore", "Plan", "trace-audit", "card-critic"}
 
 subagent_type = (tool_input.get("subagent_type") or "").strip()
 agent_name    = (tool_input.get("name") or "").strip().lower()

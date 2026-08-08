@@ -82,8 +82,12 @@ try:
           "Task", {"subagent_type": "Plan", "prompt": "plan something"})
     check("allow", "Task with subagent_type trace-audit needs no brief",
           "Task", {"subagent_type": "trace-audit", "prompt": "audit a trace"})
+    check("allow", "Task with subagent_type card-critic needs no brief (HRN-94)",
+          "Task", {"subagent_type": "card-critic", "prompt": "review HRN-1 alone"})
     check("allow", "Agent tool call with name matching an allowlisted type (case-insensitive)",
           "Agent", {"name": "EXPLORE", "prompt": "no brief needed"})
+    check("allow", "Agent tool call with name card-critic (case-insensitive, HRN-94)",
+          "Agent", {"name": "Card-Critic", "prompt": "no brief needed"})
 
     # --- a build agent whose prompt names no .md token at all is refused outright ---
     check("deny", "no .md token anywhere in the prompt",
