@@ -198,6 +198,38 @@ def seed_pace_state(state_dir, agent_id, card, total_count, count=0, search_coun
         json.dump(state, f)
 
 
+def check_all_contains(expected, label, tool_name, tool_input, contains, agent_id=None,
+                        state_dir=None, transcript_path=None):
+    """Like check() above, but asserts every string in `contains` appears in the reason,
+    in one subprocess call rather than one call per substring — used where a scenario's
+    own call count is itself part of what is being proved (HRN-148's BRAKE-rule sequence
+    below), so re-checking the same decision twice would silently advance the shared
+    per-path count check() already advances on every call it makes."""
+    global fails
+    decision, reason = call(tool_name, tool_input, agent_id=agent_id, state_dir=state_dir,
+                             transcript_path=transcript_path)
+    ok = decision == expected and bool(reason) and all(s in reason for s in contains)
+    fails += 0 if ok else 1
+    detail = "" if ok else f"  (expected {expected} with reason containing {contains!r}, got {decision}, reason={reason!r})"
+    print(f"  {'PASS' if ok else 'FAIL'}  {label}{detail}")
+
+
+def check_no_reason(expected, label, tool_name, tool_input, agent_id=None, state_dir=None,
+                     transcript_path=None):
+    """Like check() above, but for the one assertion check()'s own reason_not_contains
+    cannot make: that a call carries NO reason at all (reason is None), rather than a
+    reason that merely lacks some substring — reason_not_contains requires a truthy
+    reason to compare against, which is exactly what an ordinary allow decision with no
+    warning attached (HRN-148) does not have."""
+    global fails
+    decision, reason = call(tool_name, tool_input, agent_id=agent_id, state_dir=state_dir,
+                             transcript_path=transcript_path)
+    ok = decision == expected and reason is None
+    fails += 0 if ok else 1
+    detail = "" if ok else f"  (expected {expected} with no reason, got {decision}, reason={reason!r})"
+    print(f"  {'PASS' if ok else 'FAIL'}  {label}{detail}")
+
+
 def fresh_dir():
     return tempfile.mkdtemp(prefix="card-touch-gate-test-")
 
@@ -782,6 +814,96 @@ try:
               "Edit", {"file_path": "/tmp/after-malformed.vue"},
               agent_id="agentBrake3", state_dir=d, transcript_path=t,
               reason_contains="BRAKE rule")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        os.remove(t)
+
+    # =====================================================================================
+    # HRN-148: past BRAKE_THRESHOLD an Edit still denies exactly as before (AC2), but a
+    # Write is now let through exactly once — the whole-file rewrite the Edit refusal's own
+    # message already asks for — and refused on the second Write of the same path past the
+    # threshold (AC1). The two kinds of call still advance one shared per-path count (AC3).
+    # From the seventh call against a path onward, any call the BRAKE rule itself does not
+    # refuse now carries a warning naming the path, the count and the ceiling on its own
+    # "allow" decision (AC4), and that warning never turns an allow into a deny and never
+    # touches any other rule's own judgment (AC5).
+    # =====================================================================================
+    # Exact call-by-call shape of this scenario, since the sequence's own call count is
+    # part of what is being proved (each check below, whether check(), check_no_reason()
+    # or check_all_contains(), is exactly one subprocess call and advances
+    # path_edits[path] by one): calls 1-6 (Edit) stay below the 7-call warning point;
+    # calls 7-8 (Edit) are allowed and now warn; call 9 (Write) reaches BRAKE_THRESHOLD
+    # and is the one exempted rewrite; calls 10-11 (Write) are refused, the exemption
+    # already used; call 12 (Edit) is refused on the unchanged Edit message; the final
+    # Bash call touches neither Edit nor Write and carries no reason of its own.
+    d = fresh_dir()
+    t = fake_transcript([{"agentId": "agentBrakeWrite1", "prompt": f"Implement {CARD}"}])
+    path = "/tmp/hrn148-mixed.vue"
+    try:
+        check("allow", "agentBrakeWrite1 establishes its own card first",
+              "Read", {"file_path": "/tmp/x"}, agent_id="agentBrakeWrite1", state_dir=d,
+              transcript_path=t)
+
+        for i in range(6):
+            check_no_reason("allow", f"edit {i+1}/6 of the path — below the 7th-call "
+                            "warning point — carries no reason at all",
+                            "Edit", {"file_path": path}, agent_id="agentBrakeWrite1",
+                            state_dir=d, transcript_path=t)
+
+        # AC4: calls 7 and 8 (still Edit, still below the threshold of 9) are allowed and
+        # now carry a warning naming the path, the count and the ceiling
+        check_all_contains("allow", "call 7 (an Edit) is allowed and now warns, naming "
+                           "the path, the count and the ceiling",
+                           "Edit", {"file_path": path},
+                           ["BRAKE rule", "7 times", "ceiling of 9", path],
+                           agent_id="agentBrakeWrite1", state_dir=d, transcript_path=t)
+        check_all_contains("allow", "call 8 (an Edit) is allowed and still warns, one "
+                           "call below the threshold",
+                           "Edit", {"file_path": path}, ["8 times", "ceiling of 9"],
+                           agent_id="agentBrakeWrite1", state_dir=d, transcript_path=t)
+
+        # AC1 (first half) + AC4: call 9 — a Write — reaches the threshold and is exactly
+        # the one consolidating rewrite the Edit refusal's own message already asks for:
+        # allowed, not refused, and it too carries the warning
+        check_all_contains("allow", "call 9 (a Write) reaches the threshold and is the "
+                           "one consolidating rewrite BRAKE_TEMPLATE's own Edit message "
+                           "already asks for — allowed, not refused",
+                           "Write", {"file_path": path, "content": "whole file"},
+                           ["9 times", "ceiling of 9"],
+                           agent_id="agentBrakeWrite1", state_dir=d, transcript_path=t)
+
+        # AC1 (second half): call 10, a further Write of the same path, now that the one
+        # allowed rewrite has already been used, is refused — the refusal tells the run
+        # to record where it stopped and stop, rather than reach for yet another rewrite
+        check_all_contains("deny", "call 10 (a second Write of the same path) is refused "
+                           "— the one allowed rewrite was already used",
+                           "Write", {"file_path": path, "content": "whole file again"},
+                           ["BRAKE rule", "call number 10"],
+                           agent_id="agentBrakeWrite1", state_dir=d, transcript_path=t)
+        check_all_contains("deny", "call 11's refusal tells the run to record where it "
+                           "stopped and stop, rather than reach for yet another rewrite",
+                           "Write", {"file_path": path, "content": "x"},
+                           ["Record where this run has stopped"],
+                           agent_id="agentBrakeWrite1", state_dir=d, transcript_path=t)
+
+        # AC2 + AC3: call 12, an Edit of the same path, after the Write exemption has
+        # already been used, keeps denying on the exact same message as before this card
+        # — proving the Edit rule is untouched by HRN-148, and that the count behind it
+        # is the honest combined total of every Edit and Write this run has made against
+        # this one path (11 calls above plus this one is 12, matched in the message)
+        check_all_contains("deny", "call 12 (an Edit), after the Write exemption is "
+                           "used, is still refused with the unchanged Edit message",
+                           "Edit", {"file_path": path},
+                           ["rewrite the file in a single call", "12"],
+                           agent_id="agentBrakeWrite1", state_dir=d, transcript_path=t)
+
+        # AC5: an entirely unrelated call (not Edit/Write, so the BRAKE rule is never even
+        # reached for it) right after the sequence above carries no reason of its own —
+        # the warning never leaks into a call it has nothing to do with
+        check_no_reason("allow", "an unrelated Bash call right after the sequence above "
+                        "carries no reason at all",
+                        "Bash", {"command": "echo unrelated"}, agent_id="agentBrakeWrite1",
+                        state_dir=d, transcript_path=t)
     finally:
         shutil.rmtree(d, ignore_errors=True)
         os.remove(t)

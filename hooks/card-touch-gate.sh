@@ -69,6 +69,34 @@
 #   would have refused the archive's own 34-, 31- and 28-edit cases well before they ran
 #   their course.
 #
+#   HRN-148 (2026-08-09) corrected one fault in the BRAKE rule above: an Edit changes one
+#   string inside a file, a Write replaces the file whole, and only the first is the
+#   pathology the rule was measured against — but before this card both were refused
+#   identically once the threshold was crossed, which meant the rule's own refusal
+#   message ("rewrite the file in a single call") named a remedy that the very next call,
+#   being that rewrite, would itself refuse. Measured first (HRN-148.3, over every
+#   transcript on disk): of the 247 (transcript, path) pairs that reach the threshold at
+#   all, 3648 of the 3727 calls within them (97.9%) are Edit and 79 (2.1%) are Write, and
+#   every one of the 247 pairs is Edit-dominated — confirming that the archive's long
+#   per-file tails are made of one-string patches, not whole-file rewrites, so exempting
+#   one Write targets the actually-rare case rather than the pathology itself. Now: an
+#   Edit is still refused unconditionally from the threshold onward, exactly as before
+#   this card; a Write is let through exactly once past the threshold — tracked in the
+#   same per-agent state file under a new "path_rewrites" field, {path: true} once that
+#   path's own one exemption has been used — and a second or later Write of the same path
+#   past the threshold is refused (BRAKE_REWRITE_USED_TEMPLATE), because a run that has
+#   not consolidated after being given the one rewrite it asked for has not understood,
+#   and the honest answer to that is to stop, not to be given another. A Write still adds
+#   to the shared per-path count exactly like an Edit does, so the number any refusal or
+#   warning reports stays the run's honest total of everything it has done to that path.
+#   From the seventh call against a path onward, an allowed call now also carries a
+#   warning (BRAKE_WARNING_TEMPLATE) through the permissionDecisionReason field an
+#   "allow" decision can already carry — the same shape the HELPER LOAD FAILURE case
+#   elsewhere in this file already uses — so a run nearing the ceiling can see it coming
+#   and consolidate early, while a rewrite is still cheap and still available; whether
+#   that reason is ever surfaced to the run reading it is not something this hook can
+#   prove, only that its own JSON output carries it.
+#
 #   A correction to the PACE rule's own arithmetic (HRN-123 phase C, not a sixth rule): the
 #   relay and refuse budgets now each carry a fixed STARTING ALLOWANCE on top of
 #   rate * (ticked + 1), granted once per run rather than once per checkpoint, because the
@@ -205,18 +233,22 @@
 # "Decide technical details yourself."
 #
 # State: one small JSON file per agent_id under $TMPDIR/claude-card-touch-gate/, holding
-# FIVE fields now instead of two — {"card": ..., "count": ..., "total_count": ...,
-# "search_count": ..., "path_edits": ...} — all five in the one file, so every rule shares
-# the same per-agent record rather than each keeping a counter of its own on disk. "card"
-# and "count" are exactly HRN-49's original fields, read and written on exactly the same
-# terms as before. "total_count" is the PACE rule's running tally of every non-card-touching
-# call this agent_id has made, which a card touch never resets, unlike "count".
-# "search_count" is the read-only search agent's own flat budget, in the same file, so that
-# if an agent_id were ever somehow seen under both roles the tallies still never collide.
-# "path_edits" (HRN-123) is a small object mapping each distinct file_path this run has
-# edited (through Edit or Write, excluding the run's own card) to how many times it has
-# been edited so far in this run — the BRAKE rule's own count, compared against
-# BRAKE_THRESHOLD on every further Edit/Write of that same path. Never cleaned up
+# SIX fields now instead of two — {"card": ..., "count": ..., "total_count": ...,
+# "search_count": ..., "path_edits": ..., "path_rewrites": ...} — all six in the one file,
+# so every rule shares the same per-agent record rather than each keeping a counter of its
+# own on disk. "card" and "count" are exactly HRN-49's original fields, read and written
+# on exactly the same terms as before. "total_count" is the PACE rule's running tally of
+# every non-card-touching call this agent_id has made, which a card touch never resets,
+# unlike "count". "search_count" is the read-only search agent's own flat budget, in the
+# same file, so that if an agent_id were ever somehow seen under both roles the tallies
+# still never collide. "path_edits" (HRN-123) is a small object mapping each distinct
+# file_path this run has edited (through Edit or Write, excluding the run's own card) to
+# how many times it has been edited so far in this run — the BRAKE rule's own count,
+# compared against BRAKE_THRESHOLD on every further Edit/Write of that same path.
+# "path_rewrites" (HRN-148) is a small object mapping each distinct file_path to whether
+# that path's own one allowed whole-file rewrite past BRAKE_THRESHOLD has already been
+# used, {path: true} once it has — see the HRN-148 paragraph above the FOURTH rule's own
+# description for what changes once it is. Neither object is ever cleaned up
 # automatically — a stray handful of small JSON files per executor run is an accepted,
 # stated cost, not an oversight. agent_id values are treated as unique on their own, with
 # no session_id folded in, matching how HRN-46 already found them used (a fresh,
@@ -385,8 +417,24 @@ def deny_json(reason):
             '"permissionDecision":"deny",'
             '"permissionDecisionReason":' + json.dumps(reason) + '}}')
 
-def allow_and_exit():
-    print(ALLOW_JSON)
+def allow_and_exit(reason=None):
+    # HRN-148: an "allow" decision can still carry a permissionDecisionReason — the same
+    # shape the HELPER LOAD FAILURE case above already uses — so the BRAKE rule's own
+    # from-the-seventh-call-onward warning (see BRAKE_WARNING_TEMPLATE below) can ride on
+    # an allowing decision instead of needing a decision of its own. reason=None (every
+    # caller of this function except the one call site that tracks the BRAKE rule's own
+    # per-path count) reproduces the exact ALLOW_JSON string this function always printed
+    # before this card, so no other allow point in this file changes shape.
+    if reason:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": reason,
+            }
+        }))
+    else:
+        print(ALLOW_JSON)
     sys.exit(0)
 
 def fmt_num(x):
@@ -460,6 +508,37 @@ BRAKE_TEMPLATE = (
     "single call instead of continuing to edit it piece by piece. (This rule tracks one "
     "file path at a time and is independent of the TOUCH, PACE and SEARCH-AGENT rules on "
     "the same run; an edit of this run's own task card is never counted against it.)"
+)
+
+# HRN-148: a Write past BRAKE_THRESHOLD is the remedy BRAKE_TEMPLATE above asks for, so
+# exactly one Write of a path is let through once the threshold is reached — never
+# refused by BRAKE_TEMPLATE, which stays the Edit-only message it always was. A second
+# Write of the same path past the threshold means the run has not consolidated what it
+# was told to consolidate, and the honest answer to that is to stop rather than to keep
+# rewriting the same file over and over by choosing a different tool each time.
+BRAKE_REWRITE_USED_TEMPLATE = (
+    "Blocked by card-touch-gate's BRAKE rule: this run has already used its one allowed "
+    "whole-file rewrite of {path} past the threshold of {threshold} (this Write would be "
+    "call number {count} against this one path within this run), and a further Write of "
+    "the same path is refused. Record where this run has stopped — tick the checkpoint "
+    "you finished and overwrite the card's own '## Working state' section with what this "
+    "run has established so far — and stop there; a fresh executor can continue from "
+    "that record. (This rule tracks one file path at a time and is independent of the "
+    "TOUCH, PACE and SEARCH-AGENT rules on the same run; an edit of this run's own task "
+    "card is never counted against it.)"
+)
+
+# HRN-148, AC4: attached to an ALLOWING decision, never a refusing one, from the seventh
+# call against a path onward, so a run nearing the ceiling has a chance to consolidate
+# into one Write while a Write is still exempt — see the "one Write past the ceiling"
+# comment above BRAKE_REWRITE_USED_TEMPLATE. Whether this reason is ever surfaced to the
+# run that receives it is not something this hook can prove or control; what is proved is
+# only that the hook's own JSON output carries it (HRN-148 AC6).
+BRAKE_WARNING_TEMPLATE = (
+    "card-touch-gate's BRAKE rule: {path} has been edited or written {count} times in "
+    "this run so far, against a ceiling of {threshold}. Consolidating what remains into "
+    "one whole-file rewrite now, while a single rewrite is still allowed past that "
+    "ceiling, keeps the ability to finish this file in one call."
 )
 
 COORD_TEMPLATE = (
@@ -690,7 +769,11 @@ try:
     safe_id = re.sub(r'[^A-Za-z0-9_-]', '_', agent_id)
     state_path = os.path.join(state_dir, safe_id + ".json")
 
-    state = {"card": None, "count": 0, "total_count": 0, "search_count": 0, "path_edits": {}}
+    # HRN-148: "path_rewrites" tracks, per path, whether that path's own one allowed
+    # whole-file rewrite past BRAKE_THRESHOLD has already been used — see
+    # BRAKE_REWRITE_USED_TEMPLATE above for what happens once it has.
+    state = {"card": None, "count": 0, "total_count": 0, "search_count": 0, "path_edits": {},
+              "path_rewrites": {}}
     if os.path.isfile(state_path):
         try:
             with open(state_path, "r", encoding="utf-8") as f:
@@ -756,14 +839,22 @@ try:
     if not state.get("card"):
         allow_and_exit()
 
-    # --- Rule: the BRAKE rule (HRN-123) — refuses the Nth Edit/Write of one and the same
-    # path within this run. Reached only once a card has been established for this run
-    # (the check just above), even though the rule itself still needs no established card
-    # to make sense on its own terms: it is about one path being rewritten piece by piece
-    # too many times in a single run, not about a run's pace against its own checkpoints.
-    # A malformed or missing file_path (not a string, or empty) is simply not trackable and
-    # falls through untouched, same as every other malformed-payload case this hook already
-    # fails open on. ---
+    # --- Rule: the BRAKE rule (HRN-123, extended by HRN-148) — refuses the Nth Edit/Write
+    # of one and the same path within this run, EXCEPT that exactly one Write past the
+    # threshold is let through: BRAKE_TEMPLATE's own advice is "rewrite the file in a
+    # single call", so a Write is the remedy, not more of the pathology, and refusing it
+    # too made that remedy permanently unreachable once the threshold was crossed. A
+    # second Write of the same path past the threshold is refused (BRAKE_REWRITE_USED_
+    # TEMPLATE) — the run has not consolidated what it was told to. An Edit is still
+    # refused unconditionally from the threshold onward, with the same message as before
+    # this card. Reached only once a card has been established for this run (the check
+    # just above), even though the rule itself still needs no established card to make
+    # sense on its own terms: it is about one path being rewritten piece by piece too many
+    # times in a single run, not about a run's pace against its own checkpoints. A
+    # malformed or missing file_path (not a string, or empty) is simply not trackable and
+    # falls through untouched, same as every other malformed-payload case this hook
+    # already fails open on. ---
+    brake_warning_reason = None
     if tool_name in ("Edit", "Write"):
         fp = tool_input.get("file_path")
         if isinstance(fp, str) and fp:
@@ -775,9 +866,26 @@ try:
             state["path_edits"] = path_edits
             save_state()
             if new_path_count >= BRAKE_THRESHOLD:
-                print(deny_json(BRAKE_TEMPLATE.format(
-                    path=fp, count=new_path_count, threshold=BRAKE_THRESHOLD)))
-                sys.exit(0)
+                if tool_name == "Write":
+                    path_rewrites = state.get("path_rewrites")
+                    if not isinstance(path_rewrites, dict):
+                        path_rewrites = {}
+                    if path_rewrites.get(fp):
+                        print(deny_json(BRAKE_REWRITE_USED_TEMPLATE.format(
+                            path=fp, count=new_path_count, threshold=BRAKE_THRESHOLD)))
+                        sys.exit(0)
+                    path_rewrites[fp] = True
+                    state["path_rewrites"] = path_rewrites
+                    save_state()
+                    brake_warning_reason = BRAKE_WARNING_TEMPLATE.format(
+                        path=fp, count=new_path_count, threshold=BRAKE_THRESHOLD)
+                else:
+                    print(deny_json(BRAKE_TEMPLATE.format(
+                        path=fp, count=new_path_count, threshold=BRAKE_THRESHOLD)))
+                    sys.exit(0)
+            elif new_path_count >= 7:
+                brake_warning_reason = BRAKE_WARNING_TEMPLATE.format(
+                    path=fp, count=new_path_count, threshold=BRAKE_THRESHOLD)
 
     # --- Rule 1: the TOUCH rule (HRN-49, unchanged in every particular, including the
     # quirk that a denying call does not persist its own incremented count) ---
@@ -832,7 +940,11 @@ try:
                     allowance=fmt_num(START_ALLOWANCE))))
                 sys.exit(0)
 
-    allow_and_exit()
+    # HRN-148, AC4/AC5: brake_warning_reason is non-None only when the BRAKE rule itself
+    # neither denied this call nor was even reached (in which case it stays the None it
+    # was initialised to just above the BRAKE block) — every other allow point in this
+    # file still calls allow_and_exit() with no argument and is unaffected.
+    allow_and_exit(brake_warning_reason)
 
 except Exception:
     # Same fail-open decision as the JSON-parse case above, and for the same reason.
