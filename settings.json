@@ -6,7 +6,7 @@
       "Bash(/Users/laptop/Dev/ai/bin/websearch:*)"
     ]
   },
-  "model": "claude-fable-5[1m]",
+  "model": "opus[1m]",
   "hooks": {
     "PreToolUse": [
       {
@@ -61,6 +61,16 @@
           {
             "type": "command",
             "command": "echo 'REMINDER on writing style for THIS reply: write in full, connected sentences and developed prose. Never use telegraphic or clipped-fragment style, dropped subjects, or headline-style bullets. Explain terms plainly. This applies to chat answers exactly as much as to documents. Alex has demanded this many times — treat any urge to compress as the cue to slow down and spell it out.'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/inbox-stop.py"
           }
         ]
       }
