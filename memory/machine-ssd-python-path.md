@@ -1,10 +1,10 @@
 ---
 name: machine-ssd-python-path
-description: On the /Volumes/SSD machine the project scripts need anaconda's python3; putting Homebrew ahead of it in PATH breaks them with a misleading "PyYAML required"
+description: On the /Volumes/SSD machine the project scripts need anaconda's python3; putting Homebrew ahead of it in PATH breaks them with a misleading "PyYAML required"  # path-check: allow — the volume name identifies which machine this note is about
 metadata:
   type: reference
 scope: validite-app
-machine: the /Volumes/SSD machine only
+machine: the /Volumes/SSD machine only  # path-check: allow — a machine name, not a path anything opens
 ---
 
 This note is deliberately about one machine, so it is the one place in this store where an absolute home directory is the fact itself rather than a mistake; the marker at the end of the next paragraph is what tells `bin/path-check` so.

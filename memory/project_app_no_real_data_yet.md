@@ -1,13 +1,13 @@
 ---
 name: project-app-no-real-data-yet
-description: The Validité DPP platform (repo ~/Dev/app) currently holds no real production data, only test/demo records, and the coordinator DOES have direct Mongo access via docker exec — verify environment claims from old plan text before repeating them.
+description: The Validité DPP platform (the application repository) currently holds no real production data, only test/demo records, and the coordinator DOES have direct Mongo access via docker exec — verify environment claims from old plan text before repeating them.
 metadata:
   type: project
   scope: app
 ---
 
-The database behind the Validité DPP platform (`~/Dev/app`, Go backend `dpp_demo/app`, Mongo)
-currently contains no data from real use — no real companies, no real users, no real certificates
+The database behind the Validité DPP platform (the application repository — Go backend
+`dpp_demo/app`, Mongo) currently contains no data from real use — no real companies, no real users, no real certificates
 or invoices. Everything in it right now is test or demo data that can be wiped or recreated at
 will, with no consequence to any actual customer or operator.
 

@@ -18,9 +18,11 @@
 #        bin/hook-install --check
 #        bin/hook-install -h | --help
 #
-# <hook-name> is the hook's bare name, with or without its .sh suffix — "card-touch-gate"
-# and "card-touch-gate.sh" both mean the file hooks/card-touch-gate.sh, tested against
-# hooks/card-touch-gate.test.py.
+# <hook-name> is the hook's bare name, with or without its suffix — "card-touch-gate" and
+# "card-touch-gate.sh" both mean the file hooks/card-touch-gate.sh, tested against
+# hooks/card-touch-gate.test.py. Both languages this directory holds are installable: a
+# shell hook and a Python one. When the name is given without a suffix the language is
+# read off whichever file is live under the hooks directory, so a caller need not know it.
 #
 # Refuses, naming the reason, when: the candidate file does not exist; the candidate does
 # not parse; the named hook has no test suite; that test suite fails against the
@@ -57,8 +59,11 @@ installs it: the candidate is written into hooks/ under a temporary name and ren
 onto the live path in one atomic step, so no reader of the live path ever sees a
 partially written file.
 
-<hook-name> is the hook's bare name, with or without its .sh suffix (for example
-"card-touch-gate" or "card-touch-gate.sh").
+<hook-name> is the hook's bare name, with or without its suffix (for example
+"card-touch-gate", "card-touch-gate.sh" or "inbox-stop.py"). Shell hooks and Python
+hooks are both installable; given a bare name, the language is read off whichever file
+is live under the hooks directory, and the candidate is parse-checked with that
+language's own parser.
 
 --check reports every file directly inside the hooks directory that either differs
 from that directory's last commit or fails to parse, and exits non-zero the moment it
@@ -166,9 +171,36 @@ if [ "$#" -lt 2 ]; then
 fi
 
 CANDIDATE="$1"
-HOOK_NAME="${2%.sh}"
 
-LIVE_PATH="$HOOKS_DIR/$HOOK_NAME.sh"
+# 2026-08-13: the live path used to be spelled "$HOOKS_DIR/$HOOK_NAME.sh" outright, which
+# meant this script could install a shell hook and nothing else. That was not a harmless
+# limitation. hooks/inbox-stop.py is a Python hook, so the one prescribed, tested, atomic
+# route for changing a live hook simply did not exist for it, and the only way to change
+# it at all was to edit it in place — the exact thing this script and hooks/README.md
+# exist to forbid. The --check half of this script already knew about both languages; only
+# the installing half did not. It does now: the hook may be named with either suffix or
+# with none, and when none is given the language is read off whichever file is actually
+# live under the hooks directory.
+HOOK_NAME="${2%.sh}"
+HOOK_NAME="${HOOK_NAME%.py}"
+
+case "$2" in
+  *.sh) HOOK_EXT=".sh" ;;
+  *.py) HOOK_EXT=".py" ;;
+  *)
+    if [ -f "$HOOKS_DIR/$HOOK_NAME.sh" ]; then
+      HOOK_EXT=".sh"
+    elif [ -f "$HOOKS_DIR/$HOOK_NAME.py" ]; then
+      HOOK_EXT=".py"
+    else
+      # Neither is live. Refusal 5 below reports that in its own words; carry the
+      # historical default so the message names the file the caller most likely meant.
+      HOOK_EXT=".sh"
+    fi
+    ;;
+esac
+
+LIVE_PATH="$HOOKS_DIR/$HOOK_NAME$HOOK_EXT"
 TEST_PATH="$HOOKS_DIR/$HOOK_NAME.test.py"
 
 # Refusal 1: the candidate file does not exist.
@@ -177,11 +209,22 @@ if [ ! -f "$CANDIDATE" ]; then
   exit 1
 fi
 
-# Refusal 2: the candidate does not parse.
-parse_err=$(bash -n "$CANDIDATE" 2>&1)
-parse_status=$?
+# Refusal 2: the candidate does not parse, checked with the parser of the hook's own
+# language rather than always with bash — the same pair of checks --check already applies.
+if [ "$HOOK_EXT" = ".py" ]; then
+  parse_err=$(python3 -c 'import ast, sys
+ast.parse(open(sys.argv[1]).read(), filename=sys.argv[1])' "$CANDIDATE" 2>&1)
+  parse_status=$?
+  parse_language="a Python script"
+  parse_tool="python"
+else
+  parse_err=$(bash -n "$CANDIDATE" 2>&1)
+  parse_status=$?
+  parse_language="a shell script"
+  parse_tool="'bash -n'"
+fi
 if [ "$parse_status" -ne 0 ]; then
-  echo "hook-install: refuses — the candidate file '$CANDIDATE' does not parse as a shell script; 'bash -n' reported: $parse_err" >&2
+  echo "hook-install: refuses — the candidate file '$CANDIDATE' does not parse as $parse_language; $parse_tool reported: $parse_err" >&2
   exit 1
 fi
 

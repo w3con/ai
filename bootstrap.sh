@@ -309,6 +309,13 @@ is_vault() {
 }
 
 find_vault() {
+  # The two /Volumes entries below are one machine's own mounted disk, and bin/path-check
+  # would ordinarily refuse them. They are correct here, and the marker on each line says
+  # so out loud rather than hiding the exception inside the checker. This is a list of
+  # candidate locations in which the first that actually exists wins, and every entry is
+  # tested with is_vault before it is used — so on a machine where that volume is not
+  # mounted the entry simply fails its test and the search moves on. Naming a location
+  # that may not exist is only a fault when something depends on it existing.
   local candidates=(
     "${VALIDITE_VAULT_ROOT:-}"
     "$HOME/Documents/Validite"
@@ -316,8 +323,8 @@ find_vault() {
     "$HOME/Dev/Validite"
     "$HOME/Dev/Validité"
     "$HOME/Validite"
-    "/Volumes/Documents/startup/Validite"
-    "/Volumes/Documents/startup/Validité"
+    "/Volumes/Documents/startup/Validite"   # path-check: allow — one candidate among many
+    "/Volumes/Documents/startup/Validité"   # path-check: allow — one candidate among many
   )
   local c
   for c in "${candidates[@]}"; do
@@ -327,7 +334,7 @@ find_vault() {
   # Nothing at a known address: look for the signature itself, shallowly, in the
   # few places a checkout plausibly lives. Depth 3 covers $HOME/<dir>/kb/CustDev.
   local base hit dir
-  for base in "$HOME/Documents" "$HOME/Dev" "$HOME" "/Volumes/Documents" "/Volumes/Documents/startup"; do
+  for base in "$HOME/Documents" "$HOME/Dev" "$HOME" "/Volumes/Documents" "/Volumes/Documents/startup"; do  # path-check: allow — search bases, each skipped unless it exists
     [[ -d "$base" ]] || continue
     while IFS= read -r hit; do
       dir="$(dirname "$(dirname "$hit")")"
@@ -391,7 +398,7 @@ if VAULT_PATH="$(find_vault)"; then
   strip_vault_block "$HOME/.zshrc"
   write_vault_export "$VAULT_PATH"
 else
-  fail "VALIDITE_VAULT_ROOT — the Validité business vault was not found. Looked for a directory holding both kb/CustDev and kb/Strategy under ~/Documents, ~/Dev, ~, /Volumes/Documents and /Volumes/Documents/startup (depth 3). Clone git@github.com:validite-eu/org.git and re-run, or export VALIDITE_VAULT_ROOT yourself."
+  fail "VALIDITE_VAULT_ROOT — the Validité business vault was not found. Looked for a directory holding both kb/CustDev and kb/Strategy under ~/Documents, ~/Dev, ~, /Volumes/Documents and /Volumes/Documents/startup (depth 3). Clone git@github.com:validite-eu/org.git and re-run, or export VALIDITE_VAULT_ROOT yourself."  # path-check: allow — the message tells the reader where it looked
 fi
 
 # ---------------------------------------------------------------------------

@@ -56,7 +56,7 @@ set -u
 _app_repo="${AI_APP_REPO:-}"
 if [ -z "$_app_repo" ]; then
   for _candidate in "$HOME/Dev/app" "$HOME/Dev/validite/validite-app" \
-                    "/Volumes/SSD/Dev/validite/validite-app"; do
+                    "/Volumes/SSD/Dev/validite/validite-app"; do  # path-check: allow — the last entry is one candidate among several, tested for existence before use
     if [ -d "$_candidate/.git" ]; then _app_repo="$_candidate"; break; fi
   done
 fi

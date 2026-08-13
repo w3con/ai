@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
-"""bin/path-check — refuse a machine-specific home directory written into a file that
-both machines run or read as an instruction.
+"""bin/path-check — refuse a machine-specific location written into a file that both
+machines run or read as an instruction.
 
 The disease this exists to stop. This configuration is deployed on two machines whose
-home directories differ (`/Users/laptop` on one, `/Users/tknff` on the other). Every time
-an absolute path beginning with one machine's own home is written into a file that the
-other machine also executes or reads as an instruction, that file silently stops working
-on the second machine — a hook whose helper module cannot be imported, a permission entry
-that matches nothing, a skill telling the model to run a command that is not there. Each
-occurrence has been found the same expensive way: something stopped working, somebody
-noticed hours later, and the cause turned out to be one literal path.
+home directories differ (`/Users/laptop` on one, `/Users/tknff` on the other), and whose
+checkouts do not sit in the same place either: here `~/Dev` is a symbolic link onto an
+external volume, so the same repository answers to `/Volumes/SSD/Dev/...` on one machine
+and to something else entirely on the other. Every time an absolute path beginning with
+one machine's own home, or with one machine's own mounted volume, is written into a file
+that the other machine also executes or reads as an instruction, that file silently stops
+working on the second machine — a hook whose helper module cannot be imported, a
+permission entry that matches nothing, a skill telling the model to run a command that is
+not there. Each occurrence has been found the same expensive way: something stopped
+working, somebody noticed hours later, and the cause turned out to be one literal path.
 
-What counts as a violation. Any absolute path of the shape `/Users/<name>/` — where
-`<name>` is not one of the documented placeholders below — appearing in a file this
-script considers *load-bearing*: a shell script, a Python file, a JSON or YAML
+What counts as a violation. Either of two shapes of absolute path, appearing in a file
+this script considers *load-bearing*:
+
+  * `/Users/<name>/` — one machine's own home directory — where `<name>` is not one of
+    the documented placeholders below.
+  * `/Volumes/<name>/` — a location on a mounted volume. On macOS `/Volumes` is where
+    every disk other than the boot disk appears, so a path underneath it is by
+    construction a statement about one machine's hardware. The other machine either has
+    no such volume or has it mounted under a different name, and in both cases the path
+    resolves to nothing at all. The rule is deliberately broad — every volume name, not
+    just the two currently in use — because the next external disk to be plugged in
+    should be caught on the day it is first written down, not after it has broken
+    something.
+
+A file is load-bearing when it is a shell script, a Python file, a JSON or YAML
 configuration file, an extension-less executable, or a Markdown file under `memory/`,
-`skills/` or `agents/`, all three of which are read by an agent as standing instructions
-rather than as a record of the past.
+`skills/`, `agents/` or `commands/`, all four of which are read by an agent as standing
+instructions rather than as a record of the past.
 
 What is deliberately not a violation, and why each exemption is safe.
 
@@ -57,6 +72,20 @@ HOME_LITERAL = re.compile(r"/Users/([A-Za-z0-9._-]+)")
 
 # Names that are placeholders by design rather than one machine's real home.
 PLACEHOLDERS = {"__HOME__", "alice", "youruser", "username", "user"}
+
+# A mounted-volume literal: /Volumes/<name>, which names one machine's own hardware.
+# The character class deliberately excludes the shell glob character, so that a pattern
+# such as `[[ "$dir" == /Volumes/* ]]` — which asks whether a path happens to be on a
+# volume, and names no particular one — is not mistaken for a hard-coded location.
+VOLUME_LITERAL = re.compile(r"/Volumes/([A-Za-z0-9._-]+)")
+
+# Volume names that are placeholders by design. There are none today; the set exists so
+# that adding one later is an obvious one-line change rather than a re-reading of the
+# matching logic.
+VOLUME_PLACEHOLDERS = set()
+
+# Every shape this script refuses, each paired with the names that are exempt from it.
+MACHINE_SPECIFIC = ((HOME_LITERAL, PLACEHOLDERS), (VOLUME_LITERAL, VOLUME_PLACEHOLDERS))
 
 # A line carrying this marker is passed over, whatever it contains.
 ESCAPE_MARKER = "path-check: allow"
@@ -122,11 +151,12 @@ def violations_in(abs_path, rel_path):
                 continue
         if ESCAPE_MARKER in line or is_comment(line):
             continue
-        for match in HOME_LITERAL.finditer(line):
-            if match.group(1) in PLACEHOLDERS:
-                continue
+        # One line is reported once however many shapes it offends against, because the
+        # reader is being sent to a line to rewrite, not handed a tally.
+        if any(match.group(1) not in exempt
+               for pattern, exempt in MACHINE_SPECIFIC
+               for match in pattern.finditer(line)):
             yield number, line.rstrip("\n")
-            break
 
 
 def tracked_files(root, staged):
@@ -142,28 +172,46 @@ def tracked_files(root, staged):
 def main():
     parser = argparse.ArgumentParser(
         prog="bin/path-check",
-        description="Refuse a machine-specific home directory written into a file that "
-                    "both machines run or read as a standing instruction.")
+        description="Refuse a machine-specific location — one machine's own home "
+                    "directory, or one machine's own mounted volume — written into a "
+                    "file that both machines run or read as a standing instruction.")
     parser.add_argument("paths", nargs="*", help="check exactly these files instead")
     parser.add_argument("--root", default=None, help="repository root to check")
     parser.add_argument("--staged", action="store_true",
                         help="check only what is staged for commit")
     args = parser.parse_args()
 
-    root = os.path.abspath(args.root) if args.root else \
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Both sides are resolved through every symbolic link before they are compared.
+    # 2026-08-13: they used to be merely made absolute, and that silently disabled the
+    # whole check whenever the two sides disagreed about a link — naming a file inside a
+    # directory under /var, which on macOS is a link to /private/var, produced a relative
+    # path that resolved to nothing, so the file was skipped and the run reported success.
+    # A checker that quietly checks nothing is the very disease this program exists to
+    # cure, so it may not be reintroduced here.
+    root = os.path.realpath(args.root) if args.root else \
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
-    if args.paths:
-        candidates = [os.path.relpath(os.path.abspath(p), root) for p in args.paths]
+    named_explicitly = bool(args.paths)
+    if named_explicitly:
+        candidates = [os.path.relpath(os.path.realpath(p), root) for p in args.paths]
     else:
         candidates = tracked_files(root, args.staged)
 
     found = 0
+    unreadable = 0
     for rel in candidates:
-        if not is_load_bearing(rel):
-            continue
         abs_path = os.path.join(root, rel)
         if not os.path.isfile(abs_path):
+            # A file listed by git but no longer on disk is an ordinary deletion and
+            # nothing to report. A file the caller named by hand and this program cannot
+            # open is a different matter: staying quiet about it would report success for
+            # something that was never read.
+            if named_explicitly:
+                print("bin/path-check: cannot read %s — it was named on the command line "
+                      "but is not a readable file." % rel, file=sys.stderr)
+                unreadable += 1
+            continue
+        if not is_load_bearing(rel):
             continue
         for number, text in violations_in(abs_path, rel):
             print("%s:%d: %s" % (rel, number, text.strip()))
@@ -171,15 +219,19 @@ def main():
 
     if found:
         print()
-        print("bin/path-check: %d file(s) name one machine's own home directory. Both "
-              "machines run these files, and on the other one that path does not exist. "
-              "Derive the location instead — from the running file's own position, from "
-              "$HOME, or from the __HOME__ placeholder bootstrap.sh substitutes at "
-              "deploy time. If an occurrence genuinely must stay, put the marker "
-              "'%s' on that line so the exception is visible in the file itself."
-              % (found, ESCAPE_MARKER), file=sys.stderr)
+        print("bin/path-check: %d line(s) name one machine's own home directory or one "
+              "machine's own mounted volume. Both machines run these files, and on the "
+              "other one that path does not exist. Derive the location instead — from "
+              "the running file's own position, from $HOME, from an environment variable "
+              "the machine already sets, from a short list of candidate locations where "
+              "the first that actually exists wins, or from the __HOME__ placeholder "
+              "bootstrap.sh substitutes at deploy time. If an occurrence genuinely must "
+              "stay, put the marker '%s' on that line so the exception is visible in the "
+              "file itself." % (found, ESCAPE_MARKER), file=sys.stderr)
         return 1
-    print("bin/path-check: no machine-specific home directory in any load-bearing file.")
+    if unreadable:
+        return 2
+    print("bin/path-check: no machine-specific location in any load-bearing file.")
     return 0
 
 
