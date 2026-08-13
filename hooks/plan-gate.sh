@@ -72,7 +72,23 @@ SEARCH_ROOTS="${PLAN_GATE_SEARCH_ROOTS:-${PROJECT_DIR}:${PWD}}"
 # installed, because an installed hook and brief_reader.py sit in the same directory, but
 # wrong for a candidate under test, which sits in candidates/ instead. Shared verbatim
 # with hooks/card-touch-gate.sh.
-HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-/Users/laptop/Dev/ai/hooks}"
+#
+# 2026-08-13: that fixed location used to be the literal /Users/laptop/Dev/ai/hooks — one
+# machine's home directory written into a file both machines run. On a machine whose user
+# is not "laptop" the path does not exist, brief_reader is unimportable, and this hook,
+# which fails closed by design, denied every agent spawn with an internal error. The
+# default is now derived in the order the comment above already argues for: the directory
+# this script itself sits in, but only when brief_reader.py is genuinely beside it, which
+# is true for an installed hook and false for a candidate in candidates/; and otherwise
+# this machine's own $HOME instead of another machine's. HOOK_INSTALL_HOOKS_DIR still
+# overrides both, so bin/hook-install and the candidate suites behave exactly as before.
+HOOKS_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${HOOKS_SELF_DIR}/brief_reader.py" ]]; then
+    HOOKS_DIR_DEFAULT="$HOOKS_SELF_DIR"
+else
+    HOOKS_DIR_DEFAULT="${HOME}/Dev/ai/hooks"
+fi
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-$HOOKS_DIR_DEFAULT}"
 
 # Read stdin fully before passing to python3
 STDIN_DATA="$(cat)"
