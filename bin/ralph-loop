@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# bin/ralph-loop — run one prompt file through a headless Claude Code turn over and over,
+# until the work it describes is genuinely finished.
+#
+# This is the "Ralph" pattern: the same prompt, fed back in from the beginning on every
+# iteration, with all continuity living on disk rather than in a conversation. Each turn
+# starts cold, reads the journal the prompt tells it to read, does one unit of work,
+# writes what it did back into that journal, commits, and ends. The next turn picks the
+# work up from the journal alone.
+#
+# Why this runs as its own process rather than inside a session. The ralph-loop plugin
+# shipped with Claude Code implements the same idea through a Stop hook that traps the
+# session it is started in, and that session then cannot be stopped by hand. Two things
+# make that the wrong shape here: this machine already registers its own Stop hook, and
+# trapping the owner's own working session in a loop he cannot interrupt is not something
+# to do to somebody's terminal. Run as a separate process, the loop can be watched in its
+# log, stopped by creating the stop file, and it leaves every session free.
+#
+# How it stops. Any one of four things ends it: the iteration limit is reached; the stop
+# file appears (create it with `touch`, which is the ordinary way to stop the loop); the
+# turn prints the completion promise, which the prompt file must define and must instruct
+# the model never to print falsely; or the turn exits non-zero too many times in a row,
+# which means something is broken rather than merely unfinished.
+#
+# Usage:
+#     bin/ralph-loop <prompt-file> [options]
+#
+#     --max-iterations N     stop after N turns (default 40; 0 means no limit)
+#     --promise TEXT         the completion phrase; the loop stops when a turn prints
+#                            "<promise>TEXT</promise>" (default: no promise, so only the
+#                            iteration limit and the stop file end it)
+#     --cwd DIR              run each turn in this directory (default: the prompt file's
+#                            own repository root, or $PWD)
+#     --log DIR              where per-iteration logs are written (default:
+#                            ~/Dev/ai/ralph/logs)
+#     --stop-file PATH       create this file to stop the loop (default:
+#                            <log dir>/STOP)
+#     --model NAME           model name passed through to each turn
+#     --pause SECONDS        wait this long between turns (default 5)
+#     --dry-run              print the exact command each turn would run, and stop
+#
+# Exit codes: 0 — the promise was printed, or the iteration limit was reached cleanly, or
+#               the stop file was found; 2 — bad invocation; 3 — too many consecutive
+#               failing turns.
+
+set -uo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '2,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 0
+fi
+
+PROMPT_FILE=""
+MAX_ITERATIONS=40
+PROMISE=""
+RUN_CWD=""
+LOG_DIR="$HOME/Dev/ai/ralph/logs"
+STOP_FILE=""
+MODEL=""
+PAUSE=5
+DRY_RUN=0
+MAX_CONSECUTIVE_FAILURES=3
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --max-iterations) MAX_ITERATIONS="${2:-}"; shift 2 ;;
+        --promise)        PROMISE="${2:-}";        shift 2 ;;
+        --cwd)            RUN_CWD="${2:-}";        shift 2 ;;
+        --log)            LOG_DIR="${2:-}";        shift 2 ;;
+        --stop-file)      STOP_FILE="${2:-}";      shift 2 ;;
+        --model)          MODEL="${2:-}";          shift 2 ;;
+        --pause)          PAUSE="${2:-}";          shift 2 ;;
+        --dry-run)        DRY_RUN=1;               shift   ;;
+        -*)
+            echo "bin/ralph-loop: unknown option '$1'. Run with --help." >&2
+            exit 2 ;;
+        *)
+            if [[ -n "$PROMPT_FILE" ]]; then
+                echo "bin/ralph-loop: more than one prompt file named ('$PROMPT_FILE' and '$1')." >&2
+                exit 2
+            fi
+            PROMPT_FILE="$1"; shift ;;
+    esac
+done
+
+if [[ -z "$PROMPT_FILE" ]]; then
+    echo "bin/ralph-loop: no prompt file named. Run with --help." >&2
+    exit 2
+fi
+if [[ ! -f "$PROMPT_FILE" ]]; then
+    echo "bin/ralph-loop: no such prompt file: $PROMPT_FILE" >&2
+    exit 2
+fi
+PROMPT_FILE="$(cd "$(dirname "$PROMPT_FILE")" && pwd)/$(basename "$PROMPT_FILE")"
+
+if [[ -z "$RUN_CWD" ]]; then
+    RUN_CWD="$(git -C "$(dirname "$PROMPT_FILE")" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+fi
+if [[ ! -d "$RUN_CWD" ]]; then
+    echo "bin/ralph-loop: no such working directory: $RUN_CWD" >&2
+    exit 2
+fi
+
+mkdir -p "$LOG_DIR" || { echo "bin/ralph-loop: cannot create log directory $LOG_DIR" >&2; exit 2; }
+[[ -z "$STOP_FILE" ]] && STOP_FILE="$LOG_DIR/STOP"
+
+# The tool list is the real boundary on what a turn can do. Read, Edit, Write, Glob, Grep
+# and Bash are what a sweep of this kind needs; Task and Agent are refused outright so
+# that a turn can never start a paid agent of its own, which is the one way this loop
+# could quietly become expensive without anybody deciding that it should.
+ALLOWED_TOOLS=(Read Edit Write Glob Grep Bash)
+DISALLOWED_TOOLS=(Task Agent)
+
+build_command() {
+    CMD=(claude -p)
+    [[ -n "$MODEL" ]] && CMD+=(--model "$MODEL")
+    CMD+=(--allowedTools "${ALLOWED_TOOLS[@]}")
+    CMD+=(--disallowedTools "${DISALLOWED_TOOLS[@]}")
+    CMD+=(--permission-mode acceptEdits)
+}
+build_command
+
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "bin/ralph-loop: dry run — each turn would run, in $RUN_CWD:"
+    echo "  ${CMD[*]}  < $PROMPT_FILE"
+    echo "Logs would go to:   $LOG_DIR"
+    echo "Stop by creating:   $STOP_FILE"
+    echo "Iteration limit:    $MAX_ITERATIONS"
+    echo "Completion promise: ${PROMISE:-（none）}"
+    exit 0
+fi
+
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+MAIN_LOG="$LOG_DIR/ralph-$RUN_STAMP.log"
+
+{
+    echo "ralph-loop started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "  prompt:    $PROMPT_FILE"
+    echo "  cwd:       $RUN_CWD"
+    echo "  command:   ${CMD[*]}"
+    echo "  limit:     $MAX_ITERATIONS"
+    echo "  promise:   ${PROMISE:-none}"
+    echo "  stop file: $STOP_FILE"
+    echo ""
+} | tee -a "$MAIN_LOG"
+
+iteration=0
+consecutive_failures=0
+
+while true; do
+    if [[ -f "$STOP_FILE" ]]; then
+        echo "ralph-loop: stop file found at $STOP_FILE — stopping after $iteration iteration(s)." | tee -a "$MAIN_LOG"
+        exit 0
+    fi
+    if [[ "$MAX_ITERATIONS" -gt 0 && "$iteration" -ge "$MAX_ITERATIONS" ]]; then
+        echo "ralph-loop: reached the limit of $MAX_ITERATIONS iteration(s) — stopping." | tee -a "$MAIN_LOG"
+        exit 0
+    fi
+
+    iteration=$((iteration + 1))
+    turn_log="$LOG_DIR/ralph-$RUN_STAMP-$(printf '%03d' "$iteration").log"
+    echo "--- iteration $iteration at $(date -u +%Y-%m-%dT%H:%M:%SZ) → $turn_log" | tee -a "$MAIN_LOG"
+
+    ( cd "$RUN_CWD" && "${CMD[@]}" < "$PROMPT_FILE" ) > "$turn_log" 2>&1
+    status=$?
+
+    if [[ $status -ne 0 ]]; then
+        consecutive_failures=$((consecutive_failures + 1))
+        echo "    turn exited $status (consecutive failures: $consecutive_failures)" | tee -a "$MAIN_LOG"
+        tail -5 "$turn_log" | sed 's/^/    | /' | tee -a "$MAIN_LOG"
+        if [[ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]]; then
+            echo "ralph-loop: $consecutive_failures turns in a row failed — something is broken rather than unfinished. Stopping. Read $turn_log." | tee -a "$MAIN_LOG"
+            exit 3
+        fi
+    else
+        consecutive_failures=0
+        tail -3 "$turn_log" | sed 's/^/    | /' | tee -a "$MAIN_LOG"
+    fi
+
+    if [[ -n "$PROMISE" ]] && grep -qF "<promise>$PROMISE</promise>" "$turn_log"; then
+        echo "ralph-loop: the completion promise was printed on iteration $iteration — the work reports itself finished. Stopping." | tee -a "$MAIN_LOG"
+        exit 0
+    fi
+
+    sleep "$PAUSE"
+done
