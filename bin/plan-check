@@ -219,14 +219,17 @@ def exact_section(found, names):
 
 
 def check_interview(lines, problems):
-    """The nine questions, the sources behind them, and the summary the owner
-    signs. These exist because work here repeatedly started before the task was
-    understood: the cure is answers on the record before the first edit, not a
-    right to interrupt the owner once building has begun."""
+    """The six questions, the sources behind them, and the summary the owner signs.
+    What is required is answers on the record before the first edit, not an
+    interrogation: an answer already given in conversation is written down by the
+    coordinator, and only what has not been said is asked. Acceptance criteria and
+    the scope boundary are deliberately not among the questions — each has a section
+    of its own further down the card, and asking the same thing twice is what makes
+    a card heavy enough to be worth bypassing."""
     pairs = exact_subsections(lines, INTERVIEW_NAMES)
     if pairs is None:
         problems.append(
-            "no interview section — the card must carry one, with the nine numbered "
+            "no interview section — the card must carry one, with the six numbered "
             "questions answered in the owner's own words before any work begins"
         )
     else:
@@ -239,7 +242,7 @@ def check_interview(lines, problems):
                 answered.add(int(number.group(1)))
             else:
                 problems.append(f"interview question {number.group(1)} has no answer: {heading}")
-        missing = [n for n in range(1, 10) if n not in answered]
+        missing = [n for n in range(1, 7) if n not in answered]
         if missing:
             for n in missing:
                 if not any(f"interview question {n} " in p for p in problems):
