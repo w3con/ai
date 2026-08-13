@@ -55,3 +55,5 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [An unanswered question was explained badly](feedback-unanswered-question-means-unclear.md) — asked twice with no answer means rewrite the explanation from the subject up, never re-ask the same words or carry a bare "needs a conversation" line
 - [App: no real data yet, and DB access exists](project_app_no_real_data_yet.md) — `~/Dev/app` only: only test/demo records exist so far, and the coordinator CAN reach Mongo directly via docker exec — never repeat an old plan's "no access" claim untested
 - [A reported failure is a work order](feedback-reported-failure-is-a-work-order.md) — when Alex pastes a broken deploy or build, start the fix and report it; do not ask whether to begin
+- [Clone config verbatim](feedback-clone-config-verbatim.md) — deriving a new node/service config from an already-proven twin: copy the proven flags/values byte-for-byte, don't re-derive by reasoning about names
+- [Verify repo vs live](feedback_pilier_verify_repo_vs_live.md) — Pilier only: before changing/auditing server config, diff the tracked file against the live host, don't trust the repo copy alone
