@@ -50,7 +50,17 @@
 
 set -u
 
-REPOS="${GIT_SYNC_NOTICE_REPOS:-$HOME/Dev/ai $HOME/Dev/app}"
+# 2026-08-13: the project checkout is not at the same path on both machines, so it is
+# named by AI_APP_REPO where that is set and otherwise resolved to the first known
+# checkout location that actually exists here, rather than assumed to be $HOME/Dev/app.
+_app_repo="${AI_APP_REPO:-}"
+if [ -z "$_app_repo" ]; then
+  for _candidate in "$HOME/Dev/app" "$HOME/Dev/validite/validite-app" \
+                    "/Volumes/SSD/Dev/validite/validite-app"; do
+    if [ -d "$_candidate/.git" ]; then _app_repo="$_candidate"; break; fi
+  done
+fi
+REPOS="${GIT_SYNC_NOTICE_REPOS:-$HOME/Dev/ai${_app_repo:+ $_app_repo}}"
 STATE_DIR="${GIT_SYNC_NOTICE_STATE_DIR:-$HOME/.claude}"
 FETCH_INTERVAL="${GIT_SYNC_NOTICE_FETCH_INTERVAL:-14400}"
 

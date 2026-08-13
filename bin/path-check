@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""bin/path-check — refuse a machine-specific home directory written into a file that
+both machines run or read as an instruction.
+
+The disease this exists to stop. This configuration is deployed on two machines whose
+home directories differ (`/Users/laptop` on one, `/Users/tknff` on the other). Every time
+an absolute path beginning with one machine's own home is written into a file that the
+other machine also executes or reads as an instruction, that file silently stops working
+on the second machine — a hook whose helper module cannot be imported, a permission entry
+that matches nothing, a skill telling the model to run a command that is not there. Each
+occurrence has been found the same expensive way: something stopped working, somebody
+noticed hours later, and the cause turned out to be one literal path.
+
+What counts as a violation. Any absolute path of the shape `/Users/<name>/` — where
+`<name>` is not one of the documented placeholders below — appearing in a file this
+script considers *load-bearing*: a shell script, a Python file, a JSON or YAML
+configuration file, an extension-less executable, or a Markdown file under `memory/`,
+`skills/` or `agents/`, all three of which are read by an agent as standing instructions
+rather than as a record of the past.
+
+What is deliberately not a violation, and why each exemption is safe.
+
+  * A comment line. A comment cannot be executed and cannot mislead a machine; several
+    of them in this repository exist precisely to record the literal that was removed,
+    so that a later reader understands what the surrounding code is defending against.
+    A line is treated as a comment when its first non-blank character starts a comment
+    in that file's own language (`#` for shell, Python and YAML; `//` for JSON with
+    comments), or when it sits inside a Python triple-quoted module docstring.
+  * A file under `decisions/` or `plans/`. Those are the historical record: a decision
+    document quoting the actual JSON line a hook logged in August 2026 must keep that
+    line byte for byte, because rewriting evidence to make a checker happy destroys the
+    only thing the document is for.
+  * The documented placeholder names — `__HOME__`, which `bootstrap.sh` substitutes at
+    deploy time, and `alice`, used in the knowledge-base skeleton template as an obvious
+    stand-in for whoever ends up running it.
+  * Any single line carrying the marker `path-check: allow` — the deliberate, visible
+    escape for the case nobody foresaw, which leaves a searchable trace in the file
+    rather than a silent exception buried in this script.
+
+Usage:
+    bin/path-check                 check every tracked file in this repository
+    bin/path-check --root DIR      check a different repository instead
+    bin/path-check --staged        check only what is staged for commit (for a hook)
+    bin/path-check <path> ...      check exactly the named files
+
+Exit codes: 0 — nothing found; 1 — at least one violation, each printed as
+            `<path>:<line>: <the offending text>`; 2 — bad invocation.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+# A home-directory literal: /Users/<name> followed by a separator or end of token.
+HOME_LITERAL = re.compile(r"/Users/([A-Za-z0-9._-]+)")
+
+# Names that are placeholders by design rather than one machine's real home.
+PLACEHOLDERS = {"__HOME__", "alice", "youruser", "username", "user"}
+
+# A line carrying this marker is passed over, whatever it contains.
+ESCAPE_MARKER = "path-check: allow"
+
+# Directories whose contents are a record of the past, not something anything runs.
+EXEMPT_DIR_PREFIXES = ("decisions/", "plans/")
+
+# Extensions this script treats as load-bearing.
+LOAD_BEARING_EXTENSIONS = {".sh", ".bash", ".zsh", ".py", ".json", ".yaml", ".yml",
+                          ".toml", ".template", ".conf", ".cfg", ".ini"}
+
+# Markdown is load-bearing only in these directories, where an agent reads it as a
+# standing instruction rather than as a note about what once happened.
+INSTRUCTION_DIRS = ("memory/", "skills/", "agents/", "commands/")
+
+COMMENT_STARTS = ("#", "//", "*", "<!--")
+
+
+def is_load_bearing(rel_path):
+    """True when a wrong path in this file would actually break something or misdirect
+    an agent, rather than merely sit in prose somebody reads."""
+    for prefix in EXEMPT_DIR_PREFIXES:
+        if rel_path.startswith(prefix):
+            return False
+    _, ext = os.path.splitext(rel_path)
+    if ext in LOAD_BEARING_EXTENSIONS:
+        return True
+    if ext == ".md":
+        return any(rel_path.startswith(d) for d in INSTRUCTION_DIRS)
+    if ext == "":
+        # An extension-less file directly under bin/ or hooks/ is a command.
+        return rel_path.startswith("bin/") or rel_path.startswith("hooks/")
+    return False
+
+
+def is_comment(line):
+    stripped = line.lstrip()
+    return any(stripped.startswith(c) for c in COMMENT_STARTS)
+
+
+def violations_in(abs_path, rel_path):
+    """Yield (line number, line text) for every offending line in one file."""
+    try:
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return
+    # Whether this is Python is decided by the shebang as well as by the extension:
+    # every command under bin/ here is extension-less, so extension alone would leave
+    # their module docstrings — which are prose — treated as code.
+    is_python = rel_path.endswith(".py") or (
+        lines and lines[0].startswith("#!") and "python" in lines[0])
+
+    in_docstring = False
+    for number, line in enumerate(lines, start=1):
+        # Track Python triple-quoted blocks so a module docstring counts as prose.
+        if is_python:
+            ticks = line.count('"""') + line.count("'''")
+            if ticks % 2 == 1:
+                in_docstring = not in_docstring
+                continue
+            if in_docstring:
+                continue
+        if ESCAPE_MARKER in line or is_comment(line):
+            continue
+        for match in HOME_LITERAL.finditer(line):
+            if match.group(1) in PLACEHOLDERS:
+                continue
+            yield number, line.rstrip("\n")
+            break
+
+
+def tracked_files(root, staged):
+    args = ["git", "-C", root, "diff", "--cached", "--name-only", "--diff-filter=ACMR"] \
+        if staged else ["git", "-C", root, "ls-files"]
+    out = subprocess.run(args, capture_output=True, text=True)
+    if out.returncode != 0:
+        print("bin/path-check: not a git repository: %s" % root, file=sys.stderr)
+        sys.exit(2)
+    return [p for p in out.stdout.splitlines() if p]
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="bin/path-check",
+        description="Refuse a machine-specific home directory written into a file that "
+                    "both machines run or read as a standing instruction.")
+    parser.add_argument("paths", nargs="*", help="check exactly these files instead")
+    parser.add_argument("--root", default=None, help="repository root to check")
+    parser.add_argument("--staged", action="store_true",
+                        help="check only what is staged for commit")
+    args = parser.parse_args()
+
+    root = os.path.abspath(args.root) if args.root else \
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    if args.paths:
+        candidates = [os.path.relpath(os.path.abspath(p), root) for p in args.paths]
+    else:
+        candidates = tracked_files(root, args.staged)
+
+    found = 0
+    for rel in candidates:
+        if not is_load_bearing(rel):
+            continue
+        abs_path = os.path.join(root, rel)
+        if not os.path.isfile(abs_path):
+            continue
+        for number, text in violations_in(abs_path, rel):
+            print("%s:%d: %s" % (rel, number, text.strip()))
+            found += 1
+
+    if found:
+        print()
+        print("bin/path-check: %d file(s) name one machine's own home directory. Both "
+              "machines run these files, and on the other one that path does not exist. "
+              "Derive the location instead — from the running file's own position, from "
+              "$HOME, or from the __HOME__ placeholder bootstrap.sh substitutes at "
+              "deploy time. If an occurrence genuinely must stay, put the marker "
+              "'%s' on that line so the exception is visible in the file itself."
+              % (found, ESCAPE_MARKER), file=sys.stderr)
+        return 1
+    print("bin/path-check: no machine-specific home directory in any load-bearing file.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

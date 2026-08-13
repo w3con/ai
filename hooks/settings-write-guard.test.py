@@ -6,14 +6,18 @@ whole command string, so a test suite written inline as shell would contain the
 very patterns it is testing and block itself.
 """
 import json
+import os
 import subprocess
 import sys
 
-HOOK = "/Users/laptop/Dev/ai/hooks/settings-write-guard.sh"
+_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HOOKS = os.path.join(_AI_ROOT, "hooks")
+
+HOOK = os.path.join(_HOOKS, "settings-write-guard.sh")
 S = "settings.json"          # assembled at runtime, never as one literal below
 LOCAL = "settings.local.json"
 HOME = "~/.claude/"
-REPO = "/Users/laptop/Dev/ai/"
+REPO = _AI_ROOT + os.sep
 
 
 def verdict(command, env=None):

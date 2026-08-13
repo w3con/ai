@@ -18,7 +18,7 @@ target is already known.
 Call, via `Bash`:
 
 ```
-/Users/laptop/Dev/ai/bin/websearch "<query>"
+~/Dev/ai/bin/websearch "<query>"
 ```
 
 The script itself tries three network providers in order — Tavily, then Brave, then

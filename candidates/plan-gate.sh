@@ -72,7 +72,19 @@ SEARCH_ROOTS="${PLAN_GATE_SEARCH_ROOTS:-${PROJECT_DIR}:${PWD}}"
 # installed, because an installed hook and brief_reader.py sit in the same directory, but
 # wrong for a candidate under test, which sits in candidates/ instead. Shared verbatim
 # with hooks/card-touch-gate.sh.
-HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-/Users/laptop/Dev/ai/hooks}"
+# 2026-08-13: this default used to be the literal /Users/laptop/Dev/ai/hooks — one machine's
+# home directory written into a file both machines run, so on any machine whose user is not
+# "laptop" it named a directory that does not exist. It is now derived from where this file
+# itself sits, falling back to this machine's own $HOME rather than another machine's.
+_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${_SELF_DIR}/brief_reader.py" ]; then
+  _HOOKS_DEFAULT="$_SELF_DIR"
+elif [ -d "${_SELF_DIR}/../hooks" ]; then
+  _HOOKS_DEFAULT="$(cd "${_SELF_DIR}/../hooks" && pwd)"
+else
+  _HOOKS_DEFAULT="${HOME}/Dev/ai/hooks"
+fi
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-$_HOOKS_DEFAULT}"
 
 # Read stdin fully before passing to python3
 STDIN_DATA="$(cat)"

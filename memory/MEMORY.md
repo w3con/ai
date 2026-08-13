@@ -62,3 +62,4 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Clone config verbatim](feedback-clone-config-verbatim.md) — deriving a new node/service config from an already-proven twin: copy the proven flags/values byte-for-byte, don't re-derive by reasoning about names
 - [Verify repo vs live](feedback_pilier_verify_repo_vs_live.md) — Pilier only: before changing/auditing server config, diff the tracked file against the live host, don't trust the repo copy alone
 - [A clean merge is not agreement](feedback-clean-merge-is-not-agreement.md) — no conflict only means the two sides edited different files; compare what each side's work produces
+- [Python on the SSD machine](machine-ssd-python-path.md) — prepending Homebrew to PATH swaps in an interpreter without PyYAML and fakes a regression.

@@ -16,9 +16,9 @@ GIT_SYNC_NOTICE_STATE_DIR (once HRN-155.10 lands) points its own per-repository
 fetch-attempt bookkeeping at a scratch directory too, so no scenario here ever touches the
 real ~/.claude either.
 
-Run directly: python3 /Users/laptop/Dev/ai/hooks/git-sync-notice.test.py [candidate-path]
+Run directly: python3 ~/Dev/ai/hooks/git-sync-notice.test.py [candidate-path]
 With no argument this runs against the installed hook at
-/Users/laptop/Dev/ai/hooks/git-sync-notice.sh; given one argument it runs against that
+~/Dev/ai/hooks/git-sync-notice.sh; given one argument it runs against that
 file instead, which is what bin/hook-install uses to test a candidate before installing
 it. Exit code 0 when every check passes, 1 when any fails (own PASS/FAIL harness, matching
 the sibling *.test.py files in this directory rather than unittest).
@@ -32,7 +32,10 @@ import sys
 import tempfile
 import time
 
-HOOK = sys.argv[1] if len(sys.argv) > 1 else "/Users/laptop/Dev/ai/hooks/git-sync-notice.sh"
+_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HOOKS = os.path.join(_AI_ROOT, "hooks")
+
+HOOK = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_HOOKS, "git-sync-notice.sh")
 
 fails = 0
 

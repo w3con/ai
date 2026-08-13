@@ -10,7 +10,7 @@ metadata:
 
 On the validité site redesign, Alex forbids ANY design improvisation — "запрещаю фантазировать даже на пиксель." Build only (a) exactly what is written in `redesign/Components.dc.html` / `redesign/DESIGN.md`, or (b) what Alex stated explicitly. Never "finish details by the logic of the visual language" — that is the failure mode he called out.
 
-For anything not 100% specified: **write a mini-plan to disk and run an interview** — ask as many questions as needed until his intent is fully clear, recording each answer into the plan file *before* writing any code. (Hero example: `/Users/laptop/Documents/Validite/plans/hero-redesign.md`.)
+For anything not 100% specified: **write a mini-plan to disk and run an interview** — ask as many questions as needed until his intent is fully clear, recording each answer into the plan file *before* writing any code. (Hero example: `$VALIDITE_VAULT_ROOT/plans/hero-redesign.md`.)
 
 **Why:** I repeatedly guessed (full-bleed hero, removed the 16px radius, invented object-position and min-height, mis-took "zero padding" as full-width) instead of reproducing the showcase. It wasted effort and angered him.
 

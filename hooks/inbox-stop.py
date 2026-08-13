@@ -20,7 +20,25 @@ import os
 import subprocess
 import sys
 
-REPO = "/Users/laptop/Dev/app"
+# 2026-08-13: this used to be the literal /Users/laptop/Dev/app — one machine's home
+# directory written into a file both machines run, so on the other machine this hook
+# matched no working directory at all and silently never delivered anything. The repository
+# is now named by AI_APP_REPO where it is set, and otherwise resolved to the first of the
+# known checkout locations that actually exists on the machine running this file.
+def _resolve_app_repo():
+    named = os.environ.get("AI_APP_REPO")
+    if named:
+        return os.path.realpath(named)
+    home = os.path.expanduser("~")
+    for candidate in (os.path.join(home, "Dev", "app"),
+                      os.path.join(home, "Dev", "validite", "validite-app"),
+                      "/Volumes/SSD/Dev/validite/validite-app"):
+        if os.path.isdir(os.path.join(candidate, ".git")):
+            return os.path.realpath(candidate)
+    return os.path.realpath(os.path.join(home, "Dev", "app"))
+
+
+REPO = _resolve_app_repo()
 
 
 def format_line(raw):

@@ -316,24 +316,19 @@ STDIN_DATA="$(cat)"
 # try/import/fallback workaround this file used to carry (HRN-47.8) with this one fixed
 # arrangement, shared verbatim with hooks/plan-gate.sh, so a hook finds its helpers the same
 # way whether it is running installed or as a candidate.
-#
-# 2026-08-13: that fixed location used to be the literal /Users/laptop/Dev/ai/hooks — one
-# machine's home directory written into a file both machines run, so on a machine whose
-# user is not "laptop" brief_reader was unimportable and this hook, which fails open by
-# design, silently stopped enforcing anything at all. The default is now derived in the
-# order the comment above already argues for: the directory this script itself sits in,
-# but only when brief_reader.py is genuinely beside it, which is true for an installed
-# hook and false for a candidate in candidates/; and otherwise this machine's own $HOME
-# instead of another machine's. HOOK_INSTALL_HOOKS_DIR still overrides both, so
-# bin/hook-install and the candidate suites behave exactly as before. Shared verbatim with
-# hooks/plan-gate.sh.
-HOOKS_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "${HOOKS_SELF_DIR}/brief_reader.py" ]]; then
-    HOOKS_DIR_DEFAULT="$HOOKS_SELF_DIR"
+# 2026-08-13: this default used to be the literal /Users/laptop/Dev/ai/hooks — one machine's
+# home directory written into a file both machines run, so on any machine whose user is not
+# "laptop" it named a directory that does not exist. It is now derived from where this file
+# itself sits, falling back to this machine's own $HOME rather than another machine's.
+_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${_SELF_DIR}/brief_reader.py" ]; then
+  _HOOKS_DEFAULT="$_SELF_DIR"
+elif [ -d "${_SELF_DIR}/../hooks" ]; then
+  _HOOKS_DEFAULT="$(cd "${_SELF_DIR}/../hooks" && pwd)"
 else
-    HOOKS_DIR_DEFAULT="${HOME}/Dev/ai/hooks"
+  _HOOKS_DEFAULT="${HOME}/Dev/ai/hooks"
 fi
-HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-$HOOKS_DIR_DEFAULT}"
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-$_HOOKS_DEFAULT}"
 
 GATE_TMP="${CARD_TOUCH_GATE_STATE_DIR:-${TMPDIR:-/tmp}/claude-card-touch-gate}"
 mkdir -p "$GATE_TMP" 2>/dev/null

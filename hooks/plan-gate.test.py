@@ -11,8 +11,8 @@ ai/harness/tasks directories, via PLAN_GATE_SEARCH_ROOTS — the env var the hoo
 reads to override its search roots, exactly as CARD_TOUCH_GATE_STATE_DIR isolates
 card-touch-gate.test.py from live state.
 
-Run directly: python3 /Users/laptop/Dev/ai/hooks/plan-gate.test.py [candidate-path]
-With no argument this runs against the installed hook at /Users/laptop/Dev/ai/hooks/plan-gate.sh;
+Run directly: python3 ~/Dev/ai/hooks/plan-gate.test.py [candidate-path]
+With no argument this runs against the installed hook at ~/Dev/ai/hooks/plan-gate.sh;
 given one argument it runs against that file instead, which is what bin/hook-install uses to
 test a candidate before installing it.
 Exit code 0 when every check passes, 1 when any fails (own PASS/FAIL harness, matching the
@@ -25,7 +25,10 @@ import subprocess
 import sys
 import tempfile
 
-HOOK = sys.argv[1] if len(sys.argv) > 1 else "/Users/laptop/Dev/ai/hooks/plan-gate.sh"
+_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HOOKS = os.path.join(_AI_ROOT, "hooks")
+
+HOOK = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_HOOKS, "plan-gate.sh")
 
 fails = 0
 

@@ -11,13 +11,23 @@ import os
 import subprocess
 import sys
 
-HOOK = "/Users/laptop/Dev/ai/hooks/memory-store-guard.sh"
+_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HOOKS = os.path.join(_AI_ROOT, "hooks")
+
+HOOK = os.path.join(_HOOKS, "memory-store-guard.sh")
 HOME = os.path.expanduser("~")
 SHARED_STORE = os.path.join(HOME, "Dev", "ai", "memory")
 PROJECTS_ROOT = os.path.join(HOME, ".claude", "projects")
 
 REAL_PROJECT_SLUG = "zz-guard-test"
 REAL_PROJECT_DIR = os.path.join(PROJECTS_ROOT, REAL_PROJECT_SLUG, "memory")
+
+# 2026-08-13: the symlinked-project case used to name a real slug of one machine,
+# "-Users-laptop-Dev-app", which exists only on that machine — so on the other one this
+# case failed for a reason that had nothing to do with the guard. It now builds its own
+# symlink fixture in setup, exactly as the real-directory case beside it already did.
+LINK_PROJECT_SLUG = "zz-guard-test-link"
+LINK_PROJECT_DIR = os.path.join(PROJECTS_ROOT, LINK_PROJECT_SLUG, "memory")
 
 
 def verdict(tool_name, file_path, env=None):
@@ -44,12 +54,18 @@ def check(expected, label, tool_name, file_path, env=None):
 os.makedirs(REAL_PROJECT_DIR, exist_ok=True)
 assert not os.path.islink(REAL_PROJECT_DIR), "test setup bug: this must be a real dir, not a symlink"
 
+os.makedirs(os.path.dirname(LINK_PROJECT_DIR), exist_ok=True)
+if os.path.islink(LINK_PROJECT_DIR):
+    os.unlink(LINK_PROJECT_DIR)
+os.symlink(SHARED_STORE, LINK_PROJECT_DIR)
+assert os.path.islink(LINK_PROJECT_DIR), "test setup bug: this must be a symlink"
+
 try:
     check("allow", "запись в общий стор напрямую", "Write", os.path.join(SHARED_STORE, "x.md"))
     check("allow", "запись в MEMORY.md общего стора", "Write", os.path.join(SHARED_STORE, "MEMORY.md"))
 
-    check("allow", "запись через симлинк проектной памяти (Dev-app)", "Write",
-          os.path.join(PROJECTS_ROOT, "-Users-laptop-Dev-app", "memory", "x.md"))
+    check("allow", "запись через симлинк проектной памяти", "Write",
+          os.path.join(LINK_PROJECT_DIR, "x.md"))
 
     check("deny", "запись в настоящий (не-симлинк) проектный memory/", "Edit",
           os.path.join(REAL_PROJECT_DIR, "x.md"))
@@ -85,6 +101,12 @@ finally:
             os.rmdir(os.path.join(root, d))
     os.rmdir(REAL_PROJECT_DIR)
     os.rmdir(os.path.join(PROJECTS_ROOT, REAL_PROJECT_SLUG))
+    # the symlink fixture: unlink the link itself, never follow it into the shared store
+    if os.path.islink(LINK_PROJECT_DIR):
+        os.unlink(LINK_PROJECT_DIR)
+    link_parent = os.path.join(PROJECTS_ROOT, LINK_PROJECT_SLUG)
+    if os.path.isdir(link_parent) and not os.listdir(link_parent):
+        os.rmdir(link_parent)
 
 # fail-closed on empty stdin
 r = subprocess.run(["bash", HOOK], input="", capture_output=True, text=True)

@@ -72,23 +72,19 @@ SEARCH_ROOTS="${PLAN_GATE_SEARCH_ROOTS:-${PROJECT_DIR}:${PWD}}"
 # installed, because an installed hook and brief_reader.py sit in the same directory, but
 # wrong for a candidate under test, which sits in candidates/ instead. Shared verbatim
 # with hooks/card-touch-gate.sh.
-#
-# 2026-08-13: that fixed location used to be the literal /Users/laptop/Dev/ai/hooks — one
-# machine's home directory written into a file both machines run. On a machine whose user
-# is not "laptop" the path does not exist, brief_reader is unimportable, and this hook,
-# which fails closed by design, denied every agent spawn with an internal error. The
-# default is now derived in the order the comment above already argues for: the directory
-# this script itself sits in, but only when brief_reader.py is genuinely beside it, which
-# is true for an installed hook and false for a candidate in candidates/; and otherwise
-# this machine's own $HOME instead of another machine's. HOOK_INSTALL_HOOKS_DIR still
-# overrides both, so bin/hook-install and the candidate suites behave exactly as before.
-HOOKS_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "${HOOKS_SELF_DIR}/brief_reader.py" ]]; then
-    HOOKS_DIR_DEFAULT="$HOOKS_SELF_DIR"
+# 2026-08-13: this default used to be the literal /Users/laptop/Dev/ai/hooks — one machine's
+# home directory written into a file both machines run, so on any machine whose user is not
+# "laptop" it named a directory that does not exist. It is now derived from where this file
+# itself sits, falling back to this machine's own $HOME rather than another machine's.
+_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${_SELF_DIR}/brief_reader.py" ]; then
+  _HOOKS_DEFAULT="$_SELF_DIR"
+elif [ -d "${_SELF_DIR}/../hooks" ]; then
+  _HOOKS_DEFAULT="$(cd "${_SELF_DIR}/../hooks" && pwd)"
 else
-    HOOKS_DIR_DEFAULT="${HOME}/Dev/ai/hooks"
+  _HOOKS_DEFAULT="${HOME}/Dev/ai/hooks"
 fi
-HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-$HOOKS_DIR_DEFAULT}"
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-$_HOOKS_DEFAULT}"
 
 # Read stdin fully before passing to python3
 STDIN_DATA="$(cat)"

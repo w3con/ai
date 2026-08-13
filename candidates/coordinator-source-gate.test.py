@@ -29,6 +29,8 @@ import json
 import os
 import subprocess
 import sys
+_APP = os.path.join(os.path.expanduser("~"), "Dev", "app")  # synthetic root for payload fixtures
+_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 if len(sys.argv) > 1:
     HOOK_PATH = sys.argv[1]
@@ -128,32 +130,32 @@ def as_executor(payload, agent_id="test-agent-0001"):
 # ---------------------------------------------------------------------------
 
 def test_deny_edit_backend():
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/dpp_demo/app/internal/bom/bom.go"))
+    rc, out, err = run_hook(edit(_APP + "/dpp_demo/app/internal/bom/bom.go"))
     assert decision_of(out) == "deny", "expected deny, got stdout=%r stderr=%r" % (out, err)
 
 
 def test_deny_write_backend():
-    rc, out, err = run_hook(write("/Users/laptop/Dev/app/dpp_demo/app/main.go"))
+    rc, out, err = run_hook(write(_APP + "/dpp_demo/app/main.go"))
     assert decision_of(out) == "deny"
 
 
 def test_deny_write_frontend_src():
-    rc, out, err = run_hook(write("/Users/laptop/Dev/app/dpp_frontend/src/vendor/qrcode.js"))
+    rc, out, err = run_hook(write(_APP + "/dpp_frontend/src/vendor/qrcode.js"))
     assert decision_of(out) == "deny"
 
 
 def test_deny_edit_vldt_src():
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/dpp-vldt/src/App.vue"))
+    rc, out, err = run_hook(edit(_APP + "/dpp-vldt/src/App.vue"))
     assert decision_of(out) == "deny"
 
 
 def test_deny_notebookedit_backend():
-    rc, out, err = run_hook(notebook_edit("/Users/laptop/Dev/app/dpp_demo/app/scratch.ipynb"))
+    rc, out, err = run_hook(notebook_edit(_APP + "/dpp_demo/app/scratch.ipynb"))
     assert decision_of(out) == "deny"
 
 
 def test_deny_reason_names_path_and_alternative():
-    path = "/Users/laptop/Dev/app/dpp_demo/app/internal/bom/bom.go"
+    path = _APP + "/dpp_demo/app/internal/bom/bom.go"
     rc, out, err = run_hook(edit(path))
     assert decision_of(out) == "deny"
     reason = reason_of(out)
@@ -176,7 +178,7 @@ def test_deny_guarded_path_inside_a_linked_worktree():
     # The coordinator's own copy of the repository can itself be a linked worktree cut
     # under .claude/worktrees/ (per EnterWorktree); the guarded directories must still be
     # recognised however much checkout-specific prefix comes before them.
-    path = "/Users/laptop/Dev/app/.claude/worktrees/some-session/dpp_demo/app/main.go"
+    path = _APP + "/.claude/worktrees/some-session/dpp_demo/app/main.go"
     rc, out, err = run_hook(edit(path))
     assert decision_of(out) == "deny"
 
@@ -187,94 +189,94 @@ def test_deny_guarded_path_inside_a_linked_worktree():
 # ---------------------------------------------------------------------------
 
 def test_allow_executor_on_guarded_backend_path():
-    payload = as_executor(edit("/Users/laptop/Dev/app/dpp_demo/app/internal/bom/bom.go"))
+    payload = as_executor(edit(_APP + "/dpp_demo/app/internal/bom/bom.go"))
     rc, out, err = run_hook(payload)
     assert decision_of(out) == "allow"
 
 
 def test_allow_executor_on_guarded_frontend_path():
-    payload = as_executor(write("/Users/laptop/Dev/app/dpp_frontend/src/main.ts"))
+    payload = as_executor(write(_APP + "/dpp_frontend/src/main.ts"))
     rc, out, err = run_hook(payload)
     assert decision_of(out) == "allow"
 
 
 def test_allow_executor_notebookedit_guarded_path():
-    payload = as_executor(notebook_edit("/Users/laptop/Dev/app/dpp-vldt/src/scratch.ipynb"))
+    payload = as_executor(notebook_edit(_APP + "/dpp-vldt/src/scratch.ipynb"))
     rc, out, err = run_hook(payload)
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_task_card():
     rc, out, err = run_hook(edit(
-        "/Users/laptop/Dev/app/ai/harness/tasks/HRN-117_the-coordinator-cannot-edit.md"))
+        _APP + "/ai/harness/tasks/HRN-117_the-coordinator-cannot-edit.md"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_epic():
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/ai/timeline/epics/EPIC-1.md"))
+    rc, out, err = run_hook(edit(_APP + "/ai/timeline/epics/EPIC-1.md"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_feature_page():
-    rc, out, err = run_hook(write("/Users/laptop/Dev/app/kb/features/FEAT-05.md"))
+    rc, out, err = run_hook(write(_APP + "/kb/features/FEAT-05.md"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_anywhere_under_ai():
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/ai/decisions/some-subject.md"))
+    rc, out, err = run_hook(edit(_APP + "/ai/decisions/some-subject.md"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_anywhere_under_kb():
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/kb/domain/composition.md"))
+    rc, out, err = run_hook(edit(_APP + "/kb/domain/composition.md"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_anywhere_under_bin():
-    rc, out, err = run_hook(write("/Users/laptop/Dev/app/bin/stage-report"))
+    rc, out, err = run_hook(write(_APP + "/bin/stage-report"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_anywhere_under_githooks():
-    rc, out, err = run_hook(write("/Users/laptop/Dev/app/.githooks/pre-commit"))
+    rc, out, err = run_hook(write(_APP + "/.githooks/pre-commit"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_hooks_directory_itself():
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/ai/hooks/README.md"))
+    rc, out, err = run_hook(edit(_AI_ROOT + "/hooks/README.md"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_frontend_build_output():
     # dpp_frontend/dist is generated output, not the frontend's own source under src/, and
     # this hook is deliberately scoped only to src/ for both frontends.
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/dpp_frontend/dist/index.html"))
+    rc, out, err = run_hook(edit(_APP + "/dpp_frontend/dist/index.html"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_frontend_root_config():
     # A file directly under dpp_frontend/ but outside its src/ subdirectory (a config
     # file at the package root, for instance) is likewise out of this hook's scope.
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/dpp_frontend/vite.config.ts"))
+    rc, out, err = run_hook(edit(_APP + "/dpp_frontend/vite.config.ts"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_other_project_entirely():
     # A session working in a project that never names any of the three guarded
     # directories at all must be completely unaffected (acceptance criterion 5).
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/other-project/src/main.py"))
+    rc, out, err = run_hook(edit(os.path.join(os.path.expanduser("~"), "Dev", "other-project", "src", "main.py")))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_lookalike_directory_not_a_real_segment_match():
     # dpp_demo/appendix is not dpp_demo/app: the marker must match a whole path segment,
     # never a bare string prefix that happens to share the same letters.
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/dpp_demo/appendix/notes.md"))
+    rc, out, err = run_hook(edit(_APP + "/dpp_demo/appendix/notes.md"))
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_lookalike_src_suffix_not_a_real_segment_match():
-    rc, out, err = run_hook(edit("/Users/laptop/Dev/app/dpp-vldt/srcfoo/bar.js"))
+    rc, out, err = run_hook(edit(_APP + "/dpp-vldt/srcfoo/bar.js"))
     assert decision_of(out) == "allow"
 
 
@@ -282,14 +284,14 @@ def test_allow_coordinator_non_gated_tool_on_guarded_path():
     # Only Edit, Write and NotebookEdit are gated at all; a Bash call naming the same
     # guarded path in its command text is not this hook's concern.
     payload = {"tool_name": "Bash",
-               "tool_input": {"command": "cat /Users/laptop/Dev/app/dpp_demo/app/main.go"}}
+               "tool_input": {"command": "cat " + _APP + "/dpp_demo/app/main.go"}}
     rc, out, err = run_hook(payload)
     assert decision_of(out) == "allow"
 
 
 def test_allow_coordinator_read_on_guarded_path():
     payload = {"tool_name": "Read",
-               "tool_input": {"file_path": "/Users/laptop/Dev/app/dpp_demo/app/main.go"}}
+               "tool_input": {"file_path": _APP + "/dpp_demo/app/main.go"}}
     rc, out, err = run_hook(payload)
     assert decision_of(out) == "allow"
 
@@ -300,7 +302,7 @@ def test_allow_coordinator_read_on_guarded_path():
 
 def test_bypass_env_var_allows_guarded_edit():
     rc, out, err = run_hook(
-        edit("/Users/laptop/Dev/app/dpp_demo/app/main.go"),
+        edit(_APP + "/dpp_demo/app/main.go"),
         env_overrides={"CLAUDE_GATE_BYPASS": "1"},
     )
     assert decision_of(out) == "allow"
@@ -311,7 +313,7 @@ def test_bypass_env_var_wrong_value_still_denies():
     # presence of the variable, so a stray CLAUDE_GATE_BYPASS=0 or =true left in an
     # environment cannot silently punch a hole.
     rc, out, err = run_hook(
-        edit("/Users/laptop/Dev/app/dpp_demo/app/main.go"),
+        edit(_APP + "/dpp_demo/app/main.go"),
         env_overrides={"CLAUDE_GATE_BYPASS": "true"},
     )
     assert decision_of(out) == "deny"

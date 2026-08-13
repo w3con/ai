@@ -316,7 +316,19 @@ STDIN_DATA="$(cat)"
 # try/import/fallback workaround this file used to carry (HRN-47.8) with this one fixed
 # arrangement, shared verbatim with hooks/plan-gate.sh, so a hook finds its helpers the same
 # way whether it is running installed or as a candidate.
-HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-/Users/laptop/Dev/ai/hooks}"
+# 2026-08-13: this default used to be the literal /Users/laptop/Dev/ai/hooks — one machine's
+# home directory written into a file both machines run, so on any machine whose user is not
+# "laptop" it named a directory that does not exist. It is now derived from where this file
+# itself sits, falling back to this machine's own $HOME rather than another machine's.
+_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${_SELF_DIR}/brief_reader.py" ]; then
+  _HOOKS_DEFAULT="$_SELF_DIR"
+elif [ -d "${_SELF_DIR}/../hooks" ]; then
+  _HOOKS_DEFAULT="$(cd "${_SELF_DIR}/../hooks" && pwd)"
+else
+  _HOOKS_DEFAULT="${HOME}/Dev/ai/hooks"
+fi
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-$_HOOKS_DEFAULT}"
 
 GATE_TMP="${CARD_TOUCH_GATE_STATE_DIR:-${TMPDIR:-/tmp}/claude-card-touch-gate}"
 mkdir -p "$GATE_TMP" 2>/dev/null

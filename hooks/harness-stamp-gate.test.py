@@ -16,9 +16,9 @@ settings.json.template and points the hook at it with HARNESS_STAMP_GATE_REPO_DI
 scratch stamp file pointed to with HARNESS_STAMP_GATE_STAMP_FILE — both env-var overrides
 the candidate under test reads for exactly this purpose (see its own header).
 
-Run directly: python3 /Users/laptop/Dev/ai/hooks/harness-stamp-gate.test.py [candidate-path]
+Run directly: python3 ~/Dev/ai/hooks/harness-stamp-gate.test.py [candidate-path]
 With no argument this runs against the installed hook at
-/Users/laptop/Dev/ai/hooks/harness-stamp-gate.sh; given one argument it runs against that
+~/Dev/ai/hooks/harness-stamp-gate.sh; given one argument it runs against that
 file instead, which is what bin/hook-install uses to test a candidate before installing it.
 Exit code 0 when every check passes, 1 when any fails (own PASS/FAIL harness, matching the
 sibling *.test.py files in this directory rather than unittest).
@@ -31,7 +31,10 @@ import subprocess
 import sys
 import tempfile
 
-HOOK = sys.argv[1] if len(sys.argv) > 1 else "/Users/laptop/Dev/ai/hooks/harness-stamp-gate.sh"
+_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HOOKS = os.path.join(_AI_ROOT, "hooks")
+
+HOOK = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_HOOKS, "harness-stamp-gate.sh")
 
 fails = 0
 

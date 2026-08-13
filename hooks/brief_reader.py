@@ -4,7 +4,7 @@ read a build agent's brief from, so the two can never disagree about which file 
 brief (HRN-109). Not a script of its own: each hook's inline python imports it after doing
 sys.path.insert(0, <this file's own directory>), computed from the hook script's own $0 so
 the import works whether the hook is invoked as ~/.claude/hooks/*.sh (a symlinked
-directory, per bootstrap.sh) or directly as /Users/laptop/Dev/ai/hooks/*.sh.
+directory, per bootstrap.sh) or directly as ~/Dev/ai/hooks/*.sh.
 
 Two separate jobs live here, because both gates need to answer "what .md-shaped path did a
 piece of text name", but they need it at two different moments of a run's life.

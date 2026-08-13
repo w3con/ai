@@ -34,9 +34,9 @@ card's real file, which is exactly the condition these scenarios are already in.
 those scenarios below assert that explicitly (reason_contains="TOUCH rule") to lock in that
 the PACE rule's own fail-open never masks or interferes with it.
 
-Run directly: python3 /Users/laptop/Dev/ai/hooks/card-touch-gate.test.py [candidate-path]
+Run directly: python3 ~/Dev/ai/hooks/card-touch-gate.test.py [candidate-path]
 With no argument this runs against the installed hook at
-/Users/laptop/Dev/ai/hooks/card-touch-gate.sh; given one argument it runs against that file
+~/Dev/ai/hooks/card-touch-gate.sh; given one argument it runs against that file
 instead, which is what bin/hook-install uses to test a candidate before installing it.
 Exit code 0 when every check passes, 1 when any fails (own PASS/FAIL harness, matching the
 sibling *.test.py files in this directory rather than unittest).
@@ -49,7 +49,11 @@ import subprocess
 import sys
 import tempfile
 
-HOOK = sys.argv[1] if len(sys.argv) > 1 else "/Users/laptop/Dev/ai/hooks/card-touch-gate.sh"
+_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_APP = os.path.join(os.path.expanduser("~"), "Dev", "app")  # synthetic root for payload fixtures
+_HOOKS = os.path.join(_AI_ROOT, "hooks")
+
+HOOK = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_HOOKS, "card-touch-gate.sh")
 
 fails = 0
 
@@ -284,7 +288,7 @@ try:
         # an Edit to the tracked card resets the TOUCH rule's own count (unchanged)
         check("allow", "editing the tracked card resets the TOUCH rule's count and is "
                        "itself allowed", "Edit",
-              {"file_path": "/Users/laptop/Dev/app/" + CARD}, agent_id="agentA",
+              {"file_path": _APP + "/" + CARD}, agent_id="agentA",
               state_dir=d, transcript_path=t, project_dir=empty_proj)
 
         # after the reset, another 20 ordinary calls are allowed again before a refusal
@@ -304,12 +308,12 @@ try:
     # same card count as one, because touches_card compares the canonical suffix alone ---
     d = fresh_dir()
     t = fake_transcript([{"agentId": "agentW",
-                           "prompt": f"Implement /Users/laptop/Dev/app/{CARD}"}])
+                           "prompt": f"Implement {_APP}/{CARD}"}])
     try:
         check("allow", "card established from the brief's shared-checkout path",
-              "Read", {"file_path": "/Users/laptop/Dev/app/README.md"}, agent_id="agentW",
+              "Read", {"file_path": _APP + "/README.md"}, agent_id="agentW",
               state_dir=d, transcript_path=t)
-        worktree_path = ("/Users/laptop/Dev/app/.claude/worktrees/agent-agentW/" + CARD)
+        worktree_path = (_APP + "/.claude/worktrees/agent-agentW/" + CARD)
         check("allow", "an Edit at the executor's own worktree path still touches the "
                        "same card and resets the TOUCH rule's count",
               "Edit", {"file_path": worktree_path}, agent_id="agentW", state_dir=d,
@@ -324,15 +328,15 @@ try:
     t = fake_transcript([{"agentId": "agentP", "prompt": f"Implement {CARD}"}])
     try:
         check("allow", "call 1/20: Read of an unrelated, closed card never establishes it",
-              "Read", {"file_path": "/Users/laptop/Dev/app/" + OTHER_CARD},
+              "Read", {"file_path": _APP + "/" + OTHER_CARD},
               agent_id="agentP", state_dir=d, transcript_path=t)
         check("allow", "call 2/20: Grep across the unrelated card never establishes it",
-              "Grep", {"pattern": "status", "path": "/Users/laptop/Dev/app/" + OTHER_CARD},
+              "Grep", {"pattern": "status", "path": _APP + "/" + OTHER_CARD},
               agent_id="agentP", state_dir=d, transcript_path=t)
         check("allow", "call 3/20: an actual Edit to the unrelated card does not steal "
                        "the tracked identity — the card was already established from the "
                        "brief on call 1 and is never replaced",
-              "Edit", {"file_path": "/Users/laptop/Dev/app/" + OTHER_CARD},
+              "Edit", {"file_path": _APP + "/" + OTHER_CARD},
               agent_id="agentP", state_dir=d, transcript_path=t)
         for i in range(17):
             check("allow", f"ordinary call {i+4}/20 since the real card was last touched "
@@ -487,7 +491,7 @@ try:
                       project_dir=proj)
             check("allow", f"cycle {cycle+1} touch resets the TOUCH rule's own count to 0 "
                            "(PACE's own total is unaffected by this reset)",
-                  "Edit", {"file_path": "/Users/laptop/Dev/app/" + CARD},
+                  "Edit", {"file_path": _APP + "/" + CARD},
                   agent_id="agentPace1", state_dir=d, transcript_path=t, project_dir=proj)
 
         # total is now 16 (1 + 3*5); 4 more ordinary calls bring it to 17, 18, 19, 20 — all
@@ -528,7 +532,7 @@ try:
         # its relay budget
         check("allow", "an Edit to the tracked card is allowed through the PACE relay, "
                        "exactly as AC11 requires",
-              "Edit", {"file_path": "/Users/laptop/Dev/app/" + CARD},
+              "Edit", {"file_path": _APP + "/" + CARD},
               agent_id="agentPace1", state_dir=d, transcript_path=t, project_dir=proj)
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -570,7 +574,7 @@ try:
               "Bash", {"command": "echo x"}, agent_id="agentPace2", state_dir=d,
               transcript_path=t, project_dir=proj, reason_contains="PACE rule (refuse")
         check("allow", "an Edit to the tracked card is still allowed through even at the "
-                       "refuse tier", "Edit", {"file_path": "/Users/laptop/Dev/app/" + CARD},
+                       "refuse tier", "Edit", {"file_path": _APP + "/" + CARD},
               agent_id="agentPace2", state_dir=d, transcript_path=t, project_dir=proj)
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -760,7 +764,7 @@ try:
         # crossed the brake — AC2's other half, proved in the same run
         check("allow", "the run's own card is still exempt from the brake even after "
                        "another path has already crossed it",
-              "Edit", {"file_path": "/Users/laptop/Dev/app/" + CARD},
+              "Edit", {"file_path": _APP + "/" + CARD},
               agent_id="agentBrake1", state_dir=d, transcript_path=t)
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -779,7 +783,7 @@ try:
             check("allow", f"card edit {i+1}/15 — well past the BRAKE threshold of 9 — "
                            "still allows, because a card touch never reaches the BRAKE "
                            "rule at all",
-                  "Edit", {"file_path": "/Users/laptop/Dev/app/" + CARD},
+                  "Edit", {"file_path": _APP + "/" + CARD},
                   agent_id="agentBrake2", state_dir=d, transcript_path=t)
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -989,10 +993,10 @@ try:
               "Bash", {"command": "/usr/bin/git commit -m x"}, agent_id=None, state_dir=d,
               transcript_path=t1)
         check("allow", "an Edit under ai/ is exempt and still allowed past the ceiling",
-              "Edit", {"file_path": "/Users/laptop/Dev/app/ai/harness/tasks/ZZZ-3.md"},
+              "Edit", {"file_path": _APP + "/ai/harness/tasks/ZZZ-3.md"},
               agent_id=None, state_dir=d, transcript_path=t1)
         check("allow", "a Write under kb/ is exempt and still allowed past the ceiling",
-              "Write", {"file_path": "/Users/laptop/Dev/app/kb/observability/overview.md"},
+              "Write", {"file_path": _APP + "/kb/observability/overview.md"},
               agent_id=None, state_dir=d, transcript_path=t1)
         check("allow", "a bin/session-start call is exempt and still allowed past the ceiling",
               "Bash", {"command": "bin/session-start"}, agent_id=None, state_dir=d,

@@ -395,6 +395,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# This repository's own commit hooks are registered here, so that both machines
+# get them from one place rather than from whatever each machine's .git/hooks
+# happens to hold. The value is the RELATIVE ".githooks", never an absolute path:
+# an absolute path set on the machine it was set on silently stops running any
+# hook at all on the other one — the commit still succeeds, exit code 0, and
+# nothing in the output names the problem.
+# ---------------------------------------------------------------------------
+register_own_hooks() {
+  local want=".githooks"
+  local have
+  have="$(git -C "$REPO_DIR" config --local --get core.hooksPath 2>/dev/null || true)"
+
+  if [[ "$have" == "$want" ]]; then
+    echo "[ok]     core.hooksPath already = $want"
+    return
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    if git -C "$REPO_DIR" config --local core.hooksPath "$want"; then
+      echo "[config] core.hooksPath = $want"
+    else
+      fail "core.hooksPath — could not set it in $REPO_DIR"
+    fi
+  else
+    echo "[dry-run] Would set core.hooksPath = $want"
+  fi
+}
+
+register_own_hooks
+
+# ---------------------------------------------------------------------------
 # The stamp is written last, and only on a clean run.
 #
 # harness-stamp-gate.sh recomputes this same digest itself, straight from

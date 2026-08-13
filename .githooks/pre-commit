@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# pre-commit — the checks this configuration repository runs before every commit.
+#
+# It is versioned here rather than written into .git/hooks, so that both machines get
+# it from the same source. It becomes live when core.hooksPath is set to the relative
+# value ".githooks"; bootstrap.sh does that on every deploy, and the relative form is
+# deliberate — an absolute path set on one machine silently stops running any hook at
+# all on the other, with the commit still succeeding and nothing in the output naming
+# the problem.
+#
+# Check one: no machine-specific home directory in any load-bearing file. See
+# bin/path-check for what counts and what is deliberately exempt.
+# Check two: every hook script still parses, and none of them differs from the last
+# commit without having been installed through bin/hook-install.
+
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FAILED=0
+
+echo "pre-commit: checking for machine-specific home directories…"
+if ! "$REPO_ROOT/bin/path-check" --root "$REPO_ROOT" --staged; then
+    FAILED=1
+fi
+
+echo "pre-commit: checking that every hook script parses…"
+for hook in "$REPO_ROOT"/hooks/*.sh; do
+    [ -f "$hook" ] || continue
+    if ! bash -n "$hook" 2>/dev/null; then
+        echo "pre-commit: $hook does not parse." >&2
+        FAILED=1
+    fi
+done
+for hook in "$REPO_ROOT"/hooks/*.py; do
+    [ -f "$hook" ] || continue
+    case "$hook" in *.test.py) continue ;; esac
+    if ! python3 -m py_compile "$hook" 2>/dev/null; then
+        echo "pre-commit: $hook does not parse." >&2
+        FAILED=1
+    fi
+done
+
+if [ "$FAILED" -ne 0 ]; then
+    echo >&2
+    echo "pre-commit: refusing the commit. Fix what is named above and commit again." >&2
+    exit 1
+fi
+
+echo "pre-commit: all checks passed."
+exit 0
