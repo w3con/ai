@@ -104,11 +104,20 @@ def advance_local(clone, n=1):
 
 
 def call(repos, state_dir=None, fetch_interval=None, extra_env=None):
+    """Invoke the hook once. GIT_SYNC_NOTICE_STATE_DIR is set UNCONDITIONALLY on every
+    call, never left unset for the hook to fall back to its own default (~/.claude) —
+    that fallback is exactly what let 28 scratch-repository fetch-state files leak into
+    the real ~/.claude across earlier runs of this suite, one per case that omitted
+    state_dir. A caller that does not need to inspect the state file afterward gets a
+    fresh scratch directory nested under this run's own fixture root, cleaned up with
+    everything else that root holds; a caller that DOES need to inspect it still passes
+    state_dir explicitly, exactly as before."""
     payload = {"hook_event_name": "SessionStart", "source": "startup"}
     env = dict(os.environ)
     env["GIT_SYNC_NOTICE_REPOS"] = " ".join(repos)
-    if state_dir is not None:
-        env["GIT_SYNC_NOTICE_STATE_DIR"] = state_dir
+    env["GIT_SYNC_NOTICE_STATE_DIR"] = (
+        state_dir if state_dir is not None
+        else tempfile.mkdtemp(prefix="state-", dir=root))
     if fetch_interval is not None:
         env["GIT_SYNC_NOTICE_FETCH_INTERVAL"] = str(fetch_interval)
     if extra_env:
