@@ -51,6 +51,11 @@ FRONTMATTER_STATUS = re.compile(r"\A---\n.*?^status:\s*(\S+)\s*$.*?^---\s*$", re
 APPROVED_STATUSES = ("todo", "approved", "in_progress", "done")
 PLACEHOLDER = "PLACEHOLDER"
 DECLARED_ROOT = re.compile(r"\*\*Repository the work happens in:\*\*\s*`([^`]+)`")
+# `**Резюме утверждено:** 2026-08-13 — «его слова»`, or the English spelling.
+SUMMARY_APPROVED = re.compile(
+    r"\*\*(?:Резюме утверждено|Summary approved)[:\*]*\*\*\s*\S+.*\S",
+    re.IGNORECASE,
+)
 BACKTICKED = re.compile(r"`([^`\n]+)`")
 
 # A backticked token is treated as a path only when it contains a directory
@@ -122,6 +127,151 @@ def section_with_subsections(lines, *words):
         if collecting:
             body.append(line)
     return body if collecting else None
+
+
+def subsections(lines, *words):
+    """(heading, body) for every heading nested under the first heading matching
+    all `words`, stopping at the next heading of the same or shallower level."""
+    level, collecting, out, current, body = None, False, [], None, []
+    for line in lines:
+        m = HEADING.match(line)
+        if m:
+            this_level = len(line) - len(line.lstrip("#"))
+            if collecting:
+                if this_level <= level:
+                    break
+                if current is not None:
+                    out.append((current, body))
+                current, body = m.group(1).strip(), []
+                continue
+            if all(w in m.group(1).strip().lower() for w in words):
+                level, collecting = this_level, True
+            continue
+        if collecting and current is not None:
+            body.append(line)
+    if collecting and current is not None:
+        out.append((current, body))
+    return out if collecting else None
+
+
+def interview_policy(card_path):
+    """(enabled, exempt_basenames) for the project this card belongs to.
+
+    The interview rules are OFF unless the project switches them on, by placing a
+    file named `.plan-check-interview` beside its cards. This script signs cards
+    for every project that uses it, and whether a given project wants an interview
+    before work is that project's decision, not something a shared tool imposes.
+    Non-comment lines in the file name cards exempt from the rules — the ones
+    written before the project adopted them, which are frozen as they are because
+    adding an interview retrospectively invents answers nobody ever gave.
+    """
+    listing = os.path.join(os.path.dirname(os.path.abspath(card_path)), ".plan-check-interview")
+    try:
+        with open(listing, encoding="utf-8") as fh:
+            exempt = {
+                line.strip() for line in fh
+                if line.strip() and not line.lstrip().startswith("#")
+            }
+        return True, exempt
+    except OSError:
+        return False, set()
+
+
+# A section is identified by its heading being exactly one of these, never by the
+# heading merely containing the word: a card titled "Харнес: интервью до работы"
+# matched its own title under substring matching and swallowed the whole document.
+INTERVIEW_NAMES = ("интервью", "interview")
+SOURCES_NAMES = ("источники", "sources")
+SUMMARY_NAMES = ("резюме", "summary")
+
+
+def exact_subsections(lines, names):
+    """(heading, body) for every heading nested under the heading whose text is
+    exactly one of `names`."""
+    level, collecting, out, current, body = None, False, [], None, []
+    for line in lines:
+        m = HEADING.match(line)
+        if m:
+            this_level = len(line) - len(line.lstrip("#"))
+            text = m.group(1).strip().lower().rstrip(":")
+            if collecting:
+                if this_level <= level:
+                    break
+                if current is not None:
+                    out.append((current, body))
+                current, body = m.group(1).strip(), []
+                continue
+            if text in names:
+                level, collecting = this_level, True
+            continue
+        if collecting and current is not None:
+            body.append(line)
+    if collecting and current is not None:
+        out.append((current, body))
+    return out if collecting else None
+
+
+def exact_section(found, names):
+    for heading, body in found.items():
+        if heading.strip().rstrip(":") in names:
+            return heading, body
+    return None, None
+
+
+def check_interview(lines, problems):
+    """The nine questions, the sources behind them, and the summary the owner
+    signs. These exist because work here repeatedly started before the task was
+    understood: the cure is answers on the record before the first edit, not a
+    right to interrupt the owner once building has begun."""
+    pairs = exact_subsections(lines, INTERVIEW_NAMES)
+    if pairs is None:
+        problems.append(
+            "no interview section — the card must carry one, with the nine numbered "
+            "questions answered in the owner's own words before any work begins"
+        )
+    else:
+        answered = set()
+        for heading, body in pairs:
+            number = re.match(r"^(\d+)\b", heading.strip())
+            if not number:
+                continue
+            if non_empty(body) and PLACEHOLDER not in "\n".join(body):
+                answered.add(int(number.group(1)))
+            else:
+                problems.append(f"interview question {number.group(1)} has no answer: {heading}")
+        missing = [n for n in range(1, 10) if n not in answered]
+        if missing:
+            for n in missing:
+                if not any(f"interview question {n} " in p for p in problems):
+                    problems.append(f"interview question {n} is absent from the card entirely")
+
+    found = sections(lines)
+
+    heading, body = exact_section(found, SOURCES_NAMES)
+    if heading is None:
+        problems.append(
+            "no sources section — the card must list what was read before the "
+            "questions were put: knowledge-base documents, change history, verified live state"
+        )
+    elif not non_empty(body):
+        problems.append(f"the section '{heading}' is empty")
+
+    heading, body = exact_section(found, SUMMARY_NAMES)
+    if heading is None:
+        problems.append(
+            "no summary section — the card must state in the coordinator's own words "
+            "what is being built, as one connected block the owner reads and approves"
+        )
+    elif not non_empty(body):
+        problems.append(f"the section '{heading}' is empty")
+    else:
+        joined = "\n".join(body)
+        if not SUMMARY_APPROVED.search(joined):
+            problems.append(
+                "the summary carries no approval line — it must record the owner's "
+                "approval with a date and his own words, as `**Резюме утверждено:** "
+                "<дата> — «<его слова>»`"
+            )
 
 
 def ancestors(start, stop):
@@ -220,6 +370,10 @@ def validate(card_path, text):
         for item in items:
             if not CHECKPOINT.match(item):
                 problems.append(f"malformed checkpoint, expected `- [ ] N.n — text`: {item.strip()}")
+
+    enabled, exempt = interview_policy(card_path)
+    if enabled and os.path.basename(card_path) not in exempt:
+        check_interview(lines, problems)
 
     card_dir = os.path.dirname(os.path.abspath(card_path))
     root = git_root(card_dir)

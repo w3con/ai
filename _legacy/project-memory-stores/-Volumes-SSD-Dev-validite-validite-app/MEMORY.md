@@ -1,0 +1,7 @@
+- [Scope discipline](feedback_scope_discipline.md) — stick to scope declared in source docs; don't silently add adjacent items
+- [MVP mode](feedback_mvp_mode.md) — building an MVP demo, not final product; speed + limited scope, but architecture decisions still matter; fakes/stubs allowed if flagged
+- [Resumable workflow](feedback_resumable_workflow.md) — multi-step work must be independently resumable across sessions: INDEX.md state board, per-file state headers, numbered questions, daily session logs
+- [Project state](project_validite_state.md) — full implementation state as of 2026-05-27: what's built, key arch facts, next work, all MongoDB collections
+- [MVP auth decision](project_mvp_auth_decision.md) — 2026-05-28 pivot: passwordless invite-only auth via Stalwart; supplier-confirm link deferred; BR-9 kept; Documents tabs
+- [Communication style](feedback_communication_style.md) — be concise; when corrected, acknowledge briefly and don't re-explain
+- [Model workflow](feedback_model_workflow.md) — plan in Opus, persist plan to repo (ai/plans/), /clear, execute in Sonnet; plans must stand alone on disk

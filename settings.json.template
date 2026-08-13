@@ -1,0 +1,82 @@
+{
+  "_comment": "TEMPLATE — bootstrap.sh renders this into ~/.claude/settings.json, replacing __HOME__ with the running machine's home directory. Never edit ~/.claude/settings.json by hand: the next bootstrap overwrites it. Edit this file, commit it, raise HARNESS_VERSION, and re-run bootstrap on both machines.",
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch",
+      "Bash(__HOME__/Dev/ai/bin/websearch:*)"
+    ]
+  },
+  "model": "opus[1m]",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/harness-stamp-gate.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/plan-gate.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/settings-write-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/memory-store-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/card-touch-gate.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'REMINDER on writing style for THIS reply: write in full, connected sentences and developed prose. Never use telegraphic or clipped-fragment style, dropped subjects, or headline-style bullets. Explain terms plainly. This applies to chat answers exactly as much as to documents. Alex has demanded this many times — treat any urge to compress as the cue to slow down and spell it out.'"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash __HOME__/.claude/statusline-command.sh"
+  },
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": false,
+    "ralph-loop@claude-plugins-official": false
+  },
+  "theme": "auto",
+  "preferredNotifChannel": "kitty",
+  "skipAutoPermissionPrompt": true
+}

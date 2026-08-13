@@ -28,6 +28,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Never report your own problems](feedback-never-report-your-own-problems.md) — a problem you caused or a leftover you could finish is yours to solve, record and card up; never hand it back as a question
 - [Resolve before reporting](feedback-resolve-before-reporting.md) — a blocked commit, a dirty tree, a missing tool is yours to fix; never hand Alex an obstacle you have not tried to clear
 - [Install what you need](feedback-install-what-you-need.md) — a missing tool gets installed, not reported and waited on; destructive or outward-facing actions still need his word
+- [Test runs must not reach the user](feedback-test-runs-must-not-reach-the-user.md) — make sending opt-in behind a flag before an executor iterates on anything that delivers to a real person; kill a loose agent, don't message it
 - [Reusable tooling](feedback_reusable_tooling.md) — commit the helper once as a documented script; a script decides what happens, a skill decides when to call it
 - [Stage exactly your own files](feedback_git_staging.md) — commit by naming paths; a blind `git add -A` sweeps in other sessions' work
 - [Commit by naming paths](feedback-commit-by-naming-paths.md) — never `git add` then `git commit`; a parallel session's blind stage takes whatever sits staged in a shared checkout
@@ -35,6 +36,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [No hard line-wraps in prose](feedback-no-hard-line-wraps.md) — paragraph = one physical line; Alex's viewers render wrap points as broken lines; put the rule into executor prompts too
 - [Tool files carry bare rules](feedback-tool-files-bare-rules.md) — agent/skill/hook files state what to do; no provenance citations, no rationale essays, no what-it-does-NOT-do paragraphs
 - [Record only confirmed decisions](record-only-confirmed-decisions.md) — proposals stay in chat; nothing lands in a durable record until Alex confirms it
+- [Questions first, silence, one report](feedback-questions-first-silence-then-report.md) — ask everything before the first edit, build without a word, hand over one report with the findings, the decisions taken alone and the mistakes with their fixes
 - [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
 - [Decide technical details yourself](feedback-decide-technical-details-yourself.md) — never hand Alex a choice with no product consequence; choose on the merits, act, and tell him afterwards
 - [Never size work in human hours](feedback-no-human-hour-estimates.md) — agents build everything here; argue about context, file collisions and what's on the path, never "it's sixty hours" or "it's too big"
@@ -57,3 +59,5 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [An unanswered question was explained badly](feedback-unanswered-question-means-unclear.md) — asked twice with no answer means rewrite the explanation from the subject up, never re-ask the same words or carry a bare "needs a conversation" line
 - [App: no real data yet, and DB access exists](project_app_no_real_data_yet.md) — `~/Dev/app` only: only test/demo records exist so far, and the coordinator CAN reach Mongo directly via docker exec — never repeat an old plan's "no access" claim untested
 - [A reported failure is a work order](feedback-reported-failure-is-a-work-order.md) — when Alex pastes a broken deploy or build, start the fix and report it; do not ask whether to begin
+- [Clone config verbatim](feedback-clone-config-verbatim.md) — deriving a new node/service config from an already-proven twin: copy the proven flags/values byte-for-byte, don't re-derive by reasoning about names
+- [Verify repo vs live](feedback_pilier_verify_repo_vs_live.md) — Pilier only: before changing/auditing server config, diff the tracked file against the live host, don't trust the repo copy alone
