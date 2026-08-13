@@ -19,6 +19,19 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 DRY_RUN=0
 
+# Every target this run failed to deploy. The script exits non-zero when this is
+# not empty, because a bootstrap that leaves a target undeployed and still reports
+# success is the exact failure this machine lived with for three weeks: the old
+# script warned about ~/.claude/hooks and ~/.claude/agents, skipped them, and
+# exited 0, so nobody ever learned that the hooks in force were months stale.
+FAILURES=()
+BACKUP_SUFFIX="backup-$(date +%Y%m%d-%H%M%S)"
+
+fail() {
+  echo "FAILED:  $1" >&2
+  FAILURES+=("$1")
+}
+
 if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=1
   echo "[dry-run] No changes will be made."
@@ -51,16 +64,27 @@ if [[ ! -d "$CLAUDE_DIR" ]]; then
   fi
 fi
 
-# symlink TARGET SOURCE_IN_REPO
+# symlink TARGET SOURCE_IN_REPO [preserve]
 # Creates or updates a symlink at TARGET pointing to SOURCE_IN_REPO.
-# Idempotent: skips if symlink already points to the right place.
-# Warns and skips if TARGET exists and is NOT a symlink (would overwrite real data).
+# Idempotent: does nothing if the symlink already points to the right place.
+#
+# A real file or directory sitting at TARGET is moved aside to a timestamped
+# backup next to it, and the symlink then takes its place. That is a change from
+# the original behaviour, which warned and skipped: skipping is what silently
+# froze this machine's hooks and agents at whatever had been hand-placed there,
+# because the pre-existing real directories meant the deploy never once ran.
+#
+# Pass the third argument "preserve" for a target whose contents cannot be
+# reconstructed from the repository — the per-project memory directories. Those
+# are never moved: a non-empty real one is recorded as a failure for a human to
+# resolve, because merging memory is a judgement no script should make.
 symlink() {
   local target="$1"
   local source="$2"
+  local mode="${3:-replace}"
 
   if [[ ! -e "$source" && ! -L "$source" ]]; then
-    echo "WARNING: Source does not exist: $source (skipping $target)" >&2
+    fail "$target — source does not exist in the repository: $source"
     return
   fi
 
@@ -70,25 +94,38 @@ symlink() {
     if [[ "$current" == "$source" ]]; then
       echo "[ok]     $target → $source  (already correct)"
       return
-    else
-      if [[ $DRY_RUN -eq 0 ]]; then
-        rm "$target"
-        ln -s "$source" "$target"
-        echo "[update] $target → $source  (was → $current)"
-      else
-        echo "[dry-run] Would update: $target → $source  (currently → $current)"
-      fi
     fi
-  elif [[ -e "$target" ]]; then
-    echo "WARNING: $target exists and is NOT a symlink. Skipping to avoid data loss." >&2
-    echo "         To migrate, manually back it up and remove it, then re-run bootstrap.sh." >&2
-  else
     if [[ $DRY_RUN -eq 0 ]]; then
+      rm "$target"
       ln -s "$source" "$target"
-      echo "[create] $target → $source"
+      echo "[update] $target → $source  (was → $current)"
     else
-      echo "[dry-run] Would create: $target → $source"
+      echo "[dry-run] Would update: $target → $source  (currently → $current)"
     fi
+    return
+  fi
+
+  if [[ -e "$target" ]]; then
+    if [[ "$mode" == "preserve" ]]; then
+      fail "$target exists, is not a symlink, and holds contents this script must not move. Back it up and remove it by hand, then re-run."
+      return
+    fi
+    local backup="${target}.${BACKUP_SUFFIX}"
+    if [[ $DRY_RUN -eq 0 ]]; then
+      mv "$target" "$backup"
+      ln -s "$source" "$target"
+      echo "[replace] $target → $source  (previous contents moved to $backup)"
+    else
+      echo "[dry-run] Would move $target to $backup, then link it → $source"
+    fi
+    return
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    ln -s "$source" "$target"
+    echo "[create] $target → $source"
+  else
+    echo "[dry-run] Would create: $target → $source"
   fi
 }
 
@@ -96,12 +133,73 @@ echo "Bootstrapping ~/.claude symlinks from: $REPO_DIR"
 echo ""
 
 symlink "$CLAUDE_DIR/CLAUDE.md"              "$REPO_DIR/CLAUDE.md"
-symlink "$CLAUDE_DIR/memory"                 "$REPO_DIR/memory"
+symlink "$CLAUDE_DIR/memory"                 "$REPO_DIR/memory"           preserve
 symlink "$CLAUDE_DIR/agents"                 "$REPO_DIR/agents"
 symlink "$CLAUDE_DIR/hooks"                  "$REPO_DIR/hooks"
 symlink "$CLAUDE_DIR/skills"                 "$REPO_DIR/skills"
 symlink "$CLAUDE_DIR/statusline-command.sh"  "$REPO_DIR/statusline-command.sh"
-symlink "$CLAUDE_DIR/settings.json"          "$REPO_DIR/settings.json"
+
+# ---------------------------------------------------------------------------
+# settings.json is RENDERED, not symlinked.
+#
+# It is the one deployed file that cannot be identical on both machines: it
+# carries absolute paths, and the two machines have different home directories.
+# A single committed settings.json is therefore always wrong on at least one of
+# them — which is how "Bash(/Users/laptop/Dev/ai/bin/websearch:*)" came to sit
+# in the permissions of a machine whose user is not "laptop", silently granting
+# nothing. The template holds __HOME__ where the home directory belongs, and
+# this step writes the real file. Never hand-edit ~/.claude/settings.json.
+# ---------------------------------------------------------------------------
+render_settings() {
+  local template="$REPO_DIR/settings.json.template"
+  local target="$CLAUDE_DIR/settings.json"
+
+  if [[ ! -f "$template" ]]; then
+    fail "$target — template not found at $template"
+    return
+  fi
+
+  local rendered
+  rendered="$(sed "s|__HOME__|${HOME}|g" "$template")"
+
+  if [[ "$rendered" == *"__HOME__"* ]]; then
+    fail "$target — placeholder __HOME__ survived rendering"
+    return
+  fi
+
+  if [[ -L "$target" ]]; then
+    # An earlier bootstrap symlinked this file into the repo. Writing through
+    # the link would edit the committed template's neighbour, so drop the link.
+    if [[ $DRY_RUN -eq 0 ]]; then
+      rm "$target"
+    else
+      echo "[dry-run] Would remove the symlink at $target before rendering"
+    fi
+  elif [[ -f "$target" ]]; then
+    if [[ "$rendered" == "$(cat "$target")" ]]; then
+      echo "[ok]     $target  (rendered from template, already current)"
+      return
+    fi
+    # A real settings.json that differs from the render is either hand-edited or
+    # left by an older harness. It is replaced, but never without a copy: the
+    # machine-specific choices it carries are the only record of themselves.
+    if [[ $DRY_RUN -eq 0 ]]; then
+      cp "$target" "${target}.${BACKUP_SUFFIX}"
+      echo "[backup] ${target}.${BACKUP_SUFFIX}"
+    else
+      echo "[dry-run] Would back up the existing $target before overwriting it"
+    fi
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    printf '%s\n' "$rendered" > "$target"
+    echo "[render] $target  (from settings.json.template, __HOME__ → $HOME)"
+  else
+    echo "[dry-run] Would render: $target from settings.json.template, __HOME__ → $HOME"
+  fi
+}
+
+render_settings
 
 # ---------------------------------------------------------------------------
 # Per-project memory symlinks
@@ -153,7 +251,7 @@ link_project_memories() {
         continue
       fi
     fi
-    symlink "$mem_dir" "$shared_memory"
+    symlink "$mem_dir" "$shared_memory" preserve
   done
   shopt -u nullglob
 }
@@ -197,6 +295,8 @@ find_vault() {
     "$HOME/Dev/Validite"
     "$HOME/Dev/Validité"
     "$HOME/Validite"
+    "/Volumes/Documents/startup/Validite"
+    "/Volumes/Documents/startup/Validité"
   )
   local c
   for c in "${candidates[@]}"; do
@@ -206,7 +306,7 @@ find_vault() {
   # Nothing at a known address: look for the signature itself, shallowly, in the
   # few places a checkout plausibly lives. Depth 3 covers $HOME/<dir>/kb/CustDev.
   local base hit dir
-  for base in "$HOME/Documents" "$HOME/Dev" "$HOME"; do
+  for base in "$HOME/Documents" "$HOME/Dev" "$HOME" "/Volumes/Documents" "/Volumes/Documents/startup"; do
     [[ -d "$base" ]] || continue
     while IFS= read -r hit; do
       dir="$(dirname "$(dirname "$hit")")"
@@ -255,13 +355,56 @@ echo ""
 if VAULT_PATH="$(find_vault)"; then
   write_vault_export "$VAULT_PATH"
 else
-  echo "WARNING: the Validité business vault was not found on this machine." >&2
-  echo "         Looked for a directory holding both kb/CustDev and kb/Strategy under" >&2
-  echo "         ~/Documents, ~/Dev and ~ (depth 3). Clone git@github.com:validite-eu/org.git" >&2
-  echo "         and re-run this script, or export VALIDITE_VAULT_ROOT yourself." >&2
+  fail "VALIDITE_VAULT_ROOT — the Validité business vault was not found. Looked for a directory holding both kb/CustDev and kb/Strategy under ~/Documents, ~/Dev, ~, /Volumes/Documents and /Volumes/Documents/startup (depth 3). Clone git@github.com:validite-eu/org.git and re-run, or export VALIDITE_VAULT_ROOT yourself."
 fi
 
+# ---------------------------------------------------------------------------
+# The stamp is written last, and only on a clean run.
+#
+# harness-stamp-gate.sh compares this file against HARNESS_VERSION on every tool
+# call and blocks the session when they differ, so writing it while any target
+# failed would declare a machine deployed that is not. Raising HARNESS_VERSION in
+# the repository is therefore what forces every machine to re-run this script.
+# ---------------------------------------------------------------------------
+write_stamp() {
+  local version_file="$REPO_DIR/HARNESS_VERSION"
+  local stamp_file="$CLAUDE_DIR/.harness-stamp"
+
+  if [[ ! -f "$version_file" ]]; then
+    fail "$stamp_file — no HARNESS_VERSION in the repository at $version_file"
+    return
+  fi
+
+  local version
+  version="$(head -n1 "$version_file" | tr -d '[:space:]')"
+  if [[ -z "$version" ]]; then
+    fail "$stamp_file — HARNESS_VERSION is empty"
+    return
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    printf '%s\n' "$version" > "$stamp_file"
+    echo "[stamp]  $stamp_file = $version"
+  else
+    echo "[dry-run] Would stamp $stamp_file = $version"
+  fi
+}
+
 echo ""
+if [[ ${#FAILURES[@]} -eq 0 ]]; then
+  write_stamp
+fi
+
+if [[ ${#FAILURES[@]} -gt 0 ]]; then
+  echo "BOOTSTRAP FAILED — ${#FAILURES[@]} target(s) were not deployed:" >&2
+  for f in "${FAILURES[@]}"; do
+    echo "  - $f" >&2
+  done
+  echo "" >&2
+  echo "Nothing is stamped and the harness stays blocked until every one of these is resolved." >&2
+  exit 1
+fi
+
 if [[ $DRY_RUN -eq 0 ]]; then
   echo "Done. Verify with: readlink ~/.claude/{CLAUDE.md,memory,agents,hooks,skills,statusline-command.sh,settings.json}"
 else
