@@ -8,7 +8,7 @@ suite itself has to exist here before the rewritten hook can ever be installed t
 script. This is the one founding write HRN-155 names explicitly (checkpoint HRN-155.3);
 every later change to either file goes back through bin/hook-install as usual.
 
-HRN-155 replaces the pre-existing HARNESS_VERSION-vs-stamp comparison with one taken from a
+HRN-155 replaces the pre-existing hand-kept-version-vs-stamp comparison with one taken from a
 SHA-256 digest of the rendered settings.json.template, so this suite never touches the real
 checkout's own settings.json.template or the real ~/.claude/.harness-stamp: every scenario
 below builds a scratch checkout directory (fixture_repo()) holding its own

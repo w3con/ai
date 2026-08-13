@@ -155,8 +155,9 @@ symlink "$CLAUDE_DIR/statusline-command.sh"  "$REPO_DIR/statusline-command.sh"
 # alike) whenever the template itself was readable — it is the SHA-256 digest
 # of the exact bytes this run's own deploy would write (or already wrote) to
 # $target, and write_stamp() below writes that same value into
-# ~/.claude/.harness-stamp instead of a hand-kept HARNESS_VERSION number, so
-# the stamp can never disagree with the template by so much as one byte.
+# ~/.claude/.harness-stamp instead of a hand-kept version number that someone
+# had to remember to raise, so the stamp can never disagree with the template
+# by so much as one byte.
 # ---------------------------------------------------------------------------
 RENDERED_SETTINGS_DIGEST=""
 

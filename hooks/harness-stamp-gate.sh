@@ -3,8 +3,8 @@
 # ~/.claude/settings.json disagrees with what this checkout's settings.json.template would
 # render right now.
 #
-# HRN-155 replaces the earlier hand-kept HARNESS_VERSION counter with a digest taken from
-# the rendered settings themselves: ~/.claude/.harness-stamp holds the SHA-256 digest of the
+# HRN-155 replaces the earlier hand-kept version counter with a digest taken from the
+# rendered settings themselves: ~/.claude/.harness-stamp holds the SHA-256 digest of the
 # exact bytes bootstrap.sh wrote to ~/.claude/settings.json — the sed substitution's output,
 # with its trailing newlines stripped exactly the way a $(...) capture strips them, followed
 # by the single trailing newline bootstrap.sh's own printf '%s\n' adds back. This hook
@@ -31,7 +31,7 @@
 #   HARNESS_STAMP_GATE_REPO_DIR    overrides the checkout root the template is read from;
 #                                  default: two levels up from this file's own resolved path,
 #                                  the same derivation the pre-HRN-155 version of this hook
-#                                  used for HARNESS_VERSION.
+#                                  used for its own version file.
 #   HARNESS_STAMP_GATE_STAMP_FILE  overrides the stamp file's own path; default:
 #                                  ~/.claude/.harness-stamp.
 

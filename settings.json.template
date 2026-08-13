@@ -1,5 +1,5 @@
 {
-  "_comment": "TEMPLATE — bootstrap.sh renders this into ~/.claude/settings.json, replacing __HOME__ with the running machine's home directory. Never edit ~/.claude/settings.json by hand: the next bootstrap overwrites it. Edit this file, commit it, raise HARNESS_VERSION, and re-run bootstrap on both machines.",
+  "_comment": "TEMPLATE — bootstrap.sh renders this into ~/.claude/settings.json, replacing __HOME__ with the running machine's home directory. Never edit ~/.claude/settings.json by hand: the next bootstrap overwrites it. Edit this file, commit it, and re-run bootstrap on both machines; bootstrap.sh stamps a SHA-256 digest of the rendered bytes on every clean run, so no separate version number needs to be raised by hand.",
   "permissions": {
     "allow": [
       "WebSearch",
