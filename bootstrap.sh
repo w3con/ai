@@ -171,10 +171,14 @@ link_project_memories
 # holds both kb/CustDev and kb/Strategy. That signature also tells it apart from
 # the app repository, which has its own kb/ but none of those collections.
 #
-# The discovered path is exported from the shell profile, because Claude Code
-# initializes its shell from the profile and that is what puts the variable in
-# front of every later session. The block is delimited by sentinels so re-running
-# bootstrap replaces it in place instead of appending a second copy.
+# The discovered path is exported from ~/.zshenv, NOT ~/.zshrc. zsh reads .zshrc
+# only for interactive shells, and the shells that actually need this variable —
+# the ones Claude Code's Bash tool spawns to run bin/card-context — are not
+# interactive, so a .zshrc export is invisible to exactly the caller it exists
+# for (measured 2026-08-01: `zsh -c` saw nothing, `zsh -i -c` saw the path).
+# .zshenv is read by every zsh invocation. The block is delimited by sentinels so
+# re-running bootstrap replaces it in place instead of appending a second copy,
+# and a block left in .zshrc by an earlier run of this script is removed.
 # ---------------------------------------------------------------------------
 VAULT_MARKERS=("kb/CustDev" "kb/Strategy")
 VAULT_BEGIN="# >>> validite vault root (managed by bootstrap.sh — do not edit by hand) >>>"
@@ -216,9 +220,23 @@ find_vault() {
   return 1
 }
 
+strip_vault_block() {   # remove the sentinel block from a file that should no longer carry it
+  local profile="$1"
+  [[ -f "$profile" ]] && grep -qF "$VAULT_BEGIN" "$profile" || return 0
+  if [[ $DRY_RUN -eq 0 ]]; then
+    local tmp
+    tmp="$(mktemp)"
+    awk -v b="$VAULT_BEGIN" -v e="$VAULT_END" '$0==b{f=1;next} $0==e{f=0;next} !f{print}' "$profile" > "$tmp"
+    mv "$tmp" "$profile"
+    echo "[update] removed the VALIDITE_VAULT_ROOT block from $profile (it belongs in ~/.zshenv)"
+  else
+    echo "[dry-run] Would remove the VALIDITE_VAULT_ROOT block from $profile"
+  fi
+}
+
 write_vault_export() {
   local vault="$1"
-  local profile="$HOME/.zshrc"
+  local profile="$HOME/.zshenv"
   local desired="${VAULT_BEGIN}
 export VALIDITE_VAULT_ROOT=\"${vault}\"
 ${VAULT_END}"
@@ -253,6 +271,7 @@ ${VAULT_END}"
 
 echo ""
 if VAULT_PATH="$(find_vault)"; then
+  strip_vault_block "$HOME/.zshrc"
   write_vault_export "$VAULT_PATH"
 else
   echo "WARNING: the Validité business vault was not found on this machine." >&2
