@@ -84,6 +84,16 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/git-sync-notice.sh"
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
