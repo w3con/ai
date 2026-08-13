@@ -37,6 +37,8 @@
 #                            <log dir>/STOP)
 #     --model NAME           model name passed through to each turn
 #     --pause SECONDS        wait this long between turns (default 5)
+#     --no-stream            take the turn's output in one block at the end instead of
+#                            streaming it; the log then stays empty until the turn ends
 #     --dry-run              print the exact command each turn would run, and stop
 #
 # Exit codes: 0 — the promise was printed, or the iteration limit was reached cleanly, or
@@ -59,6 +61,7 @@ STOP_FILE=""
 MODEL=""
 PAUSE=5
 DRY_RUN=0
+STREAM=1
 MAX_CONSECUTIVE_FAILURES=3
 
 while [[ $# -gt 0 ]]; do
@@ -71,6 +74,7 @@ while [[ $# -gt 0 ]]; do
         --model)          MODEL="${2:-}";          shift 2 ;;
         --pause)          PAUSE="${2:-}";          shift 2 ;;
         --dry-run)        DRY_RUN=1;               shift   ;;
+        --no-stream)      STREAM=0;                shift   ;;
         -*)
             echo "bin/ralph-loop: unknown option '$1'. Run with --help." >&2
             exit 2 ;;
@@ -117,6 +121,12 @@ build_command() {
     CMD+=(--allowedTools "${ALLOWED_TOOLS[@]}")
     CMD+=(--disallowedTools "${DISALLOWED_TOOLS[@]}")
     CMD+=(--permission-mode acceptEdits)
+    # Stream the turn as it happens rather than printing everything at the end. Without
+    # this a turn's log file sits at zero bytes for however long the turn takes, which is
+    # indistinguishable from a hung process from the outside — the loop looks dead exactly
+    # when it is working hardest. The stream is JSON, one object per line, so the loop
+    # renders a short human line per event into the readable log beside it.
+    [[ $STREAM -eq 1 ]] && CMD+=(--output-format stream-json --verbose)
 }
 build_command
 
@@ -161,8 +171,19 @@ while true; do
     turn_log="$LOG_DIR/ralph-$RUN_STAMP-$(printf '%03d' "$iteration").log"
     echo "--- iteration $iteration at $(date -u +%Y-%m-%dT%H:%M:%SZ) → $turn_log" | tee -a "$MAIN_LOG"
 
-    ( cd "$RUN_CWD" && "${CMD[@]}" < "$PROMPT_FILE" ) > "$turn_log" 2>&1
-    status=$?
+    if [[ $STREAM -eq 1 ]]; then
+        # The raw JSON stream is kept beside the readable log, because the readable one
+        # deliberately drops tool output and would otherwise be the only record of a turn.
+        raw_log="${turn_log%.log}.jsonl"
+        ( cd "$RUN_CWD" && "${CMD[@]}" < "$PROMPT_FILE" ) 2>&1 \
+            | tee "$raw_log" \
+            | "$(dirname "${BASH_SOURCE[0]}")/ralph-render" > "$turn_log"
+        status=${PIPESTATUS[0]}
+    else
+        ( cd "$RUN_CWD" && "${CMD[@]}" < "$PROMPT_FILE" ) > "$turn_log" 2>&1
+        status=$?
+        raw_log="$turn_log"
+    fi
 
     if [[ $status -ne 0 ]]; then
         consecutive_failures=$((consecutive_failures + 1))
@@ -177,7 +198,7 @@ while true; do
         tail -3 "$turn_log" | sed 's/^/    | /' | tee -a "$MAIN_LOG"
     fi
 
-    if [[ -n "$PROMISE" ]] && grep -qF "<promise>$PROMISE</promise>" "$turn_log"; then
+    if [[ -n "$PROMISE" ]] && grep -qF "<promise>$PROMISE</promise>" "$raw_log"; then
         echo "ralph-loop: the completion promise was printed on iteration $iteration — the work reports itself finished. Stopping." | tee -a "$MAIN_LOG"
         exit 0
     fi

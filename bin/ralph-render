@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""bin/ralph-render — turn the JSON event stream of one headless Claude Code turn into a
+short readable line per event, written out as each event arrives.
+
+bin/ralph-loop runs each turn with `--output-format stream-json`, which emits one JSON
+object per line as the turn happens rather than one block of text at the end. That is what
+makes a running turn visible: without it the turn's log file stays at zero bytes for as
+long as the turn takes, which from the outside is indistinguishable from a hung process.
+Raw JSON, though, is not something anybody wants to read, so this filter sits between the
+two and prints one plain line per event — which tool was called and on what, and the text
+the turn produced — flushing after every line so `tail -f` shows it immediately.
+
+An object this script does not recognise is passed over rather than guessed at, and a line
+that is not JSON at all is printed as it stands, so nothing is ever silently swallowed.
+
+Usage:  <the turn's stdout> | bin/ralph-render
+"""
+import json
+import sys
+
+
+def brief(value, limit=110):
+    """One line, no line breaks, cut to a length that stays readable in a terminal."""
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def describe_tool(name, params):
+    """The one detail that says what a tool call was actually about."""
+    if not isinstance(params, dict):
+        return name
+    for key in ("file_path", "path", "pattern", "command", "prompt", "query"):
+        if key in params:
+            return "%s %s" % (name, brief(params[key]))
+    return name
+
+
+def render(event):
+    kind = event.get("type")
+
+    if kind == "system":
+        subtype = event.get("subtype", "")
+        if subtype == "init":
+            return "· turn started (model %s)" % event.get("model", "unknown")
+        return "· system: %s" % subtype
+
+    if kind == "assistant":
+        lines = []
+        for block in event.get("message", {}).get("content", []) or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and block.get("text", "").strip():
+                lines.append("  %s" % brief(block["text"], 300))
+            elif block.get("type") == "tool_use":
+                lines.append("→ %s" % describe_tool(block.get("name", "?"),
+                                                    block.get("input")))
+        return "\n".join(lines) if lines else None
+
+    if kind == "user":
+        # A tool's result coming back. Only its shape matters here, not its content:
+        # printing tool output in full would bury the turn's own reasoning.
+        for block in event.get("message", {}).get("content", []) or []:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                if block.get("is_error"):
+                    return "  ← error: %s" % brief(block.get("content"))
+                return None
+        return None
+
+    if kind == "result":
+        return "· turn finished: %s" % event.get("subtype", "")
+
+    return None
+
+
+def main():
+    for raw in sys.stdin:
+        raw = raw.rstrip("\n")
+        if not raw.strip():
+            continue
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            print(raw, flush=True)
+            continue
+        line = render(event)
+        if line:
+            print(line, flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
