@@ -19,6 +19,21 @@ Every project that uses the KB-loop paradigm gets this structure under `<project
 - `current.md` — session working document; fill in at the start of each session
 - `kb-note.md` — one KB article (derivative wiki entry with conclusions)
 - `decisions-log.md` — append-only decisions log header for a new subject file
+- `plan-card.md` — one task card: the statement of the work, the nine interview
+  questions answered in the owner's own words, the sources read before those
+  questions were put, the summary the owner approves, the scope boundary, the
+  acceptance criteria, the checkpoints and the gate evidence
+
+## The interview sections are opt-in per project
+
+`bin/plan-check` enforces the interview, the sources and the approved summary
+only in directories that ask for it. A project switches the rules on by placing
+an empty file named `.plan-check-interview` beside its cards; each non-comment
+line in that file names a card basename exempted from the rules, which is how
+cards written before the practice began keep passing unchanged. Where no such
+file exists, `plan-check` checks only the older rules — approval, scope,
+acceptance criteria, well-formed checkpoints, resolving paths, no leftover
+placeholder — and ignores the interview entirely.
 
 ## Vector-store reservation (raw fact store)
 
