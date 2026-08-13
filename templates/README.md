@@ -19,10 +19,13 @@ Every project that uses the KB-loop paradigm gets this structure under `<project
 - `current.md` — session working document; fill in at the start of each session
 - `kb-note.md` — one KB article (derivative wiki entry with conclusions)
 - `decisions-log.md` — append-only decisions log header for a new subject file
-- `plan-card.md` — one task card: the statement of the work, the nine interview
+- `plan-card.md` — one task card: the statement of the work, the six interview
   questions answered in the owner's own words, the sources read before those
   questions were put, the summary the owner approves, the scope boundary, the
-  acceptance criteria, the checkpoints and the gate evidence
+  acceptance criteria, the checkpoints and the gate evidence. What the check
+  requires is that the answers are on the record, not that an interrogation took
+  place: an answer already given in conversation is written down by the
+  coordinator, and only what has not been said is asked
 
 ## The interview sections are opt-in per project
 
