@@ -149,7 +149,17 @@ symlink "$CLAUDE_DIR/statusline-command.sh"  "$REPO_DIR/statusline-command.sh"
 # in the permissions of a machine whose user is not "laptop", silently granting
 # nothing. The template holds __HOME__ where the home directory belongs, and
 # this step writes the real file. Never hand-edit ~/.claude/settings.json.
+#
+# RENDERED_SETTINGS_DIGEST is set here, in every path through this function
+# (the "[ok] already current" early return, --dry-run, and the real write
+# alike) whenever the template itself was readable — it is the SHA-256 digest
+# of the exact bytes this run's own deploy would write (or already wrote) to
+# $target, and write_stamp() below writes that same value into
+# ~/.claude/.harness-stamp instead of a hand-kept HARNESS_VERSION number, so
+# the stamp can never disagree with the template by so much as one byte.
 # ---------------------------------------------------------------------------
+RENDERED_SETTINGS_DIGEST=""
+
 render_settings() {
   local template="$REPO_DIR/settings.json.template"
   local target="$CLAUDE_DIR/settings.json"
@@ -166,6 +176,12 @@ render_settings() {
     fail "$target — placeholder __HOME__ survived rendering"
     return
   fi
+
+  # The exact bytes this deploy writes (or already wrote) to $target: $rendered
+  # followed by the single trailing newline the final printf below adds — the
+  # same two-step shape harness-stamp-gate.sh reproduces independently from the
+  # template, so the two can never differ by whitespace.
+  RENDERED_SETTINGS_DIGEST="$(printf '%s\n' "$rendered" | shasum -a 256 | cut -d' ' -f1)"
 
   if [[ -L "$target" ]]; then
     # An earlier bootstrap symlinked this file into the repo. Writing through
@@ -380,32 +396,27 @@ fi
 # ---------------------------------------------------------------------------
 # The stamp is written last, and only on a clean run.
 #
-# harness-stamp-gate.sh compares this file against HARNESS_VERSION on every tool
-# call and blocks the session when they differ, so writing it while any target
-# failed would declare a machine deployed that is not. Raising HARNESS_VERSION in
-# the repository is therefore what forces every machine to re-run this script.
+# harness-stamp-gate.sh recomputes this same digest itself, straight from
+# settings.json.template and this machine's own home directory, and blocks the
+# session when its own computation disagrees with what is written here — so
+# writing it while any target failed would declare a machine deployed that is
+# not. The stamp needs no hand-kept version number to raise: RENDERED_SETTINGS_
+# DIGEST changes on its own the moment the template's own bytes change, which
+# is exactly the drift this stamp exists to catch.
 # ---------------------------------------------------------------------------
 write_stamp() {
-  local version_file="$REPO_DIR/HARNESS_VERSION"
   local stamp_file="$CLAUDE_DIR/.harness-stamp"
 
-  if [[ ! -f "$version_file" ]]; then
-    fail "$stamp_file — no HARNESS_VERSION in the repository at $version_file"
-    return
-  fi
-
-  local version
-  version="$(head -n1 "$version_file" | tr -d '[:space:]')"
-  if [[ -z "$version" ]]; then
-    fail "$stamp_file — HARNESS_VERSION is empty"
+  if [[ -z "$RENDERED_SETTINGS_DIGEST" ]]; then
+    fail "$stamp_file — no rendered-settings digest available (render_settings did not run or the template could not be read)"
     return
   fi
 
   if [[ $DRY_RUN -eq 0 ]]; then
-    printf '%s\n' "$version" > "$stamp_file"
-    echo "[stamp]  $stamp_file = $version"
+    printf '%s\n' "$RENDERED_SETTINGS_DIGEST" > "$stamp_file"
+    echo "[stamp]  $stamp_file = $RENDERED_SETTINGS_DIGEST"
   else
-    echo "[dry-run] Would stamp $stamp_file = $version"
+    echo "[dry-run] Would stamp $stamp_file = $RENDERED_SETTINGS_DIGEST"
   fi
 }
 
