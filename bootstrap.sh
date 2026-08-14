@@ -137,6 +137,7 @@ symlink "$CLAUDE_DIR/memory"                 "$REPO_DIR/memory"           preser
 symlink "$CLAUDE_DIR/agents"                 "$REPO_DIR/agents"
 symlink "$CLAUDE_DIR/hooks"                  "$REPO_DIR/hooks"
 symlink "$CLAUDE_DIR/skills"                 "$REPO_DIR/skills"
+symlink "$CLAUDE_DIR/commands"               "$REPO_DIR/commands"
 symlink "$CLAUDE_DIR/statusline-command.sh"  "$REPO_DIR/statusline-command.sh"
 
 # ---------------------------------------------------------------------------
