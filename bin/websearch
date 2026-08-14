@@ -30,9 +30,11 @@ Exit codes:
     2  bad arguments (missing query, bad flag) — argparse's own exit code
     3  every provider in the chain was skipped, errored, or returned nothing
 
-API keys are read from <this script's dir>/../.env (i.e. Dev/ai/.env), not
-from $HOME or the current directory, so the script behaves the same no
-matter where it is invoked from. A shell-exported environment variable of
+API keys are read from the first of these that exists — <this script's
+dir>/../.env, then ~/Dev/ai/.env — and never from the current directory, so
+the script behaves the same no matter where it is invoked from, including
+when a project symlinks its own ai/bin into a submodule copy of this
+repository that carries no .env of its own. A shell-exported variable of
 the same name always wins over the .env file, even if exported empty — that
 lets a caller force a provider to be skipped for testing without touching
 the .env file itself.
@@ -52,7 +54,17 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ENV_PATH = SCRIPT_DIR.parent / ".env"
+# Candidate .env locations, in order; the first one that exists wins. The
+# first is the canonical case, the file sitting beside this script's own
+# checkout. The second exists because a project may mount this repository as
+# a git submodule and symlink `ai/bin` into it: `resolve()` then lands inside
+# that project's submodule copy, where no .env is kept, and every provider was
+# silently skipped for want of a key (measured 2026-08-14). Secrets stay in
+# one place, the canonical checkout, rather than being copied per project.
+ENV_CANDIDATES = [
+    SCRIPT_DIR.parent / ".env",
+    Path.home() / "Dev" / "ai" / ".env",
+]
 
 HTTP_TIMEOUT_SECONDS = 10
 
@@ -89,12 +101,15 @@ def log(message):
     print(message, file=sys.stderr)
 
 
-def load_dotenv(path):
-    """Parse KEY=VALUE lines from an .env file. Never logs or returns values
-    on its own initiative — callers decide what, if anything, gets printed."""
+def load_dotenv(candidates):
+    """Parse KEY=VALUE lines from the first .env file that exists among the
+    candidate paths. Never logs or returns values on its own initiative —
+    callers decide what, if anything, gets printed."""
     env = {}
-    if not path.exists():
-        log(f"websearch: no .env at {path} — provider keys must come from the shell environment")
+    path = next((p for p in candidates if p.exists()), None)
+    if path is None:
+        tried = ", ".join(str(p) for p in candidates)
+        log(f"websearch: no .env found (tried {tried}) — provider keys must come from the shell environment")
         return env
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -485,7 +500,7 @@ def emit(result, args):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     query = " ".join(args.query)
-    dotenv = load_dotenv(ENV_PATH)
+    dotenv = load_dotenv(ENV_CANDIDATES)
 
     for provider in PROVIDERS:
         name = provider["name"]
