@@ -5,12 +5,12 @@ metadata:
   node_type: memory
   type: feedback
   originSessionId: 18177dfa-e88d-4183-a0b5-bf9bee50d5c8
-  modified: 2026-08-15T21:32:45.279Z
+  modified: 2026-08-15T21:35:04.879Z
 ---
 
 A session carries exactly one task. Everything worth keeping already lives in the task card and in git, so once that task is accepted the whole conversation can be rewound or discarded without losing anything. Several tasks in one session destroy that property: the conversation becomes the only place where the loose ends of the other tasks are tied together, so it can be neither compacted nor rewound, and it grows without limit.
 
-Sequential work — one task after another, which is the ordinary case — needs nothing but `/clear` in the same window once the task is accepted. A separate copy of the repository is needed only for genuine **simultaneity**, when a second conversation is to run while the first still does: two sessions sharing one working tree and one staging area interleaved three commits in two minutes on 2026-08-07. In the Validité DPP project that copy is cut by `bin/session-start`, and `/session` (`.claude/skills/session/`) is the shortcut that walks both cases.
+Sequential work — one task after another, which is the ordinary case — needs nothing but `/clear` in the same window once the task is accepted. A separate copy of the repository is needed only for genuine **simultaneity**, when a second conversation is to run while the first still does: two sessions sharing one working tree and one staging area interleaved three commits in two minutes on 2026-08-07. In the Validité DPP project that copy is cut by `bin/session-start`, and `/parallel` (`.claude/skills/parallel/`) is the shortcut for exactly that rare case; the ordinary sequential case has no command at all, because `/clear` is the whole of it.
 
 **Why:** Alex, 2026-08-15 — «мне нужно, чтобы у нас не было запущено несколько задач в параллели. Тогда я могу легко делать /rewind с сохранением файлов… а когда у тебя несколько задач, я не успеваю делать ни /rewind ни /compact — боясь потерять информацию важную для других задач». And the cost driver behind it, in his words: «и таких вызовов может быть много — и все с контекстом в 100-200тыс. токенов… растет как снежный ком. потому что ты дорогой». Every tool call re-sends the entire session context, so a small session makes every call cheaper, and a large one multiplies the price of each idle probe.
 
