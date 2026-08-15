@@ -55,12 +55,37 @@
 # denied. That is the point, not a side effect.
 # ---------------------------------------------------------------------------
 #
+# THE SECOND RULE (HRN-203, added 2026-08-16): one conversation runs one task.
+# This rule only ever runs once the marker check above has already decided to
+# allow a spawn, and it can only turn that allow into a deny — it never grants
+# an allow of its own. On the FIRST spawn a conversation is allowed, the
+# canonical form of the one token whose file actually carried the marker is
+# written into a small per-conversation state file, keyed on a sanitized
+# transcript_path exactly the way hooks/card-touch-gate.sh's own COORD rule
+# already keys its per-session ceiling. A later spawn in the SAME conversation
+# naming a DIFFERENT card is refused, naming both cards, /clear, /parallel and
+# CLAUDE_GATE_BYPASS=1. A later spawn naming the SAME card is allowed every
+# time, without limit — that is what an ordinary relay after a pace stop looks
+# like. A token that is not card-shaped at all (a legacy plan file, most
+# obviously) is never remembered, because remembering it would refuse the next
+# spawn on a real card in the same conversation. This rule carries its own
+# try/except, falling through to an allowance on any internal error of its
+# own, unlike the marker check above, which fails closed.
+#
+# $PLAN_GATE_STATE_DIR overrides where this rule's per-conversation state is
+# kept — its own variable, distinct from $CARD_TOUCH_GATE_STATE_DIR, so a run
+# of this file's test suite never touches a live session's real state.
+# ---------------------------------------------------------------------------
+#
 # Bypass: set CLAUDE_GATE_BYPASS=1 to skip the gate entirely.
-# Fail-closed: any parse error or unexpected exception → deny.
+# Fail-closed: any parse error or unexpected exception → deny (the marker check
+#              only; the second rule above fails OPEN on its own internal error).
 #
 # Usage: Claude Code calls this automatically via hooks config.
 #        $PLAN_GATE_SEARCH_ROOTS (colon-separated) overrides the roots used to
 #        resolve relative paths; used by the test suite.
+#        $PLAN_GATE_STATE_DIR overrides where the second rule keeps its
+#        per-conversation state; used by the test suite.
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 SEARCH_ROOTS="${PLAN_GATE_SEARCH_ROOTS:-${PROJECT_DIR}:${PWD}}"
@@ -93,6 +118,8 @@ exec python3 - "$SEARCH_ROOTS" "$STDIN_DATA" "$HOOKS_DIR" <<'PYEOF'
 import sys
 import os
 import json
+import re
+import tempfile
 
 search_roots = sys.argv[1]
 stdin_data   = sys.argv[2]
@@ -155,6 +182,92 @@ DENY_NO_MARKER = (
 
 DENY_ERROR = "Blocked by plan-gate: gate error, failing closed."
 
+# --- HRN-203: one conversation runs one task ---------------------------------------------
+# Added alongside the marker check above, never in place of it: this rule only ever runs
+# once the marker check has already decided to allow a spawn, and it can only turn that one
+# allow into a deny — it never manufactures an allow of its own. On the FIRST spawn a
+# conversation is allowed, the canonical form of the one token whose file actually carried
+# the marker is written into a small per-conversation state file, keyed on a sanitized
+# transcript_path exactly the way hooks/card-touch-gate.sh's own COORD rule already keys its
+# per-session ceiling. A later spawn in the same conversation naming a different card is
+# refused; a later spawn naming the SAME card is allowed every time, without limit, because
+# that is what an ordinary relay after a pace stop looks like (a run the PACE rule in
+# card-touch-gate.sh sent back to be resumed by a fresh executor on the same card).
+#
+# A token that is not card-shaped at all — most notably a legacy ai/plans/*.md file, which
+# canonical_card() returns unchanged — is never remembered, because remembering it would
+# refuse the next spawn on a real card in the very same conversation; canonical_card()
+# returning its input unchanged is exactly how "not card-shaped" is recognised (see its own
+# docstring in brief_reader.py).
+#
+# This block carries its own try/except, falling through to "allow, record nothing" on any
+# internal error of its own. That is deliberate and differs from the rest of this file: the
+# code path this rule is inserted into is wrapped in an outer try/except that fails CLOSED
+# (see DENY_ERROR above), which is the right posture for the marker check itself but the
+# wrong one for this rule — a bug in this new code must never turn into every spawn on the
+# machine being refused, which is a failure this family of hooks has already lived through
+# once (see hooks/card-touch-gate.sh's own header comment on why it fails open).
+#
+# $PLAN_GATE_STATE_DIR overrides where this rule's per-conversation state is kept — its own
+# variable, distinct from $CARD_TOUCH_GATE_STATE_DIR, so a run of this file's test suite
+# never reads or writes the coordinator's own live session state, and never collides with
+# card-touch-gate.sh's own state files either.
+
+SECOND_TASK_TEMPLATE = (
+    "Blocked by plan-gate: this conversation already started an executor on {owned}, and "
+    "this spawn names a different card, {attempted}. One conversation runs one task: finish "
+    "the current task and close this conversation with /clear before starting the next one, "
+    "or, when the two pieces of work genuinely must run at the same time, open a separate "
+    "session with /parallel instead of spawning a second executor here. Set "
+    "CLAUDE_GATE_BYPASS=1 only for a deliberate, known exception to this rule."
+)
+
+
+def _session_state_path(transcript_path):
+    """The per-conversation state file for this rule, or None when no transcript_path was
+    given at all — mirrors hooks/card-touch-gate.sh's own COORD rule, which fails open the
+    same way when it cannot establish a session identifier to key state on."""
+    if not transcript_path:
+        return None
+    state_dir = os.environ.get("PLAN_GATE_STATE_DIR") or \
+        os.path.join(tempfile.gettempdir(), "claude-plan-gate")
+    os.makedirs(state_dir, exist_ok=True)
+    safe_session = re.sub(r'[^A-Za-z0-9_-]', '_', os.path.basename(str(transcript_path)))
+    return os.path.join(state_dir, safe_session + ".json")
+
+
+def second_task_deny_reason(token, transcript_path):
+    """None to allow (recording the card as needed); otherwise the deny reason string for
+    this rule. Never raises — every failure mode falls through to None, since the marker
+    check has already decided to allow by the time this runs, and this rule must never turn
+    an internal bug of its own into an unrelated denial."""
+    try:
+        card = brief_reader.canonical_card(token)
+        if card == token:
+            return None  # not card-shaped (e.g. a legacy plan file) — never tracked
+        state_path = _session_state_path(transcript_path)
+        if not state_path:
+            return None  # no session identifier to key state on
+        owned = None
+        if os.path.isfile(state_path):
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    owned = loaded.get("card")
+            except Exception:
+                owned = None  # a corrupt state file is a fresh start, not an error to deny on
+        if owned is None:
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump({"card": card}, f)
+            return None
+        if owned == card:
+            return None
+        return SECOND_TASK_TEMPLATE.format(owned=owned, attempted=card)
+    except Exception:
+        return None
+# --- end HRN-203 -----------------------------------------------------------------------
+
 # --- parse stdin ---
 try:
     if not stdin_data.strip():
@@ -172,6 +285,7 @@ if os.environ.get("CLAUDE_GATE_BYPASS") == "1":
 # --- classify tool ---
 tool_name  = data.get("tool_name", "")
 tool_input = data.get("tool_input", {})
+transcript_path = data.get("transcript_path")
 
 # Only Task/Agent spawns are gated. Everything else is free.
 if tool_name not in ("Task", "Agent"):
@@ -221,6 +335,12 @@ try:
         for path in brief_reader.resolve(token, roots):
             if os.path.isfile(path):
                 if has_marker(path):
+                    # HRN-203: the marker check has decided to allow; the second-task rule
+                    # can only turn this into a deny, never an allow of its own.
+                    second_reason = second_task_deny_reason(token, transcript_path)
+                    if second_reason is not None:
+                        print(deny_json(second_reason))
+                        sys.exit(0)
                     print(ALLOW_JSON)
                     sys.exit(0)
                 if path not in existing:
