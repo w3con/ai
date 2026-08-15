@@ -24,7 +24,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Pace with visible progress](feedback-pacing-visible-progress.md) — don't burn 8 minutes in silent thinking then emit a one-liner; act in short visible steps, don't re-plan from scratch each async message
 - [Caffeinate before long runs](feedback-caffeinate-before-long-runs.md) — start caffeinate when you hand work over, not after the first agent dies; a sleeping Mac kills every executor at once
 - [Critic and research sub-agents](feedback_reviewer_agent.md) — whether you may spawn one at all: only on Alex's explicit word, never automatically
-- [See a problem, found a card](feedback-see-a-problem-found-a-card.md) — never propose founding one and never fix it by hand; found it the moment you notice it
+- [See a problem, found a card](feedback-see-a-problem-found-a-card.md) — found it the moment you notice it and never merely propose it; but a small reversible machinery repair inside work you are already doing is fixed now and recorded in one line, not carded
 - [Never report your own problems](feedback-never-report-your-own-problems.md) — a problem you caused or a leftover you could finish is yours to solve, record and card up; never hand it back as a question
 - [Resolve before reporting](feedback-resolve-before-reporting.md) — a blocked commit, a dirty tree, a missing tool is yours to fix; never hand Alex an obstacle you have not tried to clear
 - [Install what you need](feedback-install-what-you-need.md) — a missing tool gets installed, not reported and waited on; destructive or outward-facing actions still need his word
@@ -52,6 +52,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Living plan-journal, verify-first](feedback-living-plan-journal.md) — discuss and re-check against live systems before acting; keep a KB roadmap+journal per effort and update it as understanding grows
 - [Pilier's internal KB is a private repo](feedback_pilier_private_kb.md) — Pilier only: the blockchain repo is public, so internal reasoning/plans/decisions live in the private `cloud` repo (`pilier-org/cloud`) — read it for context and write internal docs there, never into `blockchain/ai/`
 - [No em-dashes in outgoing letters](feedback-no-em-dash-in-letters.md) — letters to real people must read as Alex's hand; rewrite with commas, colons, parentheses instead of the machine-tell dash
+- [No saccharine in French letters](feedback-no-saccharine-in-french-letters.md) — cut permission-to-refuse, "no pressure" reassurance and menu questions; French business letters are more formal and far more direct, never emotionally cushioned
 - [Check who wrote the letter](feedback-check-if-letter-was-agent-written.md) — before filing a quote as evidence, ask whether a person or an assistant wrote it and whether it only echoes our own framing back; grade the quote in the same line
 - [Warmth isn't a commitment signal](feedback-warmth-not-a-commitment-signal.md) — a pleasant, enthusiastic-sounding call means nothing on its own; log names/dates/documents, not tone, and don't pin it on one contact's character
 - [Name roles, not people](feedback-name-roles-not-people.md) — process documents define owner/coordinator/executor/reviewer in a short glossary and never say "Alex"
