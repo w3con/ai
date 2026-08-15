@@ -6,6 +6,12 @@ its-own-hand-because-only-an-executor-may.md in the app repository (Dev/app). Re
 card for the full "why" this hook exists; this file only proves that the hook script it
 is run against actually behaves the way that card's acceptance criteria describe.
 
+Extended by ai/harness/tasks/HRN-192_an-executor-started-from-the-cockpit-carries-an-
+agent-identity-so-the-source-gate-stops-refusing-its-every-edit.md, which adds the
+"HRN-192" section below: a `bin/card-launch`-started executor carries no `agent_id` at
+all, so it needs a second, deliberate identity signal, `VALIDITE_EXECUTOR_CARD`, read from
+this hook process's own environment rather than from the tool-call payload.
+
 Usage:
     python3 coordinator-source-gate.test.py [path-to-hook-script]
 
@@ -50,10 +56,13 @@ def run_hook(payload, env_overrides=None, raw_stdin=None):
     """Runs the hook script once, feeding it `raw_stdin` verbatim if given, or the JSON
     encoding of `payload` otherwise. Returns (returncode, stdout, stderr). env_overrides
     is applied on top of a copy of this process's own environment, with
-    CLAUDE_GATE_BYPASS always removed first so a bypass left set in the ambient
-    environment can never leak into a test that did not ask for it."""
+    CLAUDE_GATE_BYPASS and VALIDITE_EXECUTOR_CARD always removed first so a bypass or a
+    mark left set in the ambient environment — this very test process may itself be
+    running as an executor whose own environment already carries one or the other — can
+    never leak into a test that did not ask for it."""
     env = dict(os.environ)
     env.pop("CLAUDE_GATE_BYPASS", None)
+    env.pop("VALIDITE_EXECUTOR_CARD", None)
     if env_overrides:
         env.update(env_overrides)
     stdin_data = raw_stdin if raw_stdin is not None else json.dumps(payload)
@@ -355,6 +364,73 @@ def test_hook_never_crashes_the_shell_wrapper():
 
 
 # ---------------------------------------------------------------------------
+# HRN-192 — a bin/card-launch-started executor carries no agent_id at all, so this hook
+# reads a second, deliberate identity: a non-empty VALIDITE_EXECUTOR_CARD in its own
+# environment. Present, a guarded edit is allowed exactly as an agent_id would allow it;
+# absent — including set but blank — the same edit is refused exactly as before HRN-192.
+# ---------------------------------------------------------------------------
+
+def test_allow_marked_executor_env_on_guarded_backend_path():
+    rc, out, err = run_hook(
+        edit(_APP + "/dpp_demo/app/internal/bom/bom.go"),
+        env_overrides={"VALIDITE_EXECUTOR_CARD": "DPP-31"},
+    )
+    assert decision_of(out) == "allow"
+
+
+def test_allow_marked_executor_env_on_guarded_frontend_path():
+    rc, out, err = run_hook(
+        write(_APP + "/dpp_frontend/src/main.ts"),
+        env_overrides={"VALIDITE_EXECUTOR_CARD": "DPP-31"},
+    )
+    assert decision_of(out) == "allow"
+
+
+def test_allow_marked_executor_env_on_guarded_vldt_path():
+    rc, out, err = run_hook(
+        edit(_APP + "/dpp-vldt/src/App.vue"),
+        env_overrides={"VALIDITE_EXECUTOR_CARD": "DPP-31"},
+    )
+    assert decision_of(out) == "allow"
+
+
+def test_allow_marked_executor_env_notebookedit_guarded_path():
+    rc, out, err = run_hook(
+        notebook_edit(_APP + "/dpp_demo/app/scratch.ipynb"),
+        env_overrides={"VALIDITE_EXECUTOR_CARD": "DPP-31"},
+    )
+    assert decision_of(out) == "allow"
+
+
+def test_deny_guarded_edit_when_marker_env_var_absent():
+    # The plain, unmarked case — no agent_id, no VALIDITE_EXECUTOR_CARD — must still be
+    # refused exactly as it was before HRN-192 added the second signal.
+    rc, out, err = run_hook(edit(_APP + "/dpp_demo/app/internal/bom/bom.go"))
+    assert decision_of(out) == "deny"
+
+
+def test_deny_guarded_edit_when_marker_env_var_blank():
+    # A stray VALIDITE_EXECUTOR_CARD="" left set but empty in an environment must never be
+    # mistaken for a deliberate mark.
+    rc, out, err = run_hook(
+        edit(_APP + "/dpp_demo/app/internal/bom/bom.go"),
+        env_overrides={"VALIDITE_EXECUTOR_CARD": ""},
+    )
+    assert decision_of(out) == "deny"
+
+
+def test_allow_marked_executor_env_still_passes_unguarded_coordinator_paths():
+    # The mark is an executor identity, not a special case of path matching — a card file
+    # under ai/ was always allowed for the coordinator anyway, and stays allowed with the
+    # mark present too.
+    rc, out, err = run_hook(
+        edit(_APP + "/ai/harness/tasks/HRN-192_marked.md"),
+        env_overrides={"VALIDITE_EXECUTOR_CARD": "HRN-192"},
+    )
+    assert decision_of(out) == "allow"
+
+
+# ---------------------------------------------------------------------------
 
 TESTS = [
     test_deny_edit_backend,
@@ -391,6 +467,13 @@ TESTS = [
     test_fail_open_on_null_tool_input,
     test_fail_open_on_missing_file_path_key,
     test_hook_never_crashes_the_shell_wrapper,
+    test_allow_marked_executor_env_on_guarded_backend_path,
+    test_allow_marked_executor_env_on_guarded_frontend_path,
+    test_allow_marked_executor_env_on_guarded_vldt_path,
+    test_allow_marked_executor_env_notebookedit_guarded_path,
+    test_deny_guarded_edit_when_marker_env_var_absent,
+    test_deny_guarded_edit_when_marker_env_var_blank,
+    test_allow_marked_executor_env_still_passes_unguarded_coordinator_paths,
 ]
 
 if __name__ == "__main__":

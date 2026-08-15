@@ -10,6 +10,21 @@
 # machine objected until the owner typed a message to stop it. This hook is that objection,
 # built into the machine instead of depending on the owner noticing in time.
 #
+# Extended by ai/harness/tasks/HRN-192_an-executor-started-from-the-cockpit-carries-an-
+# agent-identity-so-the-source-gate-stops-refusing-its-every-edit.md in the app repository:
+# `bin/card-launch` starts its executor as a plain shell process, so its calls never carry
+# an `agent_id` at all — the discriminator this hook already relies on to tell an executor
+# apart from the coordinator — and every one of them used to read as the coordinator's own,
+# which meant this hook refused every single product-source edit a cockpit-started run ever
+# attempted. That card measured the failure directly (run 132be1a7-7f98-4159-b7e1-692a547a
+# de55 against DPP-31) rather than reasoning about it, and its own checkpoint HRN-192.1
+# proved by direct observation that a hook process does inherit the environment of the
+# process that started it. So this hook now reads a second, independent signal: the
+# environment variable VALIDITE_EXECUTOR_CARD, set deliberately by `bin/card-launch` on the
+# executor process it starts and carrying that run's own bare card identifier — never
+# inferred from anything a coordinator session also happens to have, and never set by this
+# project on a coordinator's own process.
+#
 # What IS blocked: an Edit, Write or NotebookEdit tool call whose target path — file_path
 #   for Edit/Write, notebook_path for NotebookEdit — lies inside one of three directories,
 #   checked as a path segment anywhere in the normalized path so that the same checkout, a
@@ -21,13 +36,18 @@
 #     - dpp_frontend/src    (the manager UI's own source, not its build output in
 #                             dpp_frontend/dist)
 #     - dpp-vldt/src         (the public viewer's own source)
-#   and whose call carries NO agent_id in the hook's own payload — the same discriminator
-#   hooks/card-touch-gate.sh already relies on and that HRN-46 confirmed reliable: present
-#   and non-empty means a subagent (an executor) made the call, absent means the
-#   coordinator did.
+#   and whose call carries NEITHER an `agent_id` in the hook's own payload — the
+#   discriminator hooks/card-touch-gate.sh already relies on and that HRN-46 confirmed
+#   reliable: present and non-empty means a subagent (an executor) made the call, absent
+#   means the coordinator did — NOR a non-empty `VALIDITE_EXECUTOR_CARD` in this hook
+#   process's own environment, the second, deliberate executor identity HRN-192 adds for a
+#   run `bin/card-launch` started as a plain shell process rather than through the
+#   `Task`/`Agent` tool that stamps `agent_id`.
 # What is NOT blocked: any call carrying an agent_id, whatever path it names — an executor
 #   is never affected by this hook, because building product source code by hand is
-#   exactly an executor's own legitimate work. Any tool other than Edit, Write or
+#   exactly an executor's own legitimate work. Any call made by a process descended from a
+#   `bin/card-launch`-started executor, recognised by `VALIDITE_EXECUTOR_CARD` sitting in
+#   this hook's own environment, for the same reason. Any tool other than Edit, Write or
 #   NotebookEdit. Any path outside the three directories above, for the coordinator or an
 #   executor alike — task cards, epics, feature pages, anything under ai/, kb/, bin/,
 #   .githooks/ and the hooks directory itself all stay writable by the coordinator, because
@@ -136,6 +156,17 @@ def target_path(tool_name, tool_input):
     return tool_input.get("file_path") or tool_input.get("path")
 
 
+def is_marked_executor_environment():
+    """True when this hook process's own environment carries a non-empty
+    VALIDITE_EXECUTOR_CARD — the mark `bin/card-launch` sets, and only there, on the
+    executor process it starts (HRN-192), confirmed by that card's own checkpoint HRN-192.1
+    to reach a PreToolUse hook invoked for one of that process's own tool calls, because a
+    hook process inherits the environment of whatever started it. A blank value (set but
+    empty) is treated the same as unset, so a stray `VALIDITE_EXECUTOR_CARD=` left in a
+    coordinator's own shell can never be mistaken for a deliberate mark."""
+    return bool(os.environ.get("VALIDITE_EXECUTOR_CARD"))
+
+
 try:
     if not stdin_data.strip():
         allow_and_exit()
@@ -153,6 +184,14 @@ if agent_id:
     # A call carrying an agent_id is an executor's own call, never the coordinator's — an
     # executor building product source code by hand is exactly its legitimate work, and
     # this hook has no business in its way (HRN-117 acceptance criterion 3).
+    allow_and_exit()
+
+if is_marked_executor_environment():
+    # The second, deliberate executor identity HRN-192 adds: a call made by a process
+    # descended from a `bin/card-launch`-started executor carries no agent_id at all, since
+    # that executor was started as a plain shell process rather than through the
+    # `Task`/`Agent` tool, but it does carry this project's own mark in its environment —
+    # treated exactly as an agent_id would be, allowed without inspecting the path.
     allow_and_exit()
 
 tool_name = data.get("tool_name") or ""
