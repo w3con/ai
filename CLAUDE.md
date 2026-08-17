@@ -92,8 +92,9 @@ There is exactly one memory store: `~/Dev/ai/memory/` (reachable as `~/.claude/m
 
 The boundary this draws is between **memory** and **a project's documents**, not between "shared" and "project" memory. Memory answers *how Claude works* — what Alex requires, where he corrected me, which tool to use for what — and belongs in the one store. What *a project decided* — its architecture, its trade-offs — belongs in that project's own `ai/decisions/` and `ai/arch/`, versioned with the code; and **plans stay in the project they describe** (`plan-gate` reads the plan named to the executor, so project plans work unchanged). A memory that is about method but true only inside one project carries a `scope: <project>` field rather than living in a second store.
 
-To add a fact: write the file in `~/Dev/ai/memory/`, add one line to that directory's `MEMORY.md` index, and — only for the three preference files whose bodies must be in context every session — add an `@import` line below (the index loads on its own; `@import` also strips YAML frontmatter, so it is reserved for the files that need their bodies loaded verbatim). One fact per file.
+To add a fact: write the file in `~/Dev/ai/memory/`, add one line to that directory's `MEMORY.md` index, and — only for the handful of preference files whose bodies must be in context every session — add an `@import` line below (the index loads on its own; `@import` also strips YAML frontmatter, so it is reserved for the files that need their bodies loaded verbatim). One fact per file.
 
 @memory/feedback_reusable_tooling.md
 @memory/feedback_reviewer_agent.md
 @memory/feedback_git_staging.md
+@memory/feedback-spawn-subagents-visibly.md

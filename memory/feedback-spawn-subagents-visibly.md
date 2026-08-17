@@ -1,0 +1,14 @@
+---
+name: feedback-spawn-subagents-visibly
+description: Every subagent must run in the foreground where Alex can watch it — never hidden inside a wrapper script, never started as a detached/background run
+metadata:
+  type: feedback
+---
+
+A subagent always runs in the foreground. Before it runs, say plainly which agent is being raised and what it is being asked to do; then raise it with the visible `Agent` tool call in the conversation and stay with it. Never spawn it inside a wrapper command that hides its turns, and never hand it off as a detached background run whose progress Alex cannot watch as it happens — not `Workflow` (which always runs in the background), not `Agent` with an `isolation`/background mode, not a shell command backgrounded with `run_in_background` when the thing running inside it is itself an agent.
+
+**Why:** Alex said it on 2026-08-17, then again the same day in far angrier terms — «ВСЕ СУБАГЕНТЫ ВСЕГДА ДОЛЖНЫ БЫТЬ FOREGROUND» — because the first, softer wording («субагентов надо запускать явно, чтобы их можно было видеть») had not stopped it from happening again. An agent he cannot see is an agent he cannot stop, cannot pace, and cannot judge while it is still cheap to change course; by the time a background run or a wrapper prints its result the money is already spent. Treat the second, angrier statement as the operative one: the first pass at this rule was read too narrowly, as "name it before spawning," when it was meant as an absolute — never off-screen, full stop.
+
+**How to apply:** name the agent and its task in the message before the spawn, spawn through the visible `Agent` tool, and do not reach for `Workflow`, an `isolation`/background `Agent` mode, or a backgrounded shell wrapper as a way to run a subagent out of sight — even when those tools are otherwise permitted for other reasons (e.g. `Workflow` needs its own separate user opt-in per its own tool description; this rule constrains what happens *if* that opt-in is ever given too — keep it visible turn by turn, don't just wait for the final result). In this project the wrapper commands that spawn agents inside themselves — `bin/card-launch` (critic, then executor) and `bin/card-plan` (the planning worker) — are the exact shape this rule is aimed at; if one of them must still be used, say so and say why before running it.
+
+This is about *visibility*, a different question from [[feedback_reviewer_agent]], which governs *permission* to spawn at all (only on Alex's explicit word), and from [[feedback-verify-executor-model]], which governs *which model* actually ran the work.

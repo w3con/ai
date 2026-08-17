@@ -25,6 +25,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Pace with visible progress](feedback-pacing-visible-progress.md) — don't burn 8 minutes in silent thinking then emit a one-liner; act in short visible steps, don't re-plan from scratch each async message
 - [Caffeinate before long runs](feedback-caffeinate-before-long-runs.md) — start caffeinate when you hand work over, not after the first agent dies; a sleeping Mac kills every executor at once
 - [Critic and research sub-agents](feedback_reviewer_agent.md) — whether you may spawn one at all: only on Alex's explicit word, never automatically
+- [Spawn subagents visibly](feedback-spawn-subagents-visibly.md) — ALWAYS foreground, never background: name the agent and its task, raise it through the visible Agent tool, never a wrapper or a detached/background run
 - [See a problem, found a card](feedback-see-a-problem-found-a-card.md) — found it the moment you notice it and never merely propose it; but a small reversible machinery repair inside work you are already doing is fixed now and recorded in one line, not carded
 - [Never report your own problems](feedback-never-report-your-own-problems.md) — a problem you caused or a leftover you could finish is yours to solve, record and card up; never hand it back as a question
 - [Resolve before reporting](feedback-resolve-before-reporting.md) — a blocked commit, a dirty tree, a missing tool is yours to fix; never hand Alex an obstacle you have not tried to clear
@@ -65,3 +66,4 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Verify repo vs live](feedback_pilier_verify_repo_vs_live.md) — Pilier only: before changing/auditing server config, diff the tracked file against the live host, don't trust the repo copy alone
 - [A clean merge is not agreement](feedback-clean-merge-is-not-agreement.md) — no conflict only means the two sides edited different files; compare what each side's work produces
 - [Python on the SSD machine](machine-ssd-python-path.md) — prepending Homebrew to PATH swaps in an interpreter without PyYAML and fakes a regression.
+- [No tests for the cockpit](feedback-no-tests-for-the-cockpit.md) — Validité app only: the owner works that screen himself; fix what is broken, never add browser checks around it unasked
