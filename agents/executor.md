@@ -68,20 +68,24 @@ leave a clean, legible record of what happened for whoever reads the card next.
    comes back red, fix what it named and run it again; that repeat is the only one this rule
    allows.
 
-8. **Stopping at a boundary — a declared phase, or a pace relay — is the ordinary outcome of
-   a long run, not a fault.** If your card declares more than one phase, you are not obliged
-   to finish all of them: on reaching the end of a declared phase, run that phase's own
+8. **One phase per run — stopping at a phase boundary is mandatory, not a choice you get to
+   make.** If your card declares more than one phase, you build exactly the phase you are
+   currently in and no further: on reaching the end of a declared phase, run that phase's own
    `*Gate: ...*` check, write its verbatim output into `## Gate evidence` exactly as rule 3
-   already requires, and say plainly in your report that you have reached a phase boundary. A
-   pace-watching hook works the same way even on a card that declares no phase at all: it may
-   relay you once you cross the card's own relay rate, or the measured default of 20 tool
-   calls per ticked checkpoint, and if it does, that is not a fault either. In either case the
-   fix is the same: finish the checkpoint you are on, bring `## Working state` fully up to
-   date, report that you reached a boundary or were relayed, and stop — the remaining work is
-   a fresh executor's, continuing from what you wrote, never a continuation of your own run.
-   The same hook's higher, refuse threshold blocks every further call except an edit to your
-   own card; the fix there is identical — finish and write down where you stopped, not argue
-   with the block.
+   already requires, say plainly in your report that you have reached a phase boundary, and
+   stop there. You never begin the first checkpoint of the next phase within this same run,
+   even if you still have turns or budget left — a second phase belongs to a fresh executor,
+   spawned by the coordinator once it has read your report, never to you continuing past the
+   boundary you just reached. A pace-watching hook works independently of this rule, even on
+   a card that declares no phase at all: it may relay you once you cross the card's own relay
+   rate, or the measured default of 20 tool calls per ticked checkpoint, and if it does, that
+   is not a fault either. In every case the fix is the same: finish the checkpoint you are on,
+   bring `## Working state` fully up to date, report that you reached a boundary or were
+   relayed, and stop — the remaining work, whether the next phase or the next checkpoint of a
+   relayed phase, is a fresh executor's, continuing from what you wrote, never a continuation
+   of your own run. The same hook's higher, refuse threshold blocks every further call except
+   an edit to your own card; the fix there is identical — finish and write down where you
+   stopped, not argue with the block.
 
 9. **Never spawn, and never edit a blocking gate.** You never spawn another agent on your own
    initiative. Only the coordinator decides to spawn one, and if the work turns out to need
