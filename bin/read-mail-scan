@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""read-mail-scan — list what has arrived in the Validité mailboxes since the last look.
+
+Usage:
+    read-mail-scan                      # new envelopes in both mailboxes, human table
+    read-mail-scan --json               # the same, machine-readable
+    read-mail-scan --all                # every envelope in the window, ignoring the record
+    read-mail-scan --accounts validite  # one mailbox only
+    read-mail-scan --size 40            # widen the window (default 25 per mailbox)
+    read-mail-scan --mark-seen          # record everything listed as already handled
+    read-mail-scan --where              # print the resolved client and its state file
+
+This is the deterministic half of the /read-mail skill. It answers one question — which messages
+are new — and deliberately holds no opinion about which of them deserve a reply, because that
+judgment belongs in the skill where a person can read it.
+
+Why it keeps its own record rather than reading the unread flag: reading a message to decide
+whether it needs an answer sets the Seen flag on the server, so by the time a draft exists the
+flag says the message is old. The record here is written only when --mark-seen is passed, which
+the skill does after the drafts are written, so a run that dies halfway shows the same messages
+again next time instead of losing them.
+
+Every call goes through the throttle wrapper (ai/openclaw/himalaya-throttle in the Validité
+repository), never the real client, because the mail host bans the connecting address after
+repeated failed logins. A local install is preferred; the SSH path to the server is the fallback
+for when this machine cannot reach the mail host directly.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+ACCOUNTS = ("validite", "pilier")
+STATE_DIR = os.environ.get("READ_MAIL_STATE", os.path.expanduser("~/.cache/read-mail"))
+STATE_FILE = os.path.join(STATE_DIR, "seen.json")
+
+# How many message ids to remember per mailbox. Large enough that a mailbox cannot scroll past it
+# between two looks, small enough that the file stays trivial to read by eye.
+REMEMBERED_IDS = 500
+
+def resolve_client():
+    """The throttle wrapper to call, as an argument list, plus a label for messages.
+
+    A local install is preferred because it talks to the mail host directly; the SSH form runs the
+    identical wrapper on the server and exists for when this machine cannot.
+    """
+    override = os.environ.get("READ_MAIL_HIMALAYA")
+    if override:
+        return override.split(), f"override: {override}"
+
+    for candidate in (
+        os.path.expanduser("~/.local/bin/himalaya"),
+        "/usr/local/bin/himalaya",
+    ):
+        if os.path.exists(candidate):
+            return [candidate], f"local: {candidate}"
+
+    if shutil.which("ssh"):
+        return (
+            ["ssh", "validios", "sudo", "-u", "openclaw", "/home/openclaw/bin/himalaya"],
+            "server over ssh (no local install found)",
+        )
+
+    print(
+        "read-mail-scan: no mail client found. Install it locally as ~/.local/bin/himalaya "
+        "(the throttle wrapper) with the real v1.2.0 client beside it as himalaya.real, or make "
+        "`ssh validios` reachable. See the mail section of the Validité CLAUDE.md.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+def read_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {}
+    return {account: list(state.get(account, [])) for account in ACCOUNTS}
+
+
+def write_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump({k: v[-REMEMBERED_IDS:] for k, v in state.items()}, handle, indent=1)
+    os.replace(tmp, STATE_FILE)
+
+
+def list_envelopes(client, account, folder, size):
+    """The envelopes in one folder, newest first, as a list of dicts."""
+    completed = subprocess.run(
+        client + ["envelope", "list", "-a", account, "-f", folder, "-s", str(size), "-o", "json"],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        print(f"read-mail-scan: listing {account}/{folder} failed: {detail}", file=sys.stderr)
+        # Exit code 75 is the throttle refusing rather than the mail host failing. Pass it through
+        # unchanged so the caller can tell "wait" apart from "broken" without parsing text.
+        sys.exit(completed.returncode)
+    try:
+        return json.loads(completed.stdout or "[]")
+    except ValueError:
+        print(f"read-mail-scan: {account}/{folder} returned output that is not JSON", file=sys.stderr)
+        sys.exit(1)
+
+
+def sender(envelope):
+    who = envelope.get("from") or {}
+    return who.get("name") or who.get("addr") or "?"
+
+
+def sender_address(envelope):
+    return (envelope.get("from") or {}).get("addr", "")
+
+
+def main():
+    parser = argparse.ArgumentParser(add_help=True, description=__doc__.split("\n")[0])
+    parser.add_argument("--accounts", default=",".join(ACCOUNTS),
+                        help="comma-separated mailbox names (default: validite,pilier)")
+    parser.add_argument("--folder", default="INBOX", help="folder to scan (default: INBOX)")
+    parser.add_argument("--size", type=int, default=25, help="envelopes per mailbox (default: 25)")
+    parser.add_argument("--all", action="store_true", help="ignore the record and show every envelope")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--mark-seen", action="store_true",
+                        help="record the listed messages as handled (do this after drafting, not before)")
+    parser.add_argument("--where", action="store_true",
+                        help="print the resolved client and state file, and exit")
+    args = parser.parse_args()
+
+    client, client_label = resolve_client()
+
+    if args.where:
+        print(f"client     : {client_label}")
+        print(f"state file : {STATE_FILE}")
+        return 0
+
+    accounts = [a.strip() for a in args.accounts.split(",") if a.strip()]
+    unknown = [a for a in accounts if a not in ACCOUNTS]
+    if unknown:
+        print(f"read-mail-scan: unknown mailbox {unknown[0]!r}; known are {', '.join(ACCOUNTS)}",
+              file=sys.stderr)
+        return 2
+
+    state = read_state()
+    report = {"client": client_label, "accounts": {}}
+
+    for account in accounts:
+        envelopes = list_envelopes(client, account, args.folder, args.size)
+        seen = set(state.get(account, []))
+        fresh = envelopes if args.all else [e for e in envelopes if str(e.get("id")) not in seen]
+        report["accounts"][account] = {
+            "new": [
+                {
+                    "id": str(e.get("id")),
+                    "date": e.get("date", ""),
+                    "from": sender(e),
+                    "address": sender_address(e),
+                    "subject": e.get("subject", ""),
+                    "flags": e.get("flags", []),
+                    "has_attachment": e.get("has_attachment", False),
+                }
+                for e in fresh
+            ],
+            "already_seen": len(envelopes) - len(fresh),
+            "window": len(envelopes),
+        }
+        if args.mark_seen:
+            state[account] = list(state.get(account, [])) + [
+                str(e.get("id")) for e in envelopes if str(e.get("id")) not in seen
+            ]
+
+    if args.mark_seen:
+        write_state(state)
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"client: {client_label}")
+    total_new = 0
+    for account, block in report["accounts"].items():
+        print()
+        if not block["new"]:
+            print(f"[{account}] nothing new ({block['window']} in the window, all already handled)")
+            continue
+        total_new += len(block["new"])
+        print(f"[{account}] {len(block['new'])} new, {block['already_seen']} already handled")
+        for item in block["new"]:
+            attach = " 📎" if item["has_attachment"] else ""
+            print(f"  {item['id']:>5}  {item['date'][:16]}  {item['from'][:26]:<26}  "
+                  f"{item['subject'][:70]}{attach}")
+    print()
+    if total_new:
+        print(f"Read one with:  {' '.join(client)} message read <ID> -a <account> -f {args.folder}")
+        print("Each call waits at least 15 seconds for the throttle, so read only what you need.")
+    if not args.mark_seen:
+        print("Nothing was recorded as handled. Rerun with --mark-seen once the drafts are written.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

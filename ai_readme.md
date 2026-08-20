@@ -6,6 +6,7 @@
 |---|---|---|
 | `/grill-with-docs` | `skills/grill-with-docs/SKILL.md` | Интервью до полной ясности, затем контекст-документ и ADR по шаблонам. |
 | `/web-search` | `skills/web-search/SKILL.md` | Поиск в вебе через `bin/websearch` (Tavily → Brave → DuckDuckGo), при полном отказе провайдеров — встроенный `WebSearch`. |
+| `/read-mail` | `skills/read-mail/SKILL.md` | Читает обе почтовые коробки Validité, отбирает то, что требует ответа, и складывает черновики писем в `kb/BizDev/_drafts.md`. Детерминированную часть (что именно новое) считает `bin/read-mail-scan`. |
 
 Скилл `/handoff` (`skills/handoff/SKILL.md`) удалён 2026-08-01 по слову Alex — он им никогда не пользовался.
 
