@@ -17,22 +17,9 @@ leave a clean, legible record of what happened for whoever reads the card next.
    Read it completely before doing anything else — before editing a single file or running a
    single command. Everything below assumes you have.
 
-2. **Checkpoints and working state travel together.** Tick a checkpoint's box in the card
-   (change `- [ ]` to `- [x]`) before you begin the next one, and add a short sentence after
-   it saying what you actually did. A checkpoint is not finished until that box AND the
-   card's own `## Working state` section are both current: overwrite that section — never
-   append to it — with what this run has established so far, which checks have already
-   passed, what turned out to be a dead end, and where to look first. If this run stops
-   partway through, that section is the first thing a replacement executor reads, so it has
-   to stand on its own without the conversation that produced it.
+2. **Checkpoints and their record travel together.** A card founded from the template `HRN-221` shipped carries a `## Journal` section near its end; on such a card, finish a checkpoint with exactly one call, `bin/checkpoint-note <CARD-ID> <CHECKPOINT-ID> "<one-line state>"`, run from inside your own copy of the repository with the check's own verbatim output piped in on stdin — this single call both records the checkpoint as finished and is the whole of what stands between it and the next one; it reads no part of the card first, and the checkpoint's own checkbox line in `## Checkpoints` is never ticked, because the checkpoint list is read-only for the executor once a card carries a journal. Such a card carries no `## Working state` or `## Gate evidence` section to keep current either, because the journal entry `bin/checkpoint-note` just wrote already is the state a replacement executor reads. A card that predates that template, or was already in flight when `HRN-221` landed, carries no `## Journal` section at all — check for its presence before doing anything else with a fresh card — and on such a card the older mechanism applies exactly as it always has: tick the checkpoint's box (change `- [ ]` to `- [x]`) before you begin the next one, add a short sentence after it saying what you actually did, and overwrite — never append to — the card's own `## Working state` section with what this run has established so far, which checks have already passed, what turned out to be a dead end, and where to look first; that section is the first thing a replacement executor reads if this run stops partway through.
 
-3. **Evidence, not narrative.** Write the verbatim output of every check you run into the
-   card's own `## Gate evidence` section — the command you typed and what came back,
-   unedited, never a summary of it. Write every sentence you put into the card as full
-   connected prose, with no hard line breaks inside a paragraph. Never paste a copy of your
-   own diff into the gate evidence: the diff is what version control already keeps exactly,
-   and a card carrying a second copy of it becomes unreadable. Evidence means the output of
-   checks, and nothing else.
+3. **Evidence, not narrative.** On a card that carries no `## Journal` section, write the verbatim output of every check you run into the card's own `## Gate evidence` section — the command you typed and what came back, unedited, never a summary of it. On a card that does carry `## Journal`, that same verbatim output is what you pipe into the `bin/checkpoint-note` call itself, and it lives inside the journal entry instead of a separate section — there is no second place to also write it. Either way, write every sentence you put into the card as full connected prose, with no hard line breaks inside a paragraph. Never paste a copy of your own diff into a journal entry or into the gate evidence: the diff is what version control already keeps exactly, and a card carrying a second copy of it becomes unreadable. Evidence means the output of checks, and nothing else.
 
 4. **Test scope is narrow while you work, and named in full at the end.** Run only
    unit-level checks and the single test you are writing, each named individually. Never run
@@ -41,15 +28,7 @@ leave a clean, legible record of what happened for whoever reads the card next.
    the list of tests and check modes your changes actually affect, each with one sentence
    saying why your change reaches it. A list that just says "everything" is not a list.
 
-5. **Commit each finished checkpoint yourself; never merge or push.** After you finish a
-   checkpoint — its box ticked and its Working state current, exactly as rule 2 already asks
-   — record it by running `bin/checkpoint-commit <CHECKPOINT-ID> "<summary>"` from the root
-   of your own copy of the repository, naming the checkpoint you just finished and a short
-   summary of what it did. That command stages exactly what your copy reports as changed and
-   commits it there without running that copy's own commit hook, so files shared with every
-   other copy are never regenerated from a tree that has already fallen behind. Merging and
-   pushing are never yours to do: they stay the coordinator's acts alone, carried out at
-   acceptance after the work has been read.
+5. **Commit each finished checkpoint yourself; never merge or push.** After you finish a checkpoint — its journal entry appended through `bin/checkpoint-note` on a card that carries `## Journal`, or, on a card that does not, its box ticked and its `## Working state` current, exactly as rule 2 now asks either way — record it by running `bin/checkpoint-commit <CHECKPOINT-ID> "<summary>"` from the root of your own copy of the repository, naming the checkpoint you just finished and a short summary of what it did. That command stages exactly what your copy reports as changed and commits it there without running that copy's own commit hook, so files shared with every other copy are never regenerated from a tree that has already fallen behind. Merging and pushing are never yours to do: they stay the coordinator's acts alone, carried out at acceptance after the work has been read.
 
 6. **Frontend dependencies: `npm ci`, never `npm install`.** Your copy of the repository has
    no installed dependencies for either frontend. When you need them, run `npm ci` inside
@@ -68,24 +47,7 @@ leave a clean, legible record of what happened for whoever reads the card next.
    comes back red, fix what it named and run it again; that repeat is the only one this rule
    allows.
 
-8. **One phase per run — stopping at a phase boundary is mandatory, not a choice you get to
-   make.** If your card declares more than one phase, you build exactly the phase you are
-   currently in and no further: on reaching the end of a declared phase, run that phase's own
-   `*Gate: ...*` check, write its verbatim output into `## Gate evidence` exactly as rule 3
-   already requires, say plainly in your report that you have reached a phase boundary, and
-   stop there. You never begin the first checkpoint of the next phase within this same run,
-   even if you still have turns or budget left — a second phase belongs to a fresh executor,
-   spawned by the coordinator once it has read your report, never to you continuing past the
-   boundary you just reached. A pace-watching hook works independently of this rule, even on
-   a card that declares no phase at all: it may relay you once you cross the card's own relay
-   rate, or the measured default of 20 tool calls per ticked checkpoint, and if it does, that
-   is not a fault either. In every case the fix is the same: finish the checkpoint you are on,
-   bring `## Working state` fully up to date, report that you reached a boundary or were
-   relayed, and stop — the remaining work, whether the next phase or the next checkpoint of a
-   relayed phase, is a fresh executor's, continuing from what you wrote, never a continuation
-   of your own run. The same hook's higher, refuse threshold blocks every further call except
-   an edit to your own card; the fix there is identical — finish and write down where you
-   stopped, not argue with the block.
+8. **One phase per run — stopping at a boundary is the ordinary outcome of a long run, not a fault.** If your card declares more than one phase, you are not obliged to finish all of them: on reaching the end of a declared phase, run that phase's own `*Gate: ...*` check and record its verbatim output exactly as rule 3 now asks — through a `bin/checkpoint-note` call on a card that carries `## Journal`, or into `## Gate evidence` on one that does not — and say plainly in your report that you have reached a phase boundary. You never begin the first checkpoint of the next phase within this same run, even if you still have turns or budget left: a second phase belongs to a fresh executor, spawned by the coordinator once it has read your report. A pace-watching hook works the same way even on a card that declares no phase at all: it may relay you once you cross the card's own relay rate, or the measured default of 20 tool calls per ticked checkpoint, and if it does, that is not a fault either. In either case the fix is the same: finish the checkpoint you are on, bring its own record fully up to date by whichever of the two mechanisms rule 2 says this card uses, report that you reached a boundary or were relayed, and stop — the remaining work is a fresh executor's, continuing from what you wrote, never a continuation of your own run. The same hook's higher, refuse threshold blocks every further call except an edit to your own card; the fix there is identical — finish and write down where you stopped, not argue with the block.
 
 9. **Never spawn, and never edit a blocking gate.** You never spawn another agent on your own
    initiative. Only the coordinator decides to spawn one, and if the work turns out to need
