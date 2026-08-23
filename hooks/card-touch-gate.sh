@@ -21,7 +21,7 @@
 #   THE PACE RULE (HRN-47, new): refuses (at the RELAY tier) or refuses outright (at the
 #   REFUSE tier) once this run's TOTAL tool-call count — which a card touch does NOT reset,
 #   unlike the touch rule's own count — exceeds a budget computed from how much of the card
-#   is actually finished: rate * (ticked checkpoint boxes + 1). It knows nothing about how
+#   is actually finished: rate * (finished checkpoints + 1). It knows nothing about how
 #   recently the card was last touched; it only asks "how many calls has this run made
 #   relative to how much work it has recorded." Two rates apply: RELAY (20 calls per
 #   checkpoint by default) tells the run to finish its current checkpoint, write its
@@ -96,6 +96,23 @@
 #   and consolidate early, while a rewrite is still cheap and still available; whether
 #   that reason is ever surfaced to the run reading it is not something this hook can
 #   prove, only that its own JSON output carries it.
+#
+#   How "finished checkpoints" is counted, and why it is not simply the ticked boxes
+#   (2026-08-23). A card founded before the journal existed records a finished checkpoint by
+#   ticking its box; a card founded on the journal template records it as a '**<ID>** — ...'
+#   entry under '## Journal' and never ticks anything at all. This rule counted only the
+#   boxes, so every journal card read as having finished nothing however much work it had
+#   really done: the budget stayed frozen at its starting allowance and closed on the
+#   executor near the end of every such card. It happened on HRN-230, where the executor
+#   could not add its own last section at all and had to route the text through the one
+#   command still allowed. read_finished_checkpoints() now applies the rule the rest of the
+#   harness already uses (bin/card_phases.py's own finished_checkpoint_ids): the journal
+#   decides whenever it names at least one entry, deduplicated so a checkpoint recorded
+#   twice counts once, and the ticked boxes decide otherwise — not "journal if the heading
+#   exists", because a freshly founded card carries the heading with nothing under it. Both
+#   refusal messages now name which of the two signals they counted, and tell the run to
+#   record its checkpoint the way its own card actually works: bin/checkpoint-note on a
+#   journal card, a ticked box and '## Working state' on a card from before the journal.
 #
 #   A correction to the PACE rule's own arithmetic (HRN-123 phase C, not a sixth rule): the
 #   relay and refuse budgets now each carry a fixed STARTING ALLOWANCE on top of
@@ -473,16 +490,27 @@ TOUCH_RULE_TEMPLATE = (
     "A separate PACE rule on the same card judges that instead.)"
 )
 
+STOP_BY_JOURNAL = (
+    "finish the checkpoint you are on and record it with `bin/checkpoint-note` — one entry "
+    "naming the checkpoint, one line of state, and the verbatim output of whatever check "
+    "closed it. That entry is the working state a replacement executor reads first."
+)
+
+STOP_BY_TICKING = (
+    "finish the checkpoint you are on, tick its box (change '- [ ]' to '- [x]') and add a "
+    "short sentence saying what you actually did, and overwrite the card's own "
+    "'## Working state' section — never append to it — with what this run has established "
+    "so far."
+)
+
 PACE_RELAY_TEMPLATE = (
     "Blocked by card-touch-gate's PACE rule (relay tier): this run has made {count} tool "
     "calls in total against a relay budget of {budget} on {card} — {rate} calls per "
-    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far, plus a one-time starting "
+    "checkpoint x ({ticked}+1) checkpoints finished so far, counted from this card's own "
+    "{source}, plus a one-time starting "
     "allowance of {allowance} calls for this run's own cold start, granted once per run "
     "and never re-granted at a later checkpoint. This is a relay, not a "
-    "failure: finish the checkpoint you are on, tick its box (change '- [ ]' to '- [x]') "
-    "and add a short sentence saying what you actually did, and overwrite the card's own "
-    "'## Working state' section — never append to it — with what this run has "
-    "established so far. Then stop: a fresh executor will read that section and continue "
+    "failure: {how_to_stop} Then stop: a fresh executor will read that section and continue "
     "from there with an empty context, which is exactly what resets this rule's own pace. "
     "Stopping here is the expected outcome, not a fault. Any Edit or Write to {card} "
     "itself is allowed through this message. (This is the PACE rule's relay tier — it "
@@ -494,12 +522,13 @@ PACE_RELAY_TEMPLATE = (
 PACE_REFUSE_TEMPLATE = (
     "Blocked by card-touch-gate's PACE rule (refuse tier): this run has made {count} tool "
     "calls in total against a refuse ceiling of {budget} on {card} — {rate} calls per "
-    "checkpoint x ({ticked}+1) checkpoint boxes ticked so far, plus the same one-time "
+    "checkpoint x ({ticked}+1) checkpoints finished so far, counted from this card's own "
+    "{source}, plus the same one-time "
     "starting allowance of {allowance} calls the relay tier above already carries — well "
     "past its own relay point. Every further call is refused outright, because a run this far above the "
     "ordinary pace is doing something nobody has noticed. The only calls still allowed "
-    "are an Edit or Write to {card} itself: tick the checkpoint you are on and overwrite "
-    "'## Working state' with where this run actually stands, then stop. (This is the "
+    "are an Edit or Write to {card} itself, and the one command that records a finished "
+    "checkpoint: {how_to_stop} Then stop. (This is the "
     "PACE rule's refuse tier, distinct from the TOUCH rule on the same card, which judges "
     "only how long since your last card edit.)"
 )
@@ -697,6 +726,70 @@ def read_ticked_boxes(path):
         if m and m.group(1) in ("x", "X"):
             ticked += 1
     return ticked
+
+
+JOURNAL_HEADING_RE = re.compile(r"^##[ \t]+Journal[ \t]*$", re.M)
+ANY_HEADING_RE = re.compile(r"^#{1,6}[ \t]+\S", re.M)
+JOURNAL_ENTRY_RE = re.compile(r"^\*\*([A-Za-z0-9]+-\d+\.[A-Za-z0-9]+)\*\* — \S", re.M)
+FENCE_LINE_RE = re.compile(r"^(?:```|~~~)")
+
+
+def mask_fenced_lines(text):
+    """The same text with every line inside a fenced code block blanked out, newlines
+    kept, so every offset still names the same position in the original. A card's journal
+    quotes whole files verbatim, and a quoted file may itself carry a line beginning
+    '## ' — without masking, such a quote ends the section it was quoted inside."""
+    out = []
+    inside = False
+    for line in text.split("\n"):
+        if FENCE_LINE_RE.match(line):
+            inside = not inside
+            out.append(" " * len(line))
+            continue
+        out.append(" " * len(line) if inside else line)
+    return "\n".join(out)
+
+
+def read_finished_checkpoints(path):
+    """(count, source) — how many checkpoints the card at `path` counts as finished right
+    now, and which signal that number came from, read live off disk on every call.
+
+    A card founded before the journal existed records a finished checkpoint by ticking its
+    box; a card founded on the journal template records it as a '**<ID>** — ...' entry
+    under '## Journal' and never ticks anything at all. Counting only the boxes therefore
+    read every journal card as having finished nothing, however much work it had really
+    done, so this rule's budget stayed frozen at its starting allowance and closed on the
+    executor near the end of every such card. The rule here is the one the rest of the
+    harness already uses (bin/card_phases.py's own finished_checkpoint_ids): the journal
+    decides whenever it names at least one entry, and the ticked boxes decide otherwise —
+    not "journal if the heading exists", because a freshly founded card carries the heading
+    with nothing under it and the boxes are the only signal it has until its first entry.
+    Identifiers are deduplicated, so a checkpoint recorded twice counts once.
+
+    Returns (None, None), never raises, when the file cannot be opened."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None, None
+
+    masked = mask_fenced_lines(text)
+    heading = JOURNAL_HEADING_RE.search(masked)
+    if heading is not None:
+        following = ANY_HEADING_RE.search(masked, heading.end())
+        end = following.start() if following else len(masked)
+        journal = text[heading.end():end]
+        seen = []
+        for cid in JOURNAL_ENTRY_RE.findall(journal):
+            if cid not in seen:
+                seen.append(cid)
+        if seen:
+            return len(seen), "journal entries"
+
+    ticked = read_ticked_boxes(path)
+    if ticked is None:
+        return None, None
+    return ticked, "ticked checkpoint boxes"
 
 
 def read_card_rate(path):
@@ -945,8 +1038,10 @@ try:
     # card's on-disk file cannot be found or read. ---
     card_path = resolve_card_path(state["card"])
     if card_path is not None:
-        ticked = read_ticked_boxes(card_path)
+        ticked, finished_source = read_finished_checkpoints(card_path)
         if ticked is not None:
+            how_to_stop = (STOP_BY_JOURNAL if finished_source == "journal entries"
+                           else STOP_BY_TICKING)
             relay_rate = read_card_rate(card_path)
             if relay_rate is None:
                 relay_rate = DEFAULT_RELAY_RATE
@@ -964,12 +1059,14 @@ try:
                 print(deny_json(PACE_REFUSE_TEMPLATE.format(
                     count=total_new_count, budget=fmt_num(budget_refuse),
                     card=state["card"], rate=fmt_num(refuse_rate), ticked=ticked,
+                    source=finished_source, how_to_stop=how_to_stop,
                     allowance=fmt_num(START_ALLOWANCE))))
                 sys.exit(0)
             if total_new_count > budget_relay:
                 print(deny_json(PACE_RELAY_TEMPLATE.format(
                     count=total_new_count, budget=fmt_num(budget_relay),
                     card=state["card"], rate=fmt_num(relay_rate), ticked=ticked,
+                    source=finished_source, how_to_stop=how_to_stop,
                     allowance=fmt_num(START_ALLOWANCE))))
                 sys.exit(0)
 

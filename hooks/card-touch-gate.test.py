@@ -92,16 +92,24 @@ def fixture_project(cards=None):
     root = tempfile.mkdtemp(prefix="card-touch-gate-project-")
     for rel_path, spec in (cards or {}).items():
         write_fixture_card(root, rel_path, spec.get("ticked", 0),
-                            unticked=spec.get("unticked", 1), rate=spec.get("rate"))
+                            unticked=spec.get("unticked", 1), rate=spec.get("rate"),
+                            journal=spec.get("journal"))
     return root
 
 
-def write_fixture_card(root, rel_path, ticked, unticked=1, rate=None):
+def write_fixture_card(root, rel_path, ticked, unticked=1, rate=None, journal=None):
     """Write (or overwrite) a minimal, real card file at root/rel_path with `ticked` ticked
     checkpoint lines and `unticked` unticked ones, optionally carrying a `rate:` frontmatter
     field. Used both by fixture_project() at scenario setup and, on its own, mid-scenario to
     simulate an executor ticking a box — so a test can prove the PACE rule's budget widens
-    live off the same file, on the very next call, with no restart of anything."""
+    live off the same file, on the very next call, with no restart of anything.
+
+    `journal` writes the card in the shape a card founded on the journal template actually
+    takes: None writes no '## Journal' section at all (a card from before the journal
+    existed), and an integer writes the heading followed by that many '**<ID>** — ...'
+    entries, which is how such a card records a finished checkpoint. journal=0 is the
+    freshly founded case — the heading present with nothing under it — where the ticked
+    boxes must still be what the PACE rule counts."""
     abs_path = os.path.join(root, rel_path)
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     lines = ["---", "id: ZZZ-1"]
@@ -113,6 +121,13 @@ def write_fixture_card(root, rel_path, ticked, unticked=1, rate=None):
         lines.append(f"- [x] ZZZ-1.{i + 1} — done")
     for i in range(unticked):
         lines.append(f"- [ ] ZZZ-1.{ticked + i + 1} — todo")
+    if journal is not None:
+        lines.append("")
+        lines.append("## Journal")
+        lines.append("")
+        for i in range(journal):
+            lines.append(f"**ZZZ-1.{i + 1}** — finished, recorded by bin/checkpoint-note")
+            lines.append("")
     with open(abs_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return abs_path
@@ -625,6 +640,76 @@ try:
         check("deny", "call 113 crosses the ticked=1 budget (112) — proof the allowance "
                       "was spent only once, not re-granted at this second checkpoint",
               "Bash", {"command": "echo x"}, agent_id="agentWiden", state_dir=d,
+              transcript_path=t, project_dir=proj, reason_contains="PACE rule (relay")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(proj, ignore_errors=True)
+        os.remove(t)
+
+    # --- a card founded on the journal template records a finished checkpoint as a
+    # '**<ID>** — ...' entry under '## Journal' and never ticks a box at all. Counting only
+    # the boxes read every such card as having finished nothing however much work it had
+    # really done, so this rule's budget stayed frozen at its starting allowance and closed
+    # on the executor near the end of every journal card — which is exactly what happened on
+    # HRN-230, where the executor could not add its last section at all. These four checks
+    # prove the three halves of the repair: the heading alone still falls back to the boxes,
+    # a real entry widens the budget by exactly `rate` the way a ticked box does, and the
+    # refusal says which of the two signals it counted ---
+    d = fresh_dir()
+    proj = fixture_project({CARD: {"ticked": 0, "unticked": 3, "rate": 5, "journal": 0}})
+    t = fake_transcript([{"agentId": "agentJournal", "prompt": f"Implement {CARD}"}])
+    try:
+        check("allow", "establish a journal card whose journal is still empty (rate 5)",
+              "Read", {"file_path": "/tmp/x"}, agent_id="agentJournal", state_dir=d,
+              transcript_path=t, project_dir=proj)
+
+        seed_pace_state(d, "agentJournal", CARD, total_count=106)
+        check("allow", "call 107 — the heading alone names no entry, so the boxes still "
+                       "decide: 5*(0+1)+102=107", "Bash", {"command": "echo x"},
+              agent_id="agentJournal", state_dir=d, transcript_path=t, project_dir=proj)
+        check("deny", "call 108 crosses that budget, and the refusal says it counted the "
+                      "ticked boxes", "Bash", {"command": "echo x"},
+              agent_id="agentJournal", state_dir=d, transcript_path=t, project_dir=proj,
+              reason_contains="ticked checkpoint boxes")
+
+        # the executor records one finished checkpoint the only way a journal card can:
+        # an entry, with every box still unticked
+        write_fixture_card(proj, CARD, ticked=0, unticked=3, rate=5, journal=1)
+
+        check("allow", "one journal entry widens the live budget to 5*(1+1)+102=112 with "
+                       "not a single box ticked — the whole of the defect this repairs",
+              "Bash", {"command": "echo x"}, agent_id="agentJournal", state_dir=d,
+              transcript_path=t, project_dir=proj)
+
+        seed_pace_state(d, "agentJournal", CARD, total_count=112)
+        check("deny", "call 113 crosses the journal budget of 112, and the refusal now "
+                      "says it counted the journal entries and tells the executor to use "
+                      "bin/checkpoint-note rather than to tick a box that does not exist",
+              "Bash", {"command": "echo x"}, agent_id="agentJournal", state_dir=d,
+              transcript_path=t, project_dir=proj, reason_contains="journal entries")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(proj, ignore_errors=True)
+        os.remove(t)
+
+    # --- the same journal card, with one checkpoint recorded twice — a retried
+    # bin/checkpoint-note call, which really happens — must count once, never twice ---
+    d = fresh_dir()
+    proj = fixture_project({CARD: {"ticked": 0, "unticked": 3, "rate": 5, "journal": 1}})
+    t = fake_transcript([{"agentId": "agentDupe", "prompt": f"Implement {CARD}"}])
+    try:
+        check("allow", "establish a journal card carrying one entry (budget 112)", "Read",
+              {"file_path": "/tmp/x"}, agent_id="agentDupe", state_dir=d,
+              transcript_path=t, project_dir=proj)
+
+        card_file = os.path.join(proj, CARD)
+        with open(card_file, "a", encoding="utf-8") as f:
+            f.write("**ZZZ-1.1** — the same checkpoint recorded a second time\n\n")
+
+        seed_pace_state(d, "agentDupe", CARD, total_count=112)
+        check("deny", "call 113 is still refused — the duplicate entry did not buy a "
+                      "second checkpoint's worth of budget",
+              "Bash", {"command": "echo x"}, agent_id="agentDupe", state_dir=d,
               transcript_path=t, project_dir=proj, reason_contains="PACE rule (relay")
     finally:
         shutil.rmtree(d, ignore_errors=True)
