@@ -20,6 +20,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 
 - [Maintainability never sacrificed](feedback-maintainability-never-sacrificed.md) — Alex's standing order: clarity beats everything, contest even his own instructions when they would trade it away
 - [Check the checker](feedback-check-the-checker.md) — read a gate's criteria before writing against it, prove a safeguard actually fires before trusting it, and never route around a denial by switching tool
+- [Never pipe a checking tool through tail](never-pipe-a-checking-tool-through-tail.md) — `| tail` cuts the verdict and replaces the exit code with the pager's; redirect to a file and read `$?`
 - [Verify the executor's model](feedback-verify-executor-model.md) — reuse across phases is permitted again since the vendor fixed the model-drift defect on 2026-08-01, but an agent's self-report about its own model still proves nothing; read the transcript's model field when it matters, never ask the agent
 - [One task per session](feedback-one-task-per-session.md) — one task per session so the conversation stays disposable and `/rewind` is safe; parallel work in a separate session cut by `bin/session-start` (`/new`); and cut the number of tool calls, since each one re-sends the whole context
 - [Pace with visible progress](feedback-pacing-visible-progress.md) — don't burn 8 minutes in silent thinking then emit a one-liner; act in short visible steps, don't re-plan from scratch each async message
