@@ -587,16 +587,37 @@ def establish_card(transcript_path, agent_id):
 
 
 def touches_card(tool_name, tool_input, card_token):
-    """True when this call is an Edit or Write whose file_path names the same card this
-    agent has been tracked against, compared on the identifying part of each path alone, so
-    that the shared checkout's copy and an executor's own copy of one card count as the
-    same card."""
-    if tool_name not in ("Edit", "Write"):
+    """True when this call is contact with the run's own card. Two shapes count: an Edit
+    or Write whose file_path names the same card this agent has been tracked against,
+    compared on the identifying part of each path alone, so that the shared checkout's
+    copy and an executor's own copy of one card count as the same card (unchanged from
+    before HRN-223); or a Bash call that runs `bin/checkpoint-note` naming that same card
+    as its own first argument — the one shell call HRN-221 gives an executor to record a
+    finished checkpoint, which appends to the card through an ordinary file write and
+    issues no Edit or Write tool call at all, so this rule could never see it before
+    HRN-223. Only checkpoint-note is recognised this way: a shell call that merely
+    mentions the card's id somewhere in a longer command — reading it, grepping it,
+    printing it — is not contact, and still counts toward the TOUCH rule's own ceiling."""
+    if tool_name in ("Edit", "Write"):
+        fp = tool_input.get("file_path")
+        if not isinstance(fp, str) or not fp:
+            return False
+        return brief_reader.canonical_card(fp) == brief_reader.canonical_card(card_token)
+    if tool_name == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return False
+        tokens = command.strip().split()
+        for i, tok in enumerate(tokens):
+            if tok.rsplit("/", 1)[-1] == "checkpoint-note":
+                if i + 1 >= len(tokens):
+                    return False
+                arg_card = tokens[i + 1].strip("'\"")
+                target = brief_reader.canonical_card(card_token)
+                m = re.search(r'([A-Za-z]+-\d+)', os.path.basename(target))
+                return bool(m) and arg_card.upper() == m.group(1).upper()
         return False
-    fp = tool_input.get("file_path")
-    if not isinstance(fp, str) or not fp:
-        return False
-    return brief_reader.canonical_card(fp) == brief_reader.canonical_card(card_token)
+    return False
 
 
 def coord_exempt(tool_name, tool_input):
