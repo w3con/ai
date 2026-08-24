@@ -20,15 +20,6 @@
         ]
       },
       {
-        "matcher": "Task|Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "__HOME__/.claude/hooks/plan-gate.sh"
-          }
-        ]
-      },
-      {
         "matcher": "Bash",
         "hooks": [
           {
@@ -52,15 +43,6 @@
           {
             "type": "command",
             "command": "__HOME__/.claude/hooks/coordinator-source-gate.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "__HOME__/.claude/hooks/card-touch-gate.sh"
           }
         ]
       }
