@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'REMINDER on writing style for THIS reply: write in full, connected sentences and developed prose. Never use telegraphic or clipped-fragment style, dropped subjects, or headline-style bullets. Explain terms plainly. This applies to chat answers exactly as much as to documents. Alex has demanded this many times — treat any urge to compress as the cue to slow down and spell it out.'"
+            "command": "echo 'REMINDER on writing style for THIS reply. Two tests, applied to every sentence at once. COMPREHENSION: each point is a complete sentence with a subject and a verb, understandable by a reader who does not hold this conversation in their head — never telegraphic fragments, dropped subjects, or headline bullets. RELEVANCE: in chat, give the conclusion only — no reasoning, no citations, no statute or article numbers, no background, no caveats, no alternatives, unless Alex asked for them; if a sentence does not change what he decides or does, delete it. Depth belongs in documents, not in chat. Writing more is your default failure; writing a telegram is the failure you commit when overcorrecting.'"
           }
         ]
       }
