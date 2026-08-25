@@ -26,7 +26,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Pace with visible progress](feedback-pacing-visible-progress.md) — don't burn 8 minutes in silent thinking then emit a one-liner; act in short visible steps, don't re-plan from scratch each async message
 - [Caffeinate before long runs](feedback-caffeinate-before-long-runs.md) — start caffeinate when you hand work over, not after the first agent dies; a sleeping Mac kills every executor at once
 - [Critic and research sub-agents](feedback_reviewer_agent.md) — whether you may spawn one at all: only on Alex's explicit word, never automatically
-- [Spawn subagents visibly](feedback-spawn-subagents-visibly.md) — ALWAYS foreground, never background: name the agent and its task, raise it through the visible Agent tool, never a wrapper or a detached/background run
+- [Spawn subagents visibly](feedback-spawn-subagents-visibly.md) — executor subagents ALWAYS foreground, never background/wrapper; read-only agents (critic, checker) are not covered
 - [See a problem, found a card](feedback-see-a-problem-found-a-card.md) — found it the moment you notice it and never merely propose it; but a small reversible machinery repair inside work you are already doing is fixed now and recorded in one line, not carded
 - [Never report your own problems](feedback-never-report-your-own-problems.md) — a problem you caused or a leftover you could finish is yours to solve, record and card up; never hand it back as a question
 - [Resolve before reporting](feedback-resolve-before-reporting.md) — a blocked commit, a dirty tree, a missing tool is yours to fix; never hand Alex an obstacle you have not tried to clear
@@ -38,6 +38,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Commit periodically](feedback-commit-periodically.md) — land work at each milestone and remind Alex, don't let uncommitted changes pile up for hours
 - [No hard line-wraps in prose](feedback-no-hard-line-wraps.md) — paragraph = one physical line; Alex's viewers render wrap points as broken lines; put the rule into executor prompts too
 - [Tool files carry bare rules](feedback-tool-files-bare-rules.md) — agent/skill/hook files state what to do; no provenance citations, no rationale essays, no what-it-does-NOT-do paragraphs
+- [Approve the letter before writing it down](feedback-approve-letter-before-writing-it-down.md) — a letter lives in the chat message until Alex approves the text; only then does it reach the drafts page, the card and the tracker
 - [Record only confirmed decisions](record-only-confirmed-decisions.md) — proposals stay in chat; nothing lands in a durable record until Alex confirms it
 - [Questions first, silence, one report](feedback-questions-first-silence-then-report.md) — ask everything before the first edit, build without a word, hand over one report with the findings, the decisions taken alone and the mistakes with their fixes
 - [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
@@ -70,3 +71,4 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [A clean merge is not agreement](feedback-clean-merge-is-not-agreement.md) — no conflict only means the two sides edited different files; compare what each side's work produces
 - [Python on the SSD machine](machine-ssd-python-path.md) — prepending Homebrew to PATH swaps in an interpreter without PyYAML and fakes a regression.
 - [No tests for the cockpit](feedback-no-tests-for-the-cockpit.md) — Validité app only: the owner works that screen himself; fix what is broken, never add browser checks around it unasked
+- [Reply in Russian](feedback-reply-in-russian.md) — chat answers to Alex go in Russian by default; letters to third parties and commit messages are separate exceptions
