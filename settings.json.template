@@ -73,6 +73,10 @@
           {
             "type": "command",
             "command": "__HOME__/.claude/hooks/git-sync-notice.sh"
+          },
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/skill-mcp-refs.py"
           }
         ]
       }

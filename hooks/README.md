@@ -14,3 +14,7 @@ the live path so no reader ever sees a partially written file.
 last commit or that fails to parse, and exits non-zero when it finds one.
 
 `bin/hook-install -h` prints the full usage for both.
+
+`bin/hook-install` replaces a hook that already exists; it refuses a name that has no live
+file yet, so a brand-new hook is first copied into place by hand and then installed through
+the script, which is what proves its test suite and performs the atomic rename.

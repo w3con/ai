@@ -30,6 +30,7 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [See a problem, found a card](feedback-see-a-problem-found-a-card.md) — found it the moment you notice it and never merely propose it; but a small reversible machinery repair inside work you are already doing is fixed now and recorded in one line, not carded
 - [Never report your own problems](feedback-never-report-your-own-problems.md) — a problem you caused or a leftover you could finish is yours to solve, record and card up; never hand it back as a question
 - [Resolve before reporting](feedback-resolve-before-reporting.md) — a blocked commit, a dirty tree, a missing tool is yours to fix; never hand Alex an obstacle you have not tried to clear
+- [Report broken tooling at once](feedback-report-broken-tooling.md) — a script, hook, skill, command or server that is missing or misconfigured gets one line in the same answer, even when a fallback quietly produced the result
 - [Install what you need](feedback-install-what-you-need.md) — a missing tool gets installed, not reported and waited on; destructive or outward-facing actions still need his word
 - [Test runs must not reach the user](feedback-test-runs-must-not-reach-the-user.md) — make sending opt-in behind a flag before an executor iterates on anything that delivers to a real person; kill a loose agent, don't message it
 - [Reusable tooling](feedback_reusable_tooling.md) — commit the helper once as a documented script; a script decides what happens, a skill decides when to call it

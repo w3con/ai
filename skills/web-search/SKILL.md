@@ -43,6 +43,22 @@ own understanding, but do not show them to the user; they are not part of the an
   query at all). This is a mistake in how you invoked the script, not an absence of
   search results. Fix the call and retry; do not fall through to `WebSearch` on a `2`.
 
+**Step 3 — separate a search that found nothing from a tool that is broken, and report the
+second one.**
+
+A provider that is alive and simply returned no result for this query, or a network hiccup
+the script retried past, is ordinary. The ladder exists for exactly that, and there is
+nothing to tell anyone: return the results and stop.
+
+A tool that is absent or misconfigured is a different event, and it never heals itself — it
+will fire again on every future call, silently, for as long as nobody is told. That covers:
+the script cannot be found or is not executable; a provider is skipped because its key is
+not set at all; every provider fails, so the run ends on exit code `3`; the script dies on
+an exit code this file does not describe. In each of those cases finish the search by
+whatever route is left, and then say, in one plain line in your own answer, what is broken
+and what it did — name the script or the provider, and say that the result came by a
+fallback route. Never leave it out because an answer came back anyway.
+
 **Useful flags**, appended after the query if needed:
 - `--count N` — how many results to request (default 5).
 - `--no-cache` — bypass the 15-minute cache when you specifically need a fresh lookup
