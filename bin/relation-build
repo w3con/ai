@@ -223,6 +223,41 @@ def load_env() -> dict:
     return env
 
 
+def extract_json_object(raw: str) -> dict | None:
+    """Pull the first complete JSON object out of a model reply.
+
+    The extraction prompt asks for bare JSON and the model usually obliges, but
+    not always: it sometimes wraps the object in a ``` fence, and it sometimes
+    adds a sentence before or after it. json.loads() rejects the whole reply in
+    that case with "Extra data", which threw away a perfectly good object and
+    left the document's ai: block stale — observed on 2026-08-26, where the
+    object ended at character 401 and the reply carried on past it.
+
+    Decoding only as far as the first object extends keeps the answer and
+    ignores the packaging around it.
+    """
+    text = raw.strip()
+
+    # Drop a leading fence line (``` or ```json) and everything from the
+    # closing fence onwards, if both are present.
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        closing = text.rfind("```")
+        if closing != -1:
+            text = text[:closing]
+
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            start = text.find("{", start + 1)
+            continue
+        return obj if isinstance(obj, dict) else None
+    return None
+
+
 def call_claude(env: dict, content: str) -> dict | None:
     """Call Sonnet 4.6 via the CLI, return parsed JSON or None."""
     model = "claude-sonnet-4-6"
@@ -240,16 +275,13 @@ def call_claude(env: dict, content: str) -> dict | None:
         if result.returncode != 0:
             log.warning(f"Claude error: {result.stderr[:200]}")
             return None
-        raw = result.stdout.strip()
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:])
-            if raw.endswith("```"):
-                raw = raw[:-3].strip()
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        log.warning(f"JSON parse error: {e} | raw[:200]: {result.stdout[:200]}")
-        return None
+        parsed = extract_json_object(result.stdout)
+        if parsed is None:
+            log.warning(
+                "no JSON object in the model reply | raw[:200]: "
+                f"{result.stdout[:200]}")
+            return None
+        return parsed
     except subprocess.TimeoutExpired:
         log.warning("Claude CLI timeout (120s)")
         return None
