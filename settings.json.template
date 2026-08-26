@@ -1,8 +1,11 @@
 {
   "_comment": "TEMPLATE — bootstrap.sh renders this into ~/.claude/settings.json, replacing __HOME__ with the running machine's home directory. Never edit ~/.claude/settings.json by hand: the next bootstrap overwrites it. Edit this file, commit it, and re-run bootstrap on both machines; bootstrap.sh stamps a SHA-256 digest of the rendered bytes on every clean run, so no separate version number needs to be raised by hand.",
   "permissions": {
-    "allow": [],
-    "defaultMode": "default"
+    "allow": [
+      "WebSearch",
+      "WebFetch",
+      "Bash(__HOME__/Dev/ai/bin/websearch:*)"
+    ]
   },
   "model": "opus[1m]",
   "hooks": {
@@ -89,5 +92,6 @@
     "ralph-loop@claude-plugins-official": false
   },
   "theme": "auto",
-  "preferredNotifChannel": "kitty"
+  "preferredNotifChannel": "kitty",
+  "skipAutoPermissionPrompt": true
 }
