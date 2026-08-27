@@ -18,6 +18,7 @@ frontmatter and says so in its description. That is the whole mechanism; no seco
 The core non-negotiable rules — how to write, how to decide and act, and the build and scoping
 discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store holds the rest.
 
+- [Do nothing unasked](feedback-do-nothing-unasked.md) — Alex's standing order: do only what was explicitly requested, name anything else and ask before doing it, and touch nothing outside the request
 - [Maintainability never sacrificed](feedback-maintainability-never-sacrificed.md) — Alex's standing order: clarity beats everything, contest even his own instructions when they would trade it away
 - [Check the checker](feedback-check-the-checker.md) — read a gate's criteria before writing against it, prove a safeguard actually fires before trusting it, and never route around a denial by switching tool
 - [Never pipe a checking tool through tail](never-pipe-a-checking-tool-through-tail.md) — `| tail` cuts the verdict and replaces the exit code with the pager's; redirect to a file and read `$?`
