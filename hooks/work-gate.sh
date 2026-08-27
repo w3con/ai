@@ -5,9 +5,11 @@
 # break by accident, because the tool call itself is refused.
 #
 # This file currently builds phases HRN-2.A (the fitness guard and caller identity),
-# HRN-2.B (one-file-one-author and the log-write ceiling) and HRN-2.D (the phase boundary)
-# — not HRN-2.C (the context/spend/pace ceilings and the file-edit brake), built by a
-# separate run.
+# HRN-2.B (one-file-one-author and the log-write ceiling), HRN-2.D/F (the phase boundary,
+# judged against the run's own named phase) and HRN-2.E's own rewrite of closed_steps_for_phase
+# to read a step's closure by its permanent name rather than only the older free-form "шаг N"
+# convention — not HRN-2.C (the context/spend/pace ceilings and the file-edit brake), built by
+# a separate run.
 #
 # WHAT THIS FILE DOES, IN THE ORDER IT DOES IT
 #
@@ -401,13 +403,19 @@ def parse_plan_phases(plan_text, card_id):
     return phases
 
 STEP_CLOSED_RE_CACHE = {}
+NAMED_STEP_CLOSED_RE_CACHE = {}
 
 def closed_steps_for_phase(log_text, phase_id):
-    """The step numbers log.md names closed for one phase — every heading of the shape
-    "## <phase_id>, шаг <N>" or "…, шаг <N>–<M>" (en dash), the convention HRN-2.A's own
-    executor established (ai/harness/work-system/HRN-2_.../log.md). Matched per line, never
-    across a newline, so a heading with no dash-introduced title after the step numbers
-    (nothing on the line but the numbers) is still read correctly."""
+    """The step numbers log.md names closed for one phase, read by name rather than by a
+    step's position in plan.md's own list (HRN-2.E) — two independent forms of heading are
+    matched and their results combined:
+      - the mechanical form bin/work-log itself prints, "## <phase_id>.<N> — <state>": the
+        step's own permanent name (bin/work-plan's own stamp), matched literally.
+      - the older, hand-typed form HRN-2.A's own executor established before bin/work-log
+        existed, "## <phase_id>, шаг <N>" or "…, шаг <N>–<M>" (en dash) — still read
+        unchanged, so a log written before this command existed keeps working.
+    Both are matched per line, never across a newline, so a heading with nothing after the
+    step numbers is still read correctly."""
     pattern = STEP_CLOSED_RE_CACHE.get(phase_id)
     if pattern is None:
         pattern = re.compile(
@@ -415,6 +423,13 @@ def closed_steps_for_phase(log_text, phase_id):
             re.MULTILINE,
         )
         STEP_CLOSED_RE_CACHE[phase_id] = pattern
+    named_pattern = NAMED_STEP_CLOSED_RE_CACHE.get(phase_id)
+    if named_pattern is None:
+        named_pattern = re.compile(
+            r'^#{1,6}\s*' + re.escape(phase_id) + r'\.(\d+)\b',
+            re.MULTILINE,
+        )
+        NAMED_STEP_CLOSED_RE_CACHE[phase_id] = named_pattern
     closed = set()
     for m in pattern.finditer(log_text):
         for token in re.split(r'[,\s]+', m.group(1).strip()):
@@ -426,6 +441,8 @@ def closed_steps_for_phase(log_text, phase_id):
                     closed.update(range(int(parts[0]), int(parts[1]) + 1))
             elif token.isdigit():
                 closed.add(int(token))
+    for m in named_pattern.finditer(log_text):
+        closed.add(int(m.group(1)))
     return closed
 
 def total_steps_for_phase(plan_text, card_id, phase_id):
