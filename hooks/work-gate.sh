@@ -4,9 +4,9 @@
 # validite-app repository). A rule that used to live only in prose becomes a rule nobody can
 # break by accident, because the tool call itself is refused.
 #
-# This file currently builds phase HRN-2.A alone — the fitness guard and caller identity —
-# not the later phases (one-file-one-author, run ceilings) that HRN-2.B and HRN-2.C add on
-# top of it in later runs.
+# This file currently builds phases HRN-2.A (the fitness guard and caller identity) and
+# HRN-2.D (the phase boundary) — not the phases HRN-2.B (one-file-one-author) and HRN-2.C
+# (run ceilings) that land in between, built by a separate run each.
 #
 # WHAT THIS FILE DOES, IN THE ORDER IT DOES IT
 #
@@ -54,19 +54,55 @@
 #     that runs bin/work-agent-brief itself, since that is how the very first brief gets
 #     written at all.
 #
+#  5. PHASE BOUNDARY (HRN-2.D): applies only to a subagent whose brief names role
+#     "executor". This hook works out the card's own current phase itself, from two files
+#     it reads directly — never from the executor's own word or report
+#     (ai/harness/system/project.md, "Хук считает границу сам, по двум файлам карточки. Ни
+#     на слово исполнителя, ни на его отчёт хук при этом не смотрит."):
+#       - plan.md's own "## Шаги" section, split into phases by its "### <ID>.<letter> —
+#         …" subheadings (a plan not split into phases at all is one implicit phase named
+#         by the bare card id); each phase's steps are its own "- " bullet lines, in order,
+#         numbered 1..N.
+#       - log.md's own headings of the shape "## <ID>.<letter>, шаг <N>" or "…, шаг
+#         <N>–<M>" (en dash), the convention HRN-2.A's own executor already established and
+#         used on this very card's log (ai/harness/work-system/HRN-2_.../log.md) — the
+#         numbers named there are read as that phase's closed steps.
+#     The current phase is the first phase (in plan.md's own order) that still has at least
+#     one step not named closed in log.md. Once every phase's steps are all closed, the
+#     phase boundary is reached: every further call from that executor is refused except a
+#     Write/Edit of that card's own log.md, with the words «допиши передачу и остановись»
+#     — the same shape as the context-size ceiling, so a fresh executor can pick up the
+#     next phase from a handoff written into the log. While the current phase still has an
+#     open step, every call passes with no inspection at all ("Пропускать всякий вызов, пока
+#     в текущей фазе остаётся хоть один незакрытый шаг"). A card whose plan.md cannot be
+#     read, or that carries no phase with any step at all, is not yet in a state this rule
+#     can judge, so it is skipped rather than denied — the same fail-open choice
+#     bin/work-agent-brief's own malformed-command case already makes in rule 4 above.
+#
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
 # already uses for its own per-agent state): verified-hash.txt (rule 2, written by
 # bin/work-refusals, read only here) and briefs/agent-<agent_id>.json /
-# briefs/session-<session_id>.json (rule 4).
+# briefs/session-<session_id>.json (rule 4). Rule 5 keeps no state of its own — it re-reads
+# plan.md and log.md fresh on every call.
 #
 # TEST OVERRIDES, read only by bin/work-refusals, never present in a real deployed session:
 #   WORK_GATE_STATE_DIR   overrides the whole state tree above.
+#   WORK_GATE_WORK_ROOT   overrides the work root rule 5 resolves a card id against (the
+#                         directory holding the "harness" and "timeline" kind folders,
+#                         normally found via `git worktree list --porcelain`'s own first
+#                         entry — the shared checkout's path, since a card's folder always
+#                         lives there and never inside a linked worktree's own copy).
 #
 # Fail-closed: unparseable stdin denies.
 
 STDIN_DATA="$(cat)"
-SELF_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+# Passed to Python as-is; Python resolves it to the real underlying file with
+# os.path.realpath() — see the comment on self_path below for why plain string handling
+# here is not enough (~/.claude/hooks/ is itself a symlinked directory, and neither `cd
+# "$(dirname ...)" && pwd` nor a hand-rolled `[ -L ]` loop over just the final path
+# component follows a symlinked *directory* component, only a symlinked final file).
+SELF_PATH="${BASH_SOURCE[0]}"
 
 exec python3 - "$SELF_PATH" "$STDIN_DATA" <<'PYEOF'
 import hashlib
@@ -75,7 +111,15 @@ import os
 import re
 import sys
 
-self_path  = sys.argv[1]
+# realpath(), not just the literal argv value: ~/.claude/hooks/ is itself a symlinked
+# directory (bin/bootstrap.sh points it at this file's real repository path), and Claude
+# Code always invokes this hook through that deployed, symlinked path — never through the
+# real repository path directly. Without resolving through the directory symlink here, the
+# self-edit exemption below (which compares this value against the file_path an Edit/Write
+# call names, always the real repository path) would never match a live invocation, only
+# bin/work-refusals's own synthetic cases, which run bash directly against the real path
+# and so never exercised the symlink at all (found and fixed in HRN-2.D).
+self_path  = os.path.realpath(sys.argv[1])
 stdin_data = sys.argv[2]
 
 ALLOW_JSON = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
@@ -153,7 +197,7 @@ def stored_hash():
 is_refusals_run = tool_name == "Bash" and bash_names(command_of(tool_input), "work-refusals")
 is_gate_self_edit = tool_name in ("Write", "Edit") and \
     file_path_of(tool_input) is not None and \
-    os.path.abspath(file_path_of(tool_input)) == os.path.abspath(self_path)
+    os.path.realpath(file_path_of(tool_input)) == self_path
 is_log_write = tool_name in ("Write", "Edit") and \
     file_path_of(tool_input) is not None and \
     LOG_FILE_RE.search(file_path_of(tool_input).replace(os.sep, "/")) is not None
@@ -237,6 +281,186 @@ if brief is None:
         "is valid JSON naming a role and a card). «Нет файла — нет запуска.»" %
         (agent_brief_path(agent_id), session_brief_path(session_id))
     )
+
+# --- 5. PHASE BOUNDARY: an executor whose current phase has no open steps left is refused
+# every call except a Write/Edit of its own card's log.md (HRN-2.D) --------------------
+
+# The two kinds of work a card can belong to, each its own folder directly under the work
+# root — identical to bin/work-plan's own KINDS, kept as its own small copy here rather
+# than imported, the same way this repository's other git-plumbing helpers each carry their
+# own copy (bin/session-start's own repo_root()/primary_worktree_path() comments name the
+# same convention).
+CARD_KINDS = ("harness", "timeline")
+
+def find_work_root():
+    """The directory holding the "harness" and "timeline" kind folders. A card's own folder
+    always lives in the shared checkout, never inside a linked worktree's own copy
+    (ai/harness/system/project.md, "Папка карточки всегда живёт в общем каталоге, а не в
+    копии"), so this is resolved from the shared checkout's own path — `git worktree
+    list --porcelain`'s first entry, readable from inside any linked worktree too — not
+    from whatever repository copy this call's own cwd happens to sit in. Returns None when
+    that cannot be resolved (cwd is not inside a git working tree at all, or git itself is
+    unavailable), in which case the phase-boundary rule below is skipped rather than
+    denied."""
+    override = os.environ.get("WORK_GATE_WORK_ROOT")
+    if override:
+        return override
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            return os.path.join(line[len("worktree "):].strip(), "ai")
+    return None
+
+def epic_dirs(work_root):
+    found = []
+    for kind in CARD_KINDS:
+        base = os.path.join(work_root, kind)
+        if not os.path.isdir(base):
+            continue
+        for epic_name in sorted(os.listdir(base)):
+            epic_dir = os.path.join(base, epic_name)
+            if os.path.isdir(epic_dir):
+                found.append(epic_dir)
+    return found
+
+def find_card_dir(work_root, card_id):
+    for epic_dir in epic_dirs(work_root):
+        for card_name in sorted(os.listdir(epic_dir)):
+            if card_name == card_id or card_name.startswith(card_id + "_"):
+                card_dir = os.path.join(epic_dir, card_name)
+                if os.path.isdir(card_dir):
+                    return card_dir
+    return None
+
+BULLET_RE = re.compile(r'^-\s+\S')
+PHASE_HEADING_RE = re.compile(r'^###\s+(\S+)')
+
+def find_section(text, heading_name):
+    """The lines of a `## <heading_name>` section, up to the next `## ` heading (never a
+    `### ` one, which `^##\\s+\\S` cannot match — the char right after the two hashes of a
+    `### ` line is a third hash, not whitespace) or end of file. Empty string when the
+    heading is not present at all."""
+    lines = text.split("\n")
+    start = None
+    end = len(lines)
+    heading_re = re.compile(r'^##\s+' + re.escape(heading_name) + r'\s*$')
+    next_re = re.compile(r'^##\s+\S')
+    for i, line in enumerate(lines):
+        if start is None and heading_re.match(line):
+            start = i + 1
+            continue
+        if start is not None and next_re.match(line):
+            end = i
+            break
+    if start is None:
+        return ""
+    return "\n".join(lines[start:end])
+
+def parse_plan_phases(plan_text, card_id):
+    """Every phase in plan.md's own "## Шаги" section, in the order the plan itself lists
+    them, as (phase_id, step_count) pairs — phase_id being the token right after a "### "
+    subheading (e.g. "HRN-2.A"). A plan not split into phases at all — no "### " subheading
+    anywhere in the section — is one implicit phase named by the bare card_id, its step
+    count the section's own bullet lines."""
+    section = find_section(plan_text, "Шаги")
+    lines = section.split("\n")
+    starts = [i for i, l in enumerate(lines) if PHASE_HEADING_RE.match(l)]
+    if not starts:
+        return [(card_id, sum(1 for l in lines if BULLET_RE.match(l)))]
+    phases = []
+    for idx, start in enumerate(starts):
+        stop = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        phase_id = PHASE_HEADING_RE.match(lines[start]).group(1)
+        steps = sum(1 for l in lines[start + 1:stop] if BULLET_RE.match(l))
+        phases.append((phase_id, steps))
+    return phases
+
+STEP_CLOSED_RE_CACHE = {}
+
+def closed_steps_for_phase(log_text, phase_id):
+    """The step numbers log.md names closed for one phase — every heading of the shape
+    "## <phase_id>, шаг <N>" or "…, шаг <N>–<M>" (en dash), the convention HRN-2.A's own
+    executor established (ai/harness/work-system/HRN-2_.../log.md). Matched per line, never
+    across a newline, so a heading with no dash-introduced title after the step numbers
+    (nothing on the line but the numbers) is still read correctly."""
+    pattern = STEP_CLOSED_RE_CACHE.get(phase_id)
+    if pattern is None:
+        pattern = re.compile(
+            r'^#{1,6}\s*' + re.escape(phase_id) + r'\s*,\s*шаг\s+([0-9][0-9,–\- ]*)',
+            re.MULTILINE,
+        )
+        STEP_CLOSED_RE_CACHE[phase_id] = pattern
+    closed = set()
+    for m in pattern.finditer(log_text):
+        for token in re.split(r'[,\s]+', m.group(1).strip()):
+            if not token:
+                continue
+            if "–" in token or "-" in token:
+                parts = re.split(r'[–\-]', token)
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    closed.update(range(int(parts[0]), int(parts[1]) + 1))
+            elif token.isdigit():
+                closed.add(int(token))
+    return closed
+
+def phase_boundary_state(plan_text, log_text, card_id):
+    """('no-plan', None): plan.md carries no phase with any step at all — not yet a state
+    this rule can judge, so the call is not denied on its account. ('open', phase_id): the
+    first phase (in plan.md's own order) that still has an unclosed step. ('boundary',
+    phase_id): every phase's steps are all closed; phase_id names the last phase that
+    carried any step, for the denial message."""
+    phases = parse_plan_phases(plan_text, card_id)
+    if sum(n for _, n in phases) == 0:
+        return "no-plan", None
+    last_id = None
+    for phase_id, total in phases:
+        if total == 0:
+            continue
+        last_id = phase_id
+        if len(closed_steps_for_phase(log_text, phase_id) & set(range(1, total + 1))) < total:
+            return "open", phase_id
+    return "boundary", last_id
+
+if brief.get("role") == "executor":
+    work_root = find_work_root()
+    card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
+    plan_text = None
+    log_text = ""
+    if card_dir:
+        try:
+            with open(os.path.join(card_dir, "plan.md"), "r", encoding="utf-8") as f:
+                plan_text = f.read()
+        except OSError:
+            plan_text = None
+        try:
+            with open(os.path.join(card_dir, "log.md"), "r", encoding="utf-8") as f:
+                log_text = f.read()
+        except OSError:
+            log_text = ""
+    if plan_text is not None:
+        state, phase_id = phase_boundary_state(plan_text, log_text, brief["card"])
+        if state == "boundary":
+            fp = file_path_of(tool_input)
+            is_this_cards_log_write = (
+                tool_name in ("Write", "Edit") and fp is not None and card_dir is not None and
+                os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md"))
+            )
+            if is_this_cards_log_write:
+                allow_and_exit()
+            deny_and_exit(
+                "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s is "
+                "already closed in log.md — a fresh executor takes the next phase, not "
+                "this one. The only call that still gets through is a Write/Edit of this "
+                "card's own log.md: «допиши передачу и остановись»." % phase_id
+            )
 
 allow_and_exit()
 PYEOF
