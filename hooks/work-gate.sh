@@ -4,9 +4,10 @@
 # validite-app repository). A rule that used to live only in prose becomes a rule nobody can
 # break by accident, because the tool call itself is refused.
 #
-# This file currently builds phases HRN-2.A (the fitness guard and caller identity) and
-# HRN-2.D (the phase boundary) — not the phases HRN-2.B (one-file-one-author) and HRN-2.C
-# (run ceilings) that land in between, built by a separate run each.
+# This file currently builds phases HRN-2.A (the fitness guard and caller identity),
+# HRN-2.B (one-file-one-author and the log-write ceiling) and HRN-2.D (the phase boundary)
+# — not HRN-2.C (the context/spend/pace ceilings and the file-edit brake), built by a
+# separate run.
 #
 # WHAT THIS FILE DOES, IN THE ORDER IT DOES IT
 #
@@ -109,6 +110,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 
 # realpath(), not just the literal argv value: ~/.claude/hooks/ is itself a symlinked
@@ -429,9 +431,10 @@ def phase_boundary_state(plan_text, log_text, card_id):
             return "open", phase_id
     return "boundary", last_id
 
+work_root = find_work_root()
+card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
+
 if brief.get("role") == "executor":
-    work_root = find_work_root()
-    card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
     plan_text = None
     log_text = ""
     if card_dir:
@@ -460,6 +463,94 @@ if brief.get("role") == "executor":
                 "already closed in log.md — a fresh executor takes the next phase, not "
                 "this one. The only call that still gets through is a Write/Edit of this "
                 "card's own log.md: «допиши передачу и остановись»." % phase_id
+            )
+
+# --- 6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" ------------------------------
+# ai/harness/system/project.md, "Правка чужого файла": the executor may not write
+# description.md, attention.md or done.md — each belongs to a different role (the owner via
+# the orchestrator, the critic, the acceptor) — and may not write plan.md either, but that
+# refusal names question.md instead, per this same document's "Проблема в плане": the
+# executor records a proposed change there and keeps working, rather than touching the plan
+# itself. The acceptor may not write log.md — that file is the executor's own. Only a call
+# that targets a file actually inside THIS card's own folder is judged; card_dir is None
+# (skip, fail open) exactly when rule 5 above already treats it as unresolvable.
+EXECUTOR_LOCKED_FILES = ("description.md", "attention.md", "done.md")
+
+if tool_name in ("Write", "Edit") and card_dir is not None:
+    fp = file_path_of(tool_input)
+    if fp is not None:
+        real_fp = os.path.realpath(fp)
+        real_card_dir = os.path.realpath(card_dir)
+        if os.path.dirname(real_fp) == real_card_dir:
+            fname = os.path.basename(real_fp)
+            role = brief.get("role")
+            if role == "executor" and fname == "plan.md":
+                deny_and_exit(
+                    "Blocked by work-gate's FILE AUTHORSHIP rule: plan.md is not the "
+                    "executor's file to write — the orchestrator alone edits the plan. "
+                    "Write the proposed change to question.md in this card's own folder "
+                    "instead and keep working; the orchestrator watches for that file and "
+                    "answers it. «Один файл, один автор.»"
+                )
+            if role == "executor" and fname in EXECUTOR_LOCKED_FILES:
+                deny_and_exit(
+                    "Blocked by work-gate's FILE AUTHORSHIP rule: %s is not the executor's "
+                    "file to write — «Один файл, один автор». See "
+                    "ai/harness/system/project.md, \"Правка чужого файла\"." % fname
+                )
+            if role == "acceptor" and fname == "log.md":
+                deny_and_exit(
+                    "Blocked by work-gate's FILE AUTHORSHIP rule: log.md is not the "
+                    "acceptor's file to write — «Один файл, один автор». See "
+                    "ai/harness/system/project.md, \"Правка чужого файла\"."
+                )
+
+# --- 7. LOG-WRITE CEILING (HRN-2.B): twenty calls without a log.md write ---------------
+# ai/harness/system/project.md, "Двадцать вызовов без записи в log.md": applies only to the
+# executor, and only once card_dir is known (fail open otherwise, same reasoning as rule 6 —
+# without a resolved log.md path this rule could never recognise the one write meant to
+# reset it, and would end up denying that write itself). agent_id is guaranteed present here
+# — rule 3 above already exited for any call carrying none, so every call that reaches this
+# point is a real subagent's own. The count lives in its own state file, one per agent_id,
+# keyed the same way the brief files already are; a call denied by an earlier rule (FITNESS,
+# no-brief, phase boundary, file authorship) never reaches here and so neither increments
+# nor resets it.
+LOG_CALL_CEILING = 20
+
+def log_call_count_path(aid):
+    safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(aid))
+    return os.path.join(STATE_DIR, "log-call-counts", "agent-" + safe + ".txt")
+
+def read_log_call_count(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+def write_log_call_count(path, n):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(str(n))
+
+if brief.get("role") == "executor" and card_dir is not None:
+    fp = file_path_of(tool_input)
+    is_this_cards_log_write_now = (
+        tool_name in ("Write", "Edit") and fp is not None and
+        os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md"))
+    )
+    count_path = log_call_count_path(agent_id)
+    if is_this_cards_log_write_now:
+        write_log_call_count(count_path, 0)
+    else:
+        n = read_log_call_count(count_path) + 1
+        write_log_call_count(count_path, n)
+        if n >= LOG_CALL_CEILING:
+            deny_and_exit(
+                "Blocked by work-gate's LOG CEILING rule: %d calls have passed since this "
+                "executor last wrote to this card's own log.md — record state there now. "
+                "The only call that still gets through is a Write/Edit of log.md, which "
+                "resets this count to zero. «Запиши состояние в лог и остановись.»" % n
             )
 
 allow_and_exit()
