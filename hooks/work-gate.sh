@@ -55,30 +55,36 @@
 #     that runs bin/work-agent-brief itself, since that is how the very first brief gets
 #     written at all.
 #
-#  5. PHASE BOUNDARY (HRN-2.D): applies only to a subagent whose brief names role
-#     "executor". This hook works out the card's own current phase itself, from two files
-#     it reads directly — never from the executor's own word or report
-#     (ai/harness/system/project.md, "Хук считает границу сам, по двум файлам карточки. Ни
-#     на слово исполнителя, ни на его отчёт хук при этом не смотрит."):
-#       - plan.md's own "## Шаги" section, split into phases by its "### <ID>.<letter> —
-#         …" subheadings (a plan not split into phases at all is one implicit phase named
-#         by the bare card id); each phase's steps are its own "- " bullet lines, in order,
-#         numbered 1..N.
-#       - log.md's own headings of the shape "## <ID>.<letter>, шаг <N>" or "…, шаг
-#         <N>–<M>" (en dash), the convention HRN-2.A's own executor already established and
-#         used on this very card's log (ai/harness/work-system/HRN-2_.../log.md) — the
-#         numbers named there are read as that phase's closed steps.
-#     The current phase is the first phase (in plan.md's own order) that still has at least
-#     one step not named closed in log.md. Once every phase's steps are all closed, the
-#     phase boundary is reached: every further call from that executor is refused except a
-#     Write/Edit of that card's own log.md, with the words «допиши передачу и остановись»
-#     — the same shape as the context-size ceiling, so a fresh executor can pick up the
-#     next phase from a handoff written into the log. While the current phase still has an
-#     open step, every call passes with no inspection at all ("Пропускать всякий вызов, пока
-#     в текущей фазе остаётся хоть один незакрытый шаг"). A card whose plan.md cannot be
-#     read, or that carries no phase with any step at all, is not yet in a state this rule
-#     can judge, so it is skipped rather than denied — the same fail-open choice
-#     bin/work-agent-brief's own malformed-command case already makes in rule 4 above.
+#  5. PHASE BOUNDARY (HRN-2.D, rewritten by HRN-2.F): applies only to a subagent whose brief
+#     names role "executor" — every other role is never judged by this rule at all. HRN-2.D's
+#     own reading — "the current phase is the first phase in plan.md's own order that still
+#     has an open step" — silently required every phase of the whole plan to close before the
+#     boundary ever fired, so an executor that finished its own phase walked straight into
+#     the next one (found live, on this very card, by HRN-2.B's own executor). HRN-2.F
+#     replaces that scan: the boundary is judged only against the ONE phase this run's own
+#     caller-brief names (bin/work-agent-brief's own --phase), never against the plan as a
+#     whole.
+#       - No phase named in the brief at all: refused, every call except a Write/Edit of the
+#         card's own log.md — the same shape as "no caller-brief file", because an unnamed
+#         phase would leave this rule nothing to judge and the run would never be stopped
+#         (owner's own correction, 2026-08-28: «неназванная фаза не освобождает от границы,
+#         а запрещает работу»).
+#       - Phase named: read plan.md's own "## Шаги" section, split into phases by its
+#         "### <ID>.<letter> — …" subheadings (a plan not split into phases at all is one
+#         implicit phase named by the bare card id); each phase's steps are its own "- "
+#         bullet lines, in order, numbered 1..N. Read log.md's own headings of the shape
+#         "## <ID>.<letter>, шаг <N>" or "…, шаг <N>–<M>" (en dash), the convention HRN-2.A's
+#         own executor established — the numbers named there are that phase's closed steps.
+#         A phase that does not appear in plan.md at all is not a state this rule can judge,
+#         so the call is skipped rather than denied. Once every one of the named phase's own
+#         steps is closed, the boundary is reached for THAT phase — every further call is
+#         refused except a Write/Edit of the card's own log.md, with the words «допиши
+#         передачу и остановись», regardless of what any other phase in the plan looks like
+#         (closed, open, or never started at all). While the named phase still has an open
+#         step, every call passes with no inspection at all.
+#     A card whose plan.md cannot be read is not yet in a state this rule can judge, so it is
+#     skipped rather than denied — the same fail-open choice bin/work-agent-brief's own
+#     malformed-command case already makes in rule 4 above.
 #
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
@@ -248,11 +254,15 @@ if is_brief_self_write:
     command = command_of(tool_input)
     m_role = re.search(r'--role[= ]+(\S+)', command)
     m_card = re.search(r'--card[= ]+(\S+)', command)
+    m_phase = re.search(r'--phase[= ]+(\S+)', command)
     if m_role and m_card and m_role.group(1) in KNOWN_ROLES and agent_id:
         os.makedirs(BRIEFS_DIR, exist_ok=True)
+        brief_obj = {"role": m_role.group(1), "card": m_card.group(1)}
+        if m_phase:
+            brief_obj["phase"] = m_phase.group(1)
         try:
             with open(agent_brief_path(agent_id), "w", encoding="utf-8") as f:
-                json.dump({"role": m_role.group(1), "card": m_card.group(1)}, f)
+                json.dump(brief_obj, f)
         except OSError:
             pass
     allow_and_exit()
@@ -270,7 +280,12 @@ def read_brief(aid, sid):
             continue
         role, card = b.get("role"), b.get("card")
         if role and card:
-            return {"role": role, "card": card}
+            # "phase" (HRN-2.F): the plan phase this run is working, named only by whoever
+            # launched it — bin/work-agent-brief's own --phase — and never derivable from the
+            # card's own files. None when the brief carries no such key at all (an older
+            # brief, or any role other than executor, which the phase boundary rule below
+            # never requires it from).
+            return {"role": role, "card": card, "phase": b.get("phase")}
     return None
 
 brief = read_brief(agent_id, session_id)
@@ -413,57 +428,65 @@ def closed_steps_for_phase(log_text, phase_id):
                 closed.add(int(token))
     return closed
 
-def phase_boundary_state(plan_text, log_text, card_id):
-    """('no-plan', None): plan.md carries no phase with any step at all — not yet a state
-    this rule can judge, so the call is not denied on its account. ('open', phase_id): the
-    first phase (in plan.md's own order) that still has an unclosed step. ('boundary',
-    phase_id): every phase's steps are all closed; phase_id names the last phase that
-    carried any step, for the denial message."""
-    phases = parse_plan_phases(plan_text, card_id)
-    if sum(n for _, n in phases) == 0:
-        return "no-plan", None
-    last_id = None
-    for phase_id, total in phases:
-        if total == 0:
-            continue
-        last_id = phase_id
-        if len(closed_steps_for_phase(log_text, phase_id) & set(range(1, total + 1))) < total:
-            return "open", phase_id
-    return "boundary", last_id
+def total_steps_for_phase(plan_text, card_id, phase_id):
+    """The step count plan.md's own "## Шаги" section gives the one phase named phase_id, or
+    None when that phase does not appear in the plan at all (including when the plan is not
+    split into phases and phase_id is not the bare card_id parse_plan_phases falls back to
+    naming)."""
+    for pid, total in parse_plan_phases(plan_text, card_id):
+        if pid == phase_id:
+            return total
+    return None
 
 work_root = find_work_root()
 card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
 
-if brief.get("role") == "executor":
-    plan_text = None
-    log_text = ""
-    if card_dir:
+if brief.get("role") == "executor" and card_dir is not None:
+    fp = file_path_of(tool_input)
+
+    def is_this_cards_log_write():
+        return (tool_name in ("Write", "Edit") and fp is not None and
+                os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md")))
+
+    phase_id = brief.get("phase")
+    if not phase_id:
+        if is_this_cards_log_write():
+            allow_and_exit()
+        deny_and_exit(
+            "Blocked by work-gate's PHASE BOUNDARY rule: this executor's caller-brief "
+            "names no phase — an unnamed phase does not exempt a run from the boundary, it "
+            "blocks it, exactly like a subagent that carries no caller-brief file at all "
+            "(rule 4). Re-launch with bin/work-agent-brief --role executor --card %s "
+            "--phase <ID>, naming the phase this run is actually working. The only call "
+            "that still gets through is a Write/Edit of this card's own log.md: «допиши "
+            "передачу и остановись»." % brief["card"]
+        )
+    else:
         try:
             with open(os.path.join(card_dir, "plan.md"), "r", encoding="utf-8") as f:
                 plan_text = f.read()
         except OSError:
             plan_text = None
-        try:
-            with open(os.path.join(card_dir, "log.md"), "r", encoding="utf-8") as f:
-                log_text = f.read()
-        except OSError:
-            log_text = ""
-    if plan_text is not None:
-        state, phase_id = phase_boundary_state(plan_text, log_text, brief["card"])
-        if state == "boundary":
-            fp = file_path_of(tool_input)
-            is_this_cards_log_write = (
-                tool_name in ("Write", "Edit") and fp is not None and card_dir is not None and
-                os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md"))
-            )
-            if is_this_cards_log_write:
-                allow_and_exit()
-            deny_and_exit(
-                "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s is "
-                "already closed in log.md — a fresh executor takes the next phase, not "
-                "this one. The only call that still gets through is a Write/Edit of this "
-                "card's own log.md: «допиши передачу и остановись»." % phase_id
-            )
+        if plan_text is not None:
+            total = total_steps_for_phase(plan_text, brief["card"], phase_id)
+            if total:
+                try:
+                    with open(os.path.join(card_dir, "log.md"), "r", encoding="utf-8") as f:
+                        log_text = f.read()
+                except OSError:
+                    log_text = ""
+                closed = len(closed_steps_for_phase(log_text, phase_id) & set(range(1, total + 1)))
+                if closed >= total:
+                    if is_this_cards_log_write():
+                        allow_and_exit()
+                    deny_and_exit(
+                        "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s "
+                        "— the phase this run's own caller-brief names — is already closed "
+                        "in log.md, regardless of what any other phase in the plan looks "
+                        "like. A fresh executor takes the next phase, not this one. The "
+                        "only call that still gets through is a Write/Edit of this card's "
+                        "own log.md: «допиши передачу и остановись»." % phase_id
+                    )
 
 # --- 6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" ------------------------------
 # ai/harness/system/project.md, "Правка чужого файла": the executor may not write
