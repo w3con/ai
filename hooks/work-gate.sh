@@ -6,10 +6,10 @@
 #
 # This file currently builds phases HRN-2.A (the fitness guard and caller identity),
 # HRN-2.B (one-file-one-author and the log-write ceiling), HRN-2.D/F (the phase boundary,
-# judged against the run's own named phase) and HRN-2.E's own rewrite of closed_steps_for_phase
+# judged against the run's own named phase), HRN-2.E's own rewrite of closed_steps_for_phase
 # to read a step's closure by its permanent name rather than only the older free-form "шаг N"
-# convention — not HRN-2.C (the context/spend/pace ceilings and the file-edit brake), built by
-# a separate run.
+# convention, and HRN-2.C (the context/spend/pace ceilings, read from the run's own
+# transcript, plus the file-edit brake).
 #
 # WHAT THIS FILE DOES, IN THE ORDER IT DOES IT
 #
@@ -88,20 +88,75 @@
 #     skipped rather than denied — the same fail-open choice bin/work-agent-brief's own
 #     malformed-command case already makes in rule 4 above.
 #
+#  8. CONTEXT SIZE CEILING (HRN-2.C): applies to every subagent call carrying a brief, any
+#     role — "агента", not "исполнителя", is the word project.md's own paragraph uses. The
+#     size of the context the agent's own most recent turn actually held (input_tokens +
+#     cache_creation_input_tokens + cache_read_input_tokens of the LAST assistant record in
+#     this run's own transcript, named by transcript_path in the hook's payload — what that
+#     one generation was actually given to read, not a sum across the run) is compared
+#     against CONTEXT_SIZE_CEILING (300,000 tokens). Past it, every call is refused except a
+#     Write/Edit of this card's own log.md, with the words «запиши состояние в лог и
+#     остановись» the plan itself quotes. A transcript that cannot be read, or carries no
+#     assistant record with a usage field at all, is not a state this rule can judge, so the
+#     call is skipped rather than denied — the same fail-open choice rule 5 already makes for
+#     an unreadable plan.md.
+#
+#  9. SPEND CEILING (HRN-2.C): applies only to role "executor" — project.md's own wording
+#     names it explicitly ("Потолок по расходу считается на прогон исполнителя"), unlike
+#     rule 8 above. The run's cumulative spend (cache_read_input_tokens + output_tokens,
+#     summed across every assistant record in this run's own transcript — the same
+#     definition bin/agent-spend's own emit_spend() already uses for a card's `spend:`
+#     field, reused here rather than invented fresh) is compared against SPEND_CEILING
+#     (90,000,000 tokens). Counted per run, from that run's own transcript alone, never
+#     accumulated across a card: there is no state file behind this number at all, so a
+#     fresh executor's own fresh transcript starts this same count at zero by construction
+#     — "свежий исполнитель приходит на карточку с нулём".
+#
+# 10. PACE CEILING (HRN-2.C): applies only to role "executor", the same scope as rule 9. The
+#     run's own spend (rule 9's own count) divided by the number of tool calls it has made
+#     (one per tool_use content block across the transcript) is compared against a threshold
+#     read from a machine file, PACE_THRESHOLD_FILE (default hooks/work-gate-pace-threshold.txt,
+#     next to this file — 460,000 as of HRN-2.C, per project.md's own "Потолок по темпу").
+#     That file's absence, or content that does not parse as a bare integer, refuses every
+#     call for this executor except a Write/Edit of this card's own log.md, regardless of
+#     call count — this check runs before the call-count gate below, not behind it. Once a
+#     threshold is read, the ceiling itself is judged only once this run has made more than
+#     PACE_CALL_ALLOWANCE (120) tool calls — "темп не проверяется первые сто двадцать
+#     вызовов" — every call up to and including the 120th passes with no inspection.
+#
+# 11. FILE-EDIT BRAKE (HRN-2.C): the Nth Edit/Write of one and the same file inside one run
+#     refuses — mirrors hooks/card-touch-gate.sh's own BRAKE rule and its measured threshold
+#     (BRAKE_THRESHOLD = 9, HRN-123.1's own p90 of the per-path edit-count distribution
+#     across archived executor runs) rather than deriving a fresh number for the same fact,
+#     matching the number this card's own plan names directly ("девятая правка"). Applies to
+#     every role — the plan states this ceiling "в одном прогоне", not "у исполнителя" the
+#     way it names rules 9 and 10 above. A Write/Edit inside this card's own folder is never
+#     counted at all ("не считая записей в файлы карточки"); a Bash call re-running the same
+#     command however many times is never counted either, since this rule only ever inspects
+#     Write/Edit ("не ограничивать повторный запуск одной и той же команды").
+#
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
 # already uses for its own per-agent state): verified-hash.txt (rule 2, written by
-# bin/work-refusals, read only here) and briefs/agent-<agent_id>.json /
-# briefs/session-<session_id>.json (rule 4). Rule 5 keeps no state of its own — it re-reads
-# plan.md and log.md fresh on every call.
+# bin/work-refusals, read only here), briefs/agent-<agent_id>.json /
+# briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7)
+# and file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11). Rule 5 keeps no
+# state of its own — it re-reads plan.md and log.md fresh on every call, and rules 8-10
+# keep no state of their own either — each re-reads this run's own transcript fresh on
+# every call.
 #
 # TEST OVERRIDES, read only by bin/work-refusals, never present in a real deployed session:
-#   WORK_GATE_STATE_DIR   overrides the whole state tree above.
-#   WORK_GATE_WORK_ROOT   overrides the work root rule 5 resolves a card id against (the
-#                         directory holding the "harness" and "timeline" kind folders,
-#                         normally found via `git worktree list --porcelain`'s own first
-#                         entry — the shared checkout's path, since a card's folder always
-#                         lives there and never inside a linked worktree's own copy).
+#   WORK_GATE_STATE_DIR            overrides the whole state tree above.
+#   WORK_GATE_WORK_ROOT            overrides the work root rule 5 resolves a card id
+#                                   against (the directory holding the "harness" and
+#                                   "timeline" kind folders, normally found via `git
+#                                   worktree list --porcelain`'s own first entry — the
+#                                   shared checkout's path, since a card's folder always
+#                                   lives there and never inside a linked worktree's own
+#                                   copy).
+#   WORK_GATE_PACE_THRESHOLD_FILE  overrides the path rule 10 reads its threshold from
+#                                   (default hooks/work-gate-pace-threshold.txt, next to
+#                                   this file).
 #
 # Fail-closed: unparseable stdin denies.
 
@@ -592,6 +647,202 @@ if brief.get("role") == "executor" and card_dir is not None:
                 "The only call that still gets through is a Write/Edit of log.md, which "
                 "resets this count to zero. «Запиши состояние в лог и остановись.»" % n
             )
+
+# --- shared by rules 8-11 below: "is this call a Write/Edit of THIS run's own card's
+# log.md" — the same test rules 5 and 7 above each already define locally for their own
+# narrower scopes, repeated here as its own top-level helper rather than factored out of
+# that already-built code, since this phase's own brief is to add HRN-2.C's five steps and
+# nothing beyond them. -------------------------------------------------------------------
+def is_this_cards_log_write_call():
+    fp = file_path_of(tool_input)
+    return (tool_name in ("Write", "Edit") and fp is not None and card_dir is not None and
+            os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md")))
+
+# --- shared by rules 8-10: one walk of this run's own transcript ----------------------
+def transcript_line_records(path):
+    """Yield each JSON object from a transcript file, one per line, skipping a blank or
+    unparseable one — the same tolerant walk bin/agent-spend's own measure()/load_calls()
+    already use for the identical file format (a Claude Code session transcript), repeated
+    here rather than imported: this hook has no import path to bin/, which lives in a
+    different repository."""
+    try:
+        fh = open(path, "r", encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                yield record
+
+def run_transcript_stats(path):
+    """One walk of this run's own transcript, answering everything rules 8-10 below need:
+    last_context — the context size the agent's own MOST RECENT turn actually held
+    (input_tokens + cache_creation_input_tokens + cache_read_input_tokens of the last
+    assistant record alone, never summed across the run — rule 8's own number); spend —
+    the run's cumulative spend so far (cache_read_input_tokens + output_tokens, summed
+    across every assistant record — the same definition bin/agent-spend's own emit_spend()
+    already uses for a card's `spend:` field, reused here rather than invented fresh —
+    rule 9's own number); calls — the number of tool calls the run has made (one per
+    tool_use content block, the same count bin/agent-spend's own measure() already uses —
+    rule 10's own denominator). None when path is missing, unreadable, or carries not one
+    assistant record with a usage field at all — rules 8-10 then have nothing to judge and
+    skip rather than deny, the same fail-open choice every earlier rule in this file
+    already makes for a missing or unreadable input."""
+    if not path:
+        return None
+    last_context = None
+    spend = 0
+    calls = 0
+    seen_usage = False
+    for record in transcript_line_records(path):
+        if record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        usage = message.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        if usage:
+            seen_usage = True
+        u_input = usage.get("input_tokens", 0) or 0
+        u_cwrite = usage.get("cache_creation_input_tokens", 0) or 0
+        u_cread = usage.get("cache_read_input_tokens", 0) or 0
+        u_output = usage.get("output_tokens", 0) or 0
+        last_context = u_input + u_cwrite + u_cread
+        spend += u_cread + u_output
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    calls += 1
+    if not seen_usage:
+        return None
+    return {"last_context": last_context, "spend": spend, "calls": calls}
+
+transcript_path = data.get("transcript_path")
+run_stats = run_transcript_stats(transcript_path)
+
+# --- 8. CONTEXT SIZE CEILING (HRN-2.C): every role -------------------------------------
+CONTEXT_SIZE_CEILING = 300_000
+
+if run_stats is not None and run_stats["last_context"] is not None and \
+        run_stats["last_context"] > CONTEXT_SIZE_CEILING:
+    if is_this_cards_log_write_call():
+        allow_and_exit()
+    deny_and_exit(
+        "Blocked by work-gate's CONTEXT SIZE rule: this agent's own most recent turn held "
+        "%d tokens of context, past the %d ceiling. «Запиши состояние в лог и остановись.» "
+        "A fresh executor picks the card up from there with an empty context. The only "
+        "call that still gets through is a Write/Edit of this card's own log.md." %
+        (run_stats["last_context"], CONTEXT_SIZE_CEILING)
+    )
+
+# --- 9. SPEND CEILING (HRN-2.C): role "executor" only, counted on this run's own
+# transcript alone, never accumulated across the card ------------------------------------
+SPEND_CEILING = 90_000_000
+
+if brief.get("role") == "executor" and run_stats is not None and \
+        run_stats["spend"] > SPEND_CEILING:
+    if is_this_cards_log_write_call():
+        allow_and_exit()
+    deny_and_exit(
+        "Blocked by work-gate's SPEND CEILING rule: this executor's own run has spent %d "
+        "tokens (cache-read plus output, summed from its own transcript), past the %d "
+        "ceiling counted for this run alone, never accumulated across the whole card — a "
+        "fresh executor's own transcript starts this same count at zero. «Запиши "
+        "состояние в лог и остановись.» The only call that still gets through is a "
+        "Write/Edit of this card's own log.md." % (run_stats["spend"], SPEND_CEILING)
+    )
+
+# --- 10. PACE CEILING (HRN-2.C): role "executor" only, tokens spent per tool call this
+# run has made, threshold read from a machine file, not checked before call 120 ----------
+PACE_CALL_ALLOWANCE = 120
+
+def pace_threshold_file():
+    return os.environ.get("WORK_GATE_PACE_THRESHOLD_FILE") or \
+        os.path.join(os.path.dirname(self_path), "work-gate-pace-threshold.txt")
+
+def read_pace_threshold():
+    try:
+        with open(pace_threshold_file(), "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+if brief.get("role") == "executor":
+    pace_threshold = read_pace_threshold()
+    if pace_threshold is None:
+        if is_this_cards_log_write_call():
+            allow_and_exit()
+        deny_and_exit(
+            "Blocked by work-gate's PACE rule: no number was found at %s — the pace "
+            "threshold this rule judges every call against must live there as a bare "
+            "integer, and its absence refuses every call for this executor rather than "
+            "silently skipping the check. The only call that still gets through is a "
+            "Write/Edit of this card's own log.md." % pace_threshold_file()
+        )
+    elif run_stats is not None and run_stats["calls"] > PACE_CALL_ALLOWANCE:
+        pace = run_stats["spend"] / run_stats["calls"]
+        if pace > pace_threshold:
+            if is_this_cards_log_write_call():
+                allow_and_exit()
+            deny_and_exit(
+                "Blocked by work-gate's PACE rule: this run has spent %.0f tokens per "
+                "tool call (%d tokens over %d calls), past the %d threshold read from %s. "
+                "«Запиши состояние в лог и остановись.» The only call that still gets "
+                "through is a Write/Edit of this card's own log.md." %
+                (pace, run_stats["spend"], run_stats["calls"], pace_threshold,
+                 pace_threshold_file())
+            )
+
+# --- 11. FILE-EDIT BRAKE (HRN-2.C): the Nth Edit/Write of one file inside one run -------
+FILE_EDIT_BRAKE_THRESHOLD = 9
+
+def file_edit_count_path(aid, real_fp):
+    safe_agent = re.sub(r'[^A-Za-z0-9_-]', '_', str(aid))
+    safe_file = re.sub(r'[^A-Za-z0-9_-]', '_', real_fp)
+    return os.path.join(STATE_DIR, "file-edit-counts", "agent-" + safe_agent,
+                         safe_file + ".txt")
+
+def read_file_edit_count(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+def write_file_edit_count(path, n):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(str(n))
+
+if tool_name in ("Write", "Edit"):
+    fp = file_path_of(tool_input)
+    if fp is not None:
+        real_fp = os.path.realpath(fp)
+        is_card_file = card_dir is not None and \
+            os.path.dirname(real_fp) == os.path.realpath(card_dir)
+        if not is_card_file:
+            count_path = file_edit_count_path(agent_id, real_fp)
+            n = read_file_edit_count(count_path) + 1
+            write_file_edit_count(count_path, n)
+            if n >= FILE_EDIT_BRAKE_THRESHOLD:
+                deny_and_exit(
+                    "Blocked by work-gate's FILE-EDIT BRAKE rule: this run has now edited "
+                    "%s %d times, past the %d threshold — rewrite the file in a single "
+                    "whole-file Write instead of another point edit, or move on. This "
+                    "count is per file path and per run; it never counts a write to one "
+                    "of this card's own files, and a Bash call re-running the same "
+                    "command however many times is never limited at all." %
+                    (fp, n, FILE_EDIT_BRAKE_THRESHOLD)
+                )
 
 allow_and_exit()
 PYEOF
