@@ -124,16 +124,22 @@
 #     PACE_CALL_ALLOWANCE (120) tool calls — "темп не проверяется первые сто двадцать
 #     вызовов" — every call up to and including the 120th passes with no inspection.
 #
-# 11. FILE-EDIT BRAKE (HRN-2.C): the Nth Edit/Write of one and the same file inside one run
-#     refuses — mirrors hooks/card-touch-gate.sh's own BRAKE rule and its measured threshold
-#     (BRAKE_THRESHOLD = 9, HRN-123.1's own p90 of the per-path edit-count distribution
-#     across archived executor runs) rather than deriving a fresh number for the same fact,
-#     matching the number this card's own plan names directly ("девятая правка"). Applies to
-#     every role — the plan states this ceiling "в одном прогоне", not "у исполнителя" the
-#     way it names rules 9 and 10 above. A Write/Edit inside this card's own folder is never
-#     counted at all ("не считая записей в файлы карточки"); a Bash call re-running the same
-#     command however many times is never counted either, since this rule only ever inspects
-#     Write/Edit ("не ограничивать повторный запуск одной и той же команды").
+# 11. FILE-EDIT BRAKE (HRN-2.C, extended by HRN-21.C.1): the Nth Edit/Write of one and the
+#     same file inside one run refuses — mirrors hooks/card-touch-gate.sh's own BRAKE rule
+#     and its measured threshold (BRAKE_THRESHOLD = 9, HRN-123.1's own p90 of the per-path
+#     edit-count distribution across archived executor runs) rather than deriving a fresh
+#     number for the same fact, matching the number this card's own plan names directly
+#     ("девятая правка"). Applies to every role — the plan states this ceiling "в одном
+#     прогоне", not "у исполнителя" the way it names rules 9 and 10 above. A Write/Edit
+#     inside this card's own folder is never counted at all ("не считая записей в файлы
+#     карточки"); a Bash call re-running the same command however many times is never
+#     counted either, since this rule only ever inspects Write/Edit ("не ограничивать
+#     повторный запуск одной и той же команды"). HRN-21.C.1: the very first Write that
+#     brings a file into existence — one that does not yet exist on disk at the moment this
+#     hook runs — is not a "правка" of anything and is never counted either, whatever count
+#     already sits on file for that path; every further Edit/Write of that same file, once
+#     it exists, counts exactly as before, starting at 1 ("тормоз ловит долбёжку по одному
+#     месту, а не написание нового файла").
 #
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
@@ -913,7 +919,14 @@ if tool_name in ("Write", "Edit"):
         real_fp = os.path.realpath(fp)
         is_card_file = card_dir is not None and \
             os.path.dirname(real_fp) == os.path.realpath(card_dir)
-        if not is_card_file:
+        # HRN-21.C.1: a Write that brings a file into existence — one that does not yet
+        # exist on disk at the moment this hook runs, before the tool call itself executes
+        # — is a creation, not a "правка" (edit) of anything, and is never counted at all.
+        # Checked fresh against the filesystem on every call, never remembered as a flag of
+        # its own: the next Write/Edit of this same path finds the file now on disk (this
+        # call's own effect, once it actually runs) and counts normally from there.
+        is_fresh_creation = tool_name == "Write" and not os.path.exists(real_fp)
+        if not is_card_file and not is_fresh_creation:
             count_path = file_edit_count_path(agent_id, real_fp)
             n = read_file_edit_count(count_path) + 1
             write_file_edit_count(count_path, n)
