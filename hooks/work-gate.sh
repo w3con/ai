@@ -205,10 +205,14 @@ def allow_and_exit():
     sys.exit(0)
 
 def _journal_shared_checkout_root():
-    """The shared checkout's own absolute path, the same `git worktree list --porcelain`
-    resolution bin/work_journal.py's own _checkout_root() uses — this hook cannot import
-    that module across the repository boundary, so it re-derives the same path here, never
-    raising."""
+    """The root bin/work-journal is found under and the journal files themselves resolve
+    against, the same WORK_JOURNAL_DIR override bin/work_journal.py's own _checkout_root()
+    honours first — this hook cannot import that module across the repository boundary, so
+    it re-derives the same resolution here, never raising. Without the override: `git
+    worktree list --porcelain`'s own first entry, the shared checkout's own path."""
+    override = os.environ.get("WORK_JOURNAL_DIR")
+    if override:
+        return override
     try:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
