@@ -64,3 +64,4 @@ in the body of `~/.claude/CLAUDE.md`, not here. This store holds the rest.
 - [A clean merge is not agreement](feedback-clean-merge-is-not-agreement.md) — no conflict only means the two sides edited different files; compare what each side's work produces
 - [Python on the SSD machine](machine-ssd-python-path.md) — prepending Homebrew to PATH swaps in an interpreter without PyYAML and fakes a regression.
 - [No tests for the cockpit](feedback-no-tests-for-the-cockpit.md) — Validité app only: the owner works that screen himself; fix what is broken, never add browser checks around it unasked
+- [A description explains how it works](feedback-description-explains-how-it-works.md) — Validité app cards: the description must leave Alex understanding how the thing works and why; the plan-repair story stays out, the reasons stay in
