@@ -628,7 +628,8 @@ if tool_name in ("Write", "Edit") and card_dir is not None:
                     "ai/harness/system/project.md, \"Правка чужого файла\"."
                 )
 
-# --- 7. LOG-WRITE CEILING (HRN-2.B): twenty calls without a log.md write ---------------
+# --- 7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): twenty calls without a log.md
+# write ------------------------------------------------------------------------------------
 # ai/harness/system/project.md, "Двадцать вызовов без записи в log.md": applies only to the
 # executor, and only once card_dir is known (fail open otherwise, same reasoning as rule 6 —
 # without a resolved log.md path this rule could never recognise the one write meant to
@@ -638,6 +639,17 @@ if tool_name in ("Write", "Edit") and card_dir is not None:
 # keyed the same way the brief files already are; a call denied by an earlier rule (FITNESS,
 # no-brief, phase boundary, file authorship) never reaches here and so neither increments
 # nor resets it.
+#
+# HRN-21.B: the system requires the executor to write log.md only through `bin/work-log`,
+# never by hand (ai/harness/system/project.md, "log.md — пишет исполнитель"), and that
+# command runs through Bash — so a bare Bash call naming it is exempted the same way rule 2
+# above already exempts a Bash call naming `bin/work-refusals`: a closed, literal match on
+# the script's own basename appearing anywhere in the command line, never a chain-aware
+# parse. Exempting it is not enough on its own — a call that merely passes the ceiling but
+# still counts toward it would still eventually starve the executor of the one command it
+# needs — so this same call also resets the counter to zero, exactly like a direct Write/Edit
+# of log.md, because a `bin/work-log` invocation IS that write, only spelled through a
+# command rather than through the tool directly.
 LOG_CALL_CEILING = 20
 
 def log_call_count_path(aid):
@@ -662,8 +674,9 @@ if brief.get("role") == "executor" and card_dir is not None:
         tool_name in ("Write", "Edit") and fp is not None and
         os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md"))
     )
+    is_work_log_call = tool_name == "Bash" and bash_names(command_of(tool_input), "work-log")
     count_path = log_call_count_path(agent_id)
-    if is_this_cards_log_write_now:
+    if is_this_cards_log_write_now or is_work_log_call:
         write_log_call_count(count_path, 0)
     else:
         n = read_log_call_count(count_path) + 1
@@ -672,8 +685,9 @@ if brief.get("role") == "executor" and card_dir is not None:
             deny_and_exit(
                 "Blocked by work-gate's LOG CEILING rule: %d calls have passed since this "
                 "executor last wrote to this card's own log.md — record state there now. "
-                "The only call that still gets through is a Write/Edit of log.md, which "
-                "resets this count to zero. «Запиши состояние в лог и остановись.»" % n
+                "The only call that still gets through is a Write/Edit of log.md, or a Bash "
+                "call running bin/work-log, either of which resets this count to zero. "
+                "«Запиши состояние в лог и остановись.»" % n
             )
 
 # --- shared by rules 8-11 below: "is this call a Write/Edit of THIS run's own card's
