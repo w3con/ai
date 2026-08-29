@@ -15,8 +15,10 @@ by a human, not only by me. Plans likewise stay in the project they describe.
 A memory that is about method but only true inside one project carries a `scope:` field in its
 frontmatter and says so in its description. That is the whole mechanism; no second store is needed.
 
-The core non-negotiable rules — how to write, how to decide and act, and the build and scoping
-discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store holds the rest.
+Everything about **how to write** — to Alex, in a document, or in a letter to somebody outside the team — lives in `../STYLE.md` and in no other file, this index included. A style rule must never be recorded here; `bin/style-check` fails the deploy when one is.
+
+The core non-negotiable rules on how to decide and act, and the build and scoping discipline, live
+in the body of `~/.claude/CLAUDE.md`, not here. This store holds the rest.
 
 - [Do nothing unasked](feedback-do-nothing-unasked.md) — Alex's standing order: do only what was explicitly requested, name anything else and ask before doing it, and touch nothing outside the request
 - [Maintainability never sacrificed](feedback-maintainability-never-sacrificed.md) — Alex's standing order: clarity beats everything, contest even his own instructions when they would trade it away
@@ -38,18 +40,12 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Stage exactly your own files](feedback_git_staging.md) — commit by naming paths; a blind `git add -A` sweeps in other sessions' work
 - [Commit by naming paths](feedback-commit-by-naming-paths.md) — never `git add` then `git commit`; a parallel session's blind stage takes whatever sits staged in a shared checkout
 - [Commit periodically](feedback-commit-periodically.md) — land work at each milestone and remind Alex, don't let uncommitted changes pile up for hours
-- [No hard line-wraps in prose](feedback-no-hard-line-wraps.md) — paragraph = one physical line; Alex's viewers render wrap points as broken lines; put the rule into executor prompts too
-- [Tool files carry bare rules](feedback-tool-files-bare-rules.md) — agent/skill/hook files state what to do; no provenance citations, no rationale essays, no what-it-does-NOT-do paragraphs
 - [Approve the letter before writing it down](feedback-approve-letter-before-writing-it-down.md) — a letter lives in the chat message until Alex approves the text; only then does it reach the drafts page, the card and the tracker
 - [Record only confirmed decisions](record-only-confirmed-decisions.md) — proposals stay in chat; nothing lands in a durable record until Alex confirms it
 - [Questions first, silence, one report](feedback-questions-first-silence-then-report.md) — ask everything before the first edit, build without a word, hand over one report with the findings, the decisions taken alone and the mistakes with their fixes
 - [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
 - [Decide technical details yourself](feedback-decide-technical-details-yourself.md) — never hand Alex a choice with no product consequence; choose on the merits, act, and tell him afterwards
 - [Never size work in human hours](feedback-no-human-hour-estimates.md) — agents build everything here; argue about context, file collisions and what's on the path, never "it's sixty hours" or "it's too big"
-- [Filter every sentence for usefulness](feedback-filter-every-sentence-for-usefulness.md) — ask what each sentence does for him; cut closed options explained in full and metaphors standing in for the mechanism
-- [Cut slop, keep depth](feedback-cut-slop-keep-depth.md) — explaining a problem at length is wanted; ornamental phrasing is not, and reading "too wordy" as "explain less" is the wrong correction
-- [English for non-native readers](feedback-english-level-for-french-readers.md) — letters in English go to French readers and to Alex; intermediate vocabulary, short sentences, no literary constructions
-- [French names stay in French](feedback-french-names-in-french.md) — never transliterate `Camille Ernould` or `Tourcoing` into Cyrillic in a Russian reply; he has to type the real spelling back into mail and calendar
 - [The AI config repo](reference_ai_config_repo.md) — the versioned source of truth is `~/Dev/ai`; commit configuration there, never straight into `~/.claude`
 - [Reproduce the design, don't improvise](design-reproduce-not-improvise.md) — Validité website only: match the design files exactly, interview to full clarity first
 - [Enter the knowledge base through its index](kb-entry-via-index.md) — Validité knowledge base only: start at `kb/_index.md`, never a blind grep
@@ -58,15 +54,9 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [Browser-verify: rAF sleeps in a background tab](browser-verify-raf-background-tab.md) — canvas/preview renders (and blob-download checks) need the tab foregrounded via a screenshot
 - [Living plan-journal, verify-first](feedback-living-plan-journal.md) — discuss and re-check against live systems before acting; keep a KB roadmap+journal per effort and update it as understanding grows
 - [Pilier's internal KB is a private repo](feedback_pilier_private_kb.md) — Pilier only: the blockchain repo is public, so internal reasoning/plans/decisions live in the private `cloud` repo (`pilier-org/cloud`) — read it for context and write internal docs there, never into `blockchain/ai/`
-- [How a letter is written](feedback-letter-style-rules.md) — Validité only: read `kb/BizDev/letter-style.md` first, where every rule has a wrong and a right example; no signpost sentences, a chain of consequences rather than a list or a proof, no answering unraised objections, courtesy present but never ostentatious
-- [No em-dashes in outgoing letters](feedback-no-em-dash-in-letters.md) — letters to real people must read as Alex's hand; rewrite with commas, colons, parentheses instead of the machine-tell dash
-- [No saccharine in French letters](feedback-no-saccharine-in-french-letters.md) — cut permission-to-refuse, "no pressure" reassurance and menu questions; French business letters are more formal and far more direct, never emotionally cushioned
 - [Check both send routes](feedback-check-both-send-routes.md) — Validité only: a staged letter may already be sent from at@validite.eu or from the personal Gmail; open the message, never judge from a subject line
 - [Check who wrote the letter](feedback-check-if-letter-was-agent-written.md) — before filing a quote as evidence, ask whether a person or an assistant wrote it and whether it only echoes our own framing back; grade the quote in the same line
 - [Warmth isn't a commitment signal](feedback-warmth-not-a-commitment-signal.md) — a pleasant, enthusiastic-sounding call means nothing on its own; log names/dates/documents, not tone, and don't pin it on one contact's character
-- [Name roles, not people](feedback-name-roles-not-people.md) — process documents define owner/coordinator/executor/reviewer in a short glossary and never say "Alex"
-- [No ciphers in chat](feedback-no-ciphers-in-chat.md) — write to Alex in plain words, never registry IDs/plan tags (MAT-4, PLT-6, R2, CF-24) as if they were common coin; explaining one once doesn't stop it being a cipher for the rest of the message, use the full phrase every time
-- [An unanswered question was explained badly](feedback-unanswered-question-means-unclear.md) — asked twice with no answer means rewrite the explanation from the subject up, never re-ask the same words or carry a bare "needs a conversation" line
 - [App: no real data yet, and DB access exists](project_app_no_real_data_yet.md) — the Validité DPP application repository only: only test/demo records exist so far, and the coordinator CAN reach Mongo directly via docker exec — never repeat an old plan's "no access" claim untested
 - [A reported failure is a work order](feedback-reported-failure-is-a-work-order.md) — when Alex pastes a broken deploy or build, start the fix and report it; do not ask whether to begin
 - [Clone config verbatim](feedback-clone-config-verbatim.md) — deriving a new node/service config from an already-proven twin: copy the proven flags/values byte-for-byte, don't re-derive by reasoning about names
@@ -74,4 +64,3 @@ discipline — live in the body of `~/.claude/CLAUDE.md`, not here. This store h
 - [A clean merge is not agreement](feedback-clean-merge-is-not-agreement.md) — no conflict only means the two sides edited different files; compare what each side's work produces
 - [Python on the SSD machine](machine-ssd-python-path.md) — prepending Homebrew to PATH swaps in an interpreter without PyYAML and fakes a regression.
 - [No tests for the cockpit](feedback-no-tests-for-the-cockpit.md) — Validité app only: the owner works that screen himself; fix what is broken, never add browser checks around it unasked
-- [Reply in Russian](feedback-reply-in-russian.md) — chat answers to Alex go in Russian by default; letters to third parties and commit messages are separate exceptions

@@ -55,7 +55,7 @@ Add one `##` section per letter to `kb/BizDev/_drafts.md`, placed above the `## 
 - The letter under the bold label `**Текст письма (копировать отсюда):**`, as plain paragraphs.
 - A French letter is followed by a horizontal rule and a Russian translation, marked as being for review only.
 
-Letters obey these without exception: reply inside the existing thread, never a new subject; match the language the thread already uses; no `>` blockquote markers anywhere in the body; no em-dashes; and no emotional cushioning in a French letter — no permission to refuse, no reassurance about pressure, no menu of options. State the thing and stop.
+Letters obey these without exception: reply inside the existing thread, never a new subject; match the language the thread already uses; and carry no `>` blockquote markers anywhere in the body. How the letter itself is written is fixed by `STYLE.md` and by nothing here.
 
 Leave a fact missing and say it is missing rather than inventing a date, a figure or a name.
 

@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Refuse a configuration that carries writing-style rules outside STYLE.md.
+
+Usage:
+  bin/style-check [--quiet] [extra-root ...]
+
+STYLE.md in this repository is the only place a rule about how to write to the
+owner may live. This command scans the harness configuration, the memory store,
+the agent, skill and hook definitions, the settings template, the local
+output-style directory, and any extra root given on the command line, and names
+every line that looks like a style rule living somewhere else. It also checks
+that STYLE.md exists and that CLAUDE.md imports it.
+
+Exit codes: 0 clean, 2 bad arguments, 3 a style rule was found outside STYLE.md
+or the single-file wiring is broken.
+"""
+
+import os
+import re
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STYLE = os.path.join(REPO, "STYLE.md")
+
+# A marker is a phrase that in practice only appears inside a rule about how to
+# write. Each is matched case-insensitively against one line of text.
+MARKERS = [
+    r"\bslop\b",
+    r"\btelegraph",
+    r"developed prose",
+    r"\bornament",
+    r"complete sentence",
+    r"every sentence",
+    r"short sentences",
+    r"small words",
+    r"\bmetaphor",
+    r"\bacronym",
+    r"\babbreviation",
+    r"hard line[- ]?(break|wrap)",
+    r"line[- ]wrap",
+    r"em[- ]dash",
+    r"conventional commits",
+    r"in chat, (write|give|say)",
+    r"(reply|replies|answer|respond).{0,24}\bin russian\b",
+    r"how you write",
+    r"writing style",
+    r"стиль (обще|пись|отве|изло)",
+    r"искусственн\w* перенос",
+    r"отвечай на русском",
+    r"пиши (по-русски|короче|полными)",
+    r"заголовочн\w* (обрубк|телеграмм)",
+]
+MARKER_RE = [(m, re.compile(m, re.IGNORECASE)) for m in MARKERS]
+
+# Paths whose style vocabulary is legitimate: STYLE.md itself, this script, and
+# the one CLAUDE.md section that points at STYLE.md and forbids every other home.
+def exempt(path: str) -> bool:
+    base = os.path.basename(path)
+    return base in ("STYLE.md", "style-check", "style-migrate")
+
+
+SCAN_DIRS = ["memory", "agents", "skills", "commands", "hooks", "templates", "decisions"]
+SCAN_FILES = ["CLAUDE.md", "settings.json.template", "ai_readme.md", "readme.md"]
+SKIP_DIRS = {".git", "_legacy", "candidates", "node_modules", "worktrees", "__pycache__"}
+TEXT_EXT = {".md", ".sh", ".py", ".json", ".template", ".txt", ".yaml", ".yml", ""}
+
+# The CLAUDE.md pointer section is allowed to name the rule it is replacing.
+POINTER_SECTION = ("## How you write — one file, and only one", "## How you decide and act")
+
+
+def claude_md_pointer_lines(path: str, lines):
+    """Line numbers (1-based) of the CLAUDE.md section that points at STYLE.md."""
+    if os.path.basename(path) != "CLAUDE.md":
+        return set()
+    inside, out = False, set()
+    for i, line in enumerate(lines, 1):
+        if line.startswith(POINTER_SECTION[0]):
+            inside = True
+        elif inside and line.startswith("## "):
+            inside = False
+        if inside:
+            out.add(i)
+    return out
+
+
+def iter_files(roots):
+    for root in roots:
+        if os.path.isfile(root):
+            yield root
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+            for name in filenames:
+                if os.path.splitext(name)[1].lower() in TEXT_EXT:
+                    yield os.path.join(dirpath, name)
+
+
+def scan(roots):
+    findings = []
+    for path in iter_files(roots):
+        if exempt(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().split("\n")
+        except (OSError, UnicodeError):
+            continue
+        allowed = claude_md_pointer_lines(path, lines)
+        for n, line in enumerate(lines, 1):
+            if n in allowed:
+                continue
+            for marker, rx in MARKER_RE:
+                if rx.search(line):
+                    findings.append((path, n, marker, line.strip()[:140]))
+                    break
+    return findings
+
+
+def wiring_problems():
+    problems = []
+    if not os.path.isfile(STYLE):
+        problems.append("STYLE.md is missing — the single style file does not exist")
+        return problems
+    claude = os.path.join(REPO, "CLAUDE.md")
+    try:
+        text = open(claude, encoding="utf-8").read()
+    except OSError:
+        problems.append("CLAUDE.md could not be read")
+        return problems
+    if "@STYLE.md" not in text:
+        problems.append("CLAUDE.md does not import STYLE.md — add the line `@STYLE.md`")
+    if POINTER_SECTION[0] not in text:
+        problems.append("CLAUDE.md has lost the section forbidding style rules elsewhere")
+    return problems
+
+
+# A project can carry a style rule too, in the few files that instruct an agent.
+# Only those names are read, so an ordinary document that happens to use the word
+# "prose" never trips this check.
+# This repository lives inside the owner's development directory, so that
+# directory is found from this file's own position rather than named. $HOME/Dev
+# is added because on one machine it is a symlink to the same place and on the
+# other it is the place itself.
+PROJECT_SEARCH_ROOTS = [os.path.expanduser("~/Dev"), os.path.dirname(REPO)]
+PROJECT_FILES = ["CLAUDE.md", "rules.md", "AGENTS.md", "KB-CONVENTIONS.md"]
+PROJECT_DIRS = [os.path.join(".claude", "skills"), os.path.join(".claude", "agents")]
+
+
+def project_roots():
+    seen, out = set(), []
+    for base in PROJECT_SEARCH_ROOTS:
+        if not os.path.isdir(base):
+            continue
+        candidates = []
+        try:
+            for a in os.listdir(base):
+                pa = os.path.join(base, a)
+                if not os.path.isdir(pa) or a.startswith("."):
+                    continue
+                candidates.append(pa)
+                try:
+                    candidates += [os.path.join(pa, b) for b in os.listdir(pa)
+                                   if os.path.isdir(os.path.join(pa, b)) and not b.startswith(".")]
+                except OSError:
+                    pass
+        except OSError:
+            continue
+        for proj in candidates:
+            if os.path.realpath(proj) == os.path.realpath(REPO):
+                continue
+            # A linked git worktree is a throwaway copy of a repository already
+            # scanned at its own path; it is marked by a .git file, not a .git
+            # directory. Fixing a rule there would be undone by the next cut.
+            if os.path.isfile(os.path.join(proj, ".git")):
+                continue
+            for name in PROJECT_FILES + PROJECT_DIRS:
+                p = os.path.join(proj, name)
+                real = os.path.realpath(p)
+                if os.path.exists(p) and real not in seen:
+                    seen.add(real)
+                    out.append(p)
+    return out
+
+
+def main(argv):
+    quiet = "--quiet" in argv
+    args = [a for a in argv if not a.startswith("--")]
+    for a in argv:
+        if a.startswith("--") and a not in ("--quiet", "--help", "-h"):
+            print(f"style-check: unknown option {a}", file=sys.stderr)
+            return 2
+    if "--help" in argv or "-h" in argv:
+        print(__doc__)
+        return 0
+
+    roots = [os.path.join(REPO, d) for d in SCAN_DIRS if os.path.isdir(os.path.join(REPO, d))]
+    roots += [os.path.join(REPO, f) for f in SCAN_FILES if os.path.isfile(os.path.join(REPO, f))]
+    styles_dir = os.path.expanduser("~/.claude/output-styles")
+    if os.path.isdir(styles_dir):
+        roots.append(styles_dir)
+    roots += project_roots()
+    roots += [os.path.abspath(a) for a in args if os.path.exists(a)]
+
+    problems = wiring_problems()
+    findings = scan(roots)
+
+    if not problems and not findings:
+        if not quiet:
+            print("style-check: clean — every writing rule lives in STYLE.md and nowhere else.")
+        return 0
+
+    print("style-check: the single-style-file rule is broken.", file=sys.stderr)
+    for p in problems:
+        print(f"  wiring: {p}", file=sys.stderr)
+    for path, n, marker, line in findings:
+        rel = os.path.relpath(path, REPO) if path.startswith(REPO) else path
+        print(f"  {rel}:{n}  matched /{marker}/", file=sys.stderr)
+        print(f"      {line}", file=sys.stderr)
+    if findings:
+        print("", file=sys.stderr)
+        print("Delete each of these where it stands. If the rule is worth keeping, fold it into", file=sys.stderr)
+        print(f"{os.path.relpath(STYLE, REPO)} instead; where it contradicts that file, that file wins.", file=sys.stderr)
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

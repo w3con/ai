@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Remove the writing-style settings that live outside this repository.
+
+Usage:
+  bin/style-migrate [--dry-run] [extra-project-root ...]
+
+STYLE.md in this repository is the only place a rule about how to write to the
+owner may live. Two carriers of such rules sit on the machine rather than in
+git and therefore do not travel with a pull: the output-style files in
+~/.claude/output-styles/, and the "outputStyle" key inside a project's own
+.claude/settings.json or .claude/settings.local.json. This command removes both,
+on whichever machine it runs, and is safe to run repeatedly.
+
+bootstrap.sh calls it, so pulling this repository and deploying is enough to
+bring a second machine to the same state. Exit codes: 0 done, 2 bad arguments.
+"""
+
+import json
+import os
+import shutil
+import sys
+
+# The development directory is found from this file's own position rather than
+# named, so the command works on either machine. $HOME/Dev is added because on
+# one machine it is a symlink to the same place and on the other it is the place.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_ROOTS = [
+    os.path.expanduser("~/Dev"),
+    os.path.dirname(REPO),
+    os.path.expanduser("~/Documents"),
+]
+MAX_DEPTH = 3
+
+
+def find_settings(roots):
+    found = []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        base_depth = root.rstrip("/").count("/")
+        for dirpath, dirnames, filenames in os.walk(root):
+            if dirpath.rstrip("/").count("/") - base_depth >= MAX_DEPTH:
+                dirnames[:] = []
+            dirnames[:] = [d for d in dirnames if d not in ("node_modules", ".git", "worktrees")]
+            if os.path.basename(dirpath) != ".claude":
+                continue
+            for name in ("settings.json", "settings.local.json"):
+                if name in filenames:
+                    found.append(os.path.join(dirpath, name))
+    home_local = os.path.expanduser("~/.claude/settings.local.json")
+    if os.path.isfile(home_local):
+        found.append(home_local)
+    return sorted(set(found))
+
+
+def strip_output_style(path, dry_run):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or "outputStyle" not in data:
+        return None
+    value = data["outputStyle"]
+    if dry_run:
+        return f"would remove \"outputStyle\": \"{value}\" from {path}"
+    del data["outputStyle"]
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    return f"removed \"outputStyle\": \"{value}\" from {path}"
+
+
+def clear_output_styles(dry_run):
+    d = os.path.expanduser("~/.claude/output-styles")
+    if not os.path.isdir(d):
+        return []
+    done = []
+    for name in sorted(os.listdir(d)):
+        path = os.path.join(d, name)
+        if dry_run:
+            done.append(f"would delete output-style {path}")
+            continue
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        done.append(f"deleted output-style {path}")
+    return done
+
+
+def main(argv):
+    if "--help" in argv or "-h" in argv:
+        print(__doc__)
+        return 0
+    dry_run = "--dry-run" in argv
+    for a in argv:
+        if a.startswith("--") and a != "--dry-run":
+            print(f"style-migrate: unknown option {a}", file=sys.stderr)
+            return 2
+    roots = DEFAULT_ROOTS + [a for a in argv if not a.startswith("--")]
+
+    actions = clear_output_styles(dry_run)
+    for path in find_settings(roots):
+        line = strip_output_style(path, dry_run)
+        if line:
+            actions.append(line)
+
+    if not actions:
+        print("style-migrate: nothing to do — no output-style file and no outputStyle setting.")
+    else:
+        for line in actions:
+            print(f"[style] {line}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

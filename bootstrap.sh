@@ -460,6 +460,25 @@ write_stamp() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# STYLE.md is the only place a writing-style rule may live. Two carriers of such
+# rules sit on the machine rather than in git and so do not arrive with a pull:
+# the files in ~/.claude/output-styles/ and the "outputStyle" key inside a
+# project's own .claude settings. bin/style-migrate removes both, and
+# bin/style-check then refuses a tree that still carries a style rule outside
+# STYLE.md. Running them here is what makes a second machine converge on its own.
+# ---------------------------------------------------------------------------
+echo ""
+echo "Style — one file, STYLE.md:"
+if [[ $DRY_RUN -eq 1 ]]; then
+  "$REPO_DIR/bin/style-migrate" --dry-run || FAILURES+=("bin/style-migrate --dry-run failed")
+else
+  "$REPO_DIR/bin/style-migrate" || FAILURES+=("bin/style-migrate failed")
+fi
+if ! "$REPO_DIR/bin/style-check" --quiet; then
+  FAILURES+=("bin/style-check found a writing-style rule outside STYLE.md")
+fi
+
 echo ""
 if [[ ${#FAILURES[@]} -eq 0 ]]; then
   write_stamp
