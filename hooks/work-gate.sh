@@ -369,6 +369,14 @@ if brief is None:
 # refused at the boundary exactly as before, because the executor may not run them at all,
 # boundary or not — they are not in this list and never will be. A harmless `git status`, or
 # any command not in this list, is refused exactly like any other call.
+#
+# HRN-21.C.3: the same closed list also exempts a Bash call running bin/work-log, one more
+# entry added the same deliberate way — the boundary must not strand an executor holding the
+# one command this system requires it to close its own last step with. That call gets its
+# own recognising function, is_phase_boundary_log_call() below, rather than joining this
+# git-only one: a real bin/work-log invocation always carries a heredoc body (its own
+# stdin — the check's own verbatim output), which legitimately spans many lines, so the bare
+# "no newline anywhere" test below cannot apply to it.
 PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS = ("add", "commit")
 
 def is_phase_boundary_save_call():
@@ -384,6 +392,38 @@ def is_phase_boundary_save_call():
         return False
     m = re.match(r'^\s*git\s+(\S+)', command)
     return m is not None and m.group(1) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
+
+def is_phase_boundary_log_call():
+    """True only for a Bash call that is a single invocation of bin/work-log — exempted at
+    the boundary for the same reason git add/commit already are (HRN-21.A.1), added by
+    HRN-21.C.3: writing the log entry that closes a phase is worthless if the very next
+    call, the one command this system requires to record it, is itself refused.
+
+    Unlike git add/commit, a real invocation always carries a heredoc body (bin/work-log's
+    own stdin, the check's own verbatim output) — legitimately spanning many lines and
+    containing any character at all, including `&&`/`;`/`|` — so the plain "no newline
+    anywhere" test is_phase_boundary_save_call() applies to git cannot apply here. Chaining
+    is instead judged only against the text OUTSIDE the heredoc body: the first line, up to
+    its own heredoc marker, carries none of `&&`/`;`/`|` and starts with `bin/work-log`; and
+    when a heredoc marker is present, the command's own last line is exactly that marker and
+    nothing follows it. A command naming no heredoc marker at all still may not chain,
+    exactly like git add/commit."""
+    if tool_name != "Bash":
+        return False
+    command = command_of(tool_input)
+    lines = command.rstrip("\n").split("\n")
+    first_line = lines[0]
+    heredoc_m = re.search(r'<<-?\s*([\'"]?)(\w+)\1\s*$', first_line)
+    if heredoc_m:
+        head = first_line[:heredoc_m.start()]
+        if re.search(r'(&&|;|\|)', head):
+            return False
+        if re.match(r'^\s*bin/work-log\b', head) is None:
+            return False
+        return lines[-1].strip() == heredoc_m.group(2)
+    if re.search(r'(&&|;|\||\n)', command):
+        return False
+    return re.match(r'^\s*bin/work-log\b', command) is not None
 
 # The two kinds of work a card can belong to, each its own folder directly under the work
 # root — identical to bin/work-plan's own KINDS, kept as its own small copy here rather
@@ -575,7 +615,8 @@ if brief.get("role") == "executor" and card_dir is not None:
                     log_text = ""
                 closed = len(closed_steps_for_phase(log_text, phase_id) & set(range(1, total + 1)))
                 if closed >= total:
-                    if is_this_cards_log_write() or is_phase_boundary_save_call():
+                    if is_this_cards_log_write() or is_phase_boundary_save_call() or \
+                            is_phase_boundary_log_call():
                         allow_and_exit()
                     deny_and_exit(
                         "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s "
@@ -583,9 +624,10 @@ if brief.get("role") == "executor" and card_dir is not None:
                         "in log.md, regardless of what any other phase in the plan looks "
                         "like. A fresh executor takes the next phase, not this one. The "
                         "only calls that still get through are a Write/Edit of this card's "
-                        "own log.md, and a Bash call that does nothing but `git add` or "
-                        "`git commit` — saving work already done, never starting anything "
-                        "new: «допиши передачу и остановись»." % phase_id
+                        "own log.md, a Bash call that does nothing but `git add` or `git "
+                        "commit`, and a Bash call running bin/work-log — saving work "
+                        "already done, never starting anything new: «допиши передачу и "
+                        "остановись»." % phase_id
                     )
 
 # --- 6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" ------------------------------
