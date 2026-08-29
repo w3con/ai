@@ -141,15 +141,29 @@
 #     it exists, counts exactly as before, starting at 1 ("тормоз ловит долбёжку по одному
 #     месту, а не написание нового файла").
 #
+# 12. REPEATED REFUSAL → GLOBAL BREAKAGE (HRN-13.C): every call to deny_and_exit(reason,
+#     rule) below, for a call that carries an agent_id (a subagent's own call — rule 3
+#     already let the session's own call through before this could ever run), counts against
+#     a per-agent, per-rule streak. Three denials in a row by the SAME rule write one line to
+#     the global-breakage journal (ai/harness/journals/global.md, via `bin/work-journal
+#     --breakage-once`, deduplicated so the same agent+rule pair never earns a second line
+#     the same day) and reset the streak to zero; a denial by a DIFFERENT rule resets the
+#     streak to one without writing anything; a call this hook ALLOWS never reaches
+#     deny_and_exit at all, so it neither increments nor resets the streak — an executor
+#     denied by the same rule, forced to write log.md (itself always allowed) in between,
+#     still hits three in a row on its next matching denial ("разрешённый вызов между
+#     отказами счёт не сбрасывает").
+#
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
 # already uses for its own per-agent state): verified-hash.txt (rule 2, written by
 # bin/work-refusals, read only here), briefs/agent-<agent_id>.json /
-# briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7)
-# and file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11). Rule 5 keeps no
-# state of its own — it re-reads plan.md and log.md fresh on every call, and rules 8-10
-# keep no state of their own either — each re-reads this run's own transcript fresh on
-# every call.
+# briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7),
+# file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11) and
+# consecutive-refusals/agent-<agent_id>.txt (rule 12: the last rule that denied this agent,
+# and how many times in a row). Rule 5 keeps no state of its own — it re-reads plan.md and
+# log.md fresh on every call, and rules 8-10 keep no state of their own either — each
+# re-reads this run's own transcript fresh on every call.
 #
 # TEST OVERRIDES, read only by bin/work-refusals, never present in a real deployed session:
 #   WORK_GATE_STATE_DIR            overrides the whole state tree above.
@@ -244,8 +258,58 @@ def _write_refusal_journal(rule, input_text):
     except Exception:
         pass
 
+def consecutive_refusal_state_path(state_dir, aid):
+    safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(aid))
+    return os.path.join(state_dir, "consecutive-refusals", "agent-" + safe + ".txt")
+
+def read_consecutive_refusal_state(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            rule, count = f.read().strip().split("\t", 1)
+        return rule, int(count)
+    except (OSError, ValueError):
+        return None, 0
+
+def write_consecutive_refusal_state(path, rule, count):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(rule + "\t" + str(count))
+
+CONSECUTIVE_REFUSAL_CEILING = 3
+
+def _record_repeated_refusal(rule):
+    """HRN-13.C.1: bump this agent's own consecutive-refusal streak for `rule`; on the third
+    in a row, write one line to the global-breakage journal (deduplicated per agent+rule+day
+    by bin/work-journal --breakage-once itself) and reset the streak to zero. A denial by a
+    DIFFERENT rule resets the streak to one instead of writing anything. Skipped entirely for
+    the session's own call (no agent_id) and for the narrow window before STATE_DIR itself
+    is assigned — the same defensive globals().get(...) pattern _write_refusal_journal
+    already uses above. Never raises."""
+    aid = globals().get("agent_id")
+    state_dir = globals().get("STATE_DIR")
+    if not aid or not state_dir:
+        return
+    try:
+        path = consecutive_refusal_state_path(state_dir, aid)
+        last_rule, count = read_consecutive_refusal_state(path)
+        count = count + 1 if last_rule == rule else 1
+        if count >= CONSECUTIVE_REFUSAL_CEILING:
+            root = _journal_shared_checkout_root()
+            if root is not None:
+                journal_cmd = os.path.join(root, "bin", "work-journal")
+                key = "work-gate.repeated-refusal:%s:%s" % (aid, rule)
+                text = ("hooks/work-gate.sh: агента %s правило %s отказало три раза "
+                        "подряд." % (aid, rule))
+                subprocess.run([journal_cmd, "--breakage-once", key, text],
+                                capture_output=True, timeout=5)
+            count = 0
+        write_consecutive_refusal_state(path, rule, count)
+    except Exception:
+        pass
+
 def deny_and_exit(reason, rule):
     _write_refusal_journal(rule, reason)
+    _record_repeated_refusal(rule)
     print(deny_json(reason))
     sys.exit(0)
 
@@ -821,8 +885,10 @@ if brief.get("role") == "executor" and card_dir is not None:
                 "Blocked by work-gate's LOG CEILING rule: %d calls have passed since this "
                 "executor last wrote to this card's own log.md — record state there now. "
                 "The only call that still gets through is a Write/Edit of log.md, or a Bash "
-                "call running bin/work-log, either of which resets this count to zero. "
-                "«Запиши состояние в лог и остановись.»" % n,
+                "call running bin/work-log or bin/work-note, any of which resets this count "
+                "to zero. This ceiling does not end the run: it exists so that a run cut "
+                "short stays resumable, so write the state and go straight on with the work. "
+                "«Запиши состояние в лог и работай дальше.»" % n,
                 "work-gate.log-ceiling"
             )
 
