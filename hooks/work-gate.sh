@@ -1091,9 +1091,11 @@ if tool_name in ("Write", "Edit"):
             if n >= FILE_EDIT_BRAKE_THRESHOLD:
                 deny_and_exit(
                     "Blocked by work-gate's FILE-EDIT BRAKE rule: this run has now edited "
-                    "%s %d times, past the %d threshold — rewrite the file in a single "
-                    "whole-file Write instead of another point edit, or move on. This "
-                    "count is per file path and per run; it never counts a write to one "
+                    "%s %d times, past the %d threshold. A whole-file Write is counted the "
+                    "same as a point edit, so there is no way to keep working on this one "
+                    "file in this run: either move on to other work, or record the state "
+                    "with bin/work-note and hand the file's remaining work to a fresh run. "
+                    "This count is per file path and per run; it never counts a write to one "
                     "of this card's own files, and a Bash call re-running the same "
                     "command however many times is never limited at all." %
                     (fp, n, FILE_EDIT_BRAKE_THRESHOLD),
