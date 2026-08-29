@@ -699,8 +699,8 @@ def closed_steps_for_phase(log_text, phase_id):
     """The step numbers log.md names closed for one phase, read by name rather than by a
     step's position in plan.md's own list (HRN-2.E). HRN-6.A.2 narrows this to only the one
     form bin/work-plan ever stamps and bin/work-note ever echoes — "## <phase_id>.<N> —
-    <state>" — matched per line, never across a newline. HRN-40 requires the same
-    space-and-em-dash the stamped form actually carries right after the step number, the
+    <state>" — matched per line, never across a newline. HRN-40 requires the same space
+    and long dash the stamped form actually carries right after the step number, the
     same requirement bin/work-handover's own STEP_HEADING_RE already puts on the same
     question, so an interim progress note such as "## <phase_id>.<N>-progress — interim:
     ..." is never mistaken for that step's own closing heading. The older, pre-HRN-6.A.2,
