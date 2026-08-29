@@ -424,12 +424,12 @@ def is_phase_boundary_log_call():
         head = first_line[:heredoc_m.start()]
         if re.search(r'(&&|;|\|)', head):
             return False
-        if re.match(r'^\s*bin/work-log\b', head) is None:
+        if re.match(r'^\s*bin/work-(log|note)\b', head) is None:
             return False
         return lines[-1].strip() == heredoc_m.group(2)
     if re.search(r'(&&|;|\||\n)', command):
         return False
-    return re.match(r'^\s*bin/work-log\b', command) is not None
+    return re.match(r'^\s*bin/work-(log|note)\b', command) is not None
 
 # The two kinds of work a card can belong to, each its own folder directly under the work
 # root — identical to bin/work-plan's own KINDS, kept as its own small copy here rather
@@ -529,27 +529,38 @@ def parse_plan_phases(plan_text, card_id):
         phases.append((phase_id, steps))
     return phases
 
-STEP_CLOSED_RE_CACHE = {}
 NAMED_STEP_CLOSED_RE_CACHE = {}
+
+def strip_fenced_blocks(text):
+    """Blank out everything between a pair of lines beginning with three backticks — log.md's
+    own code fences, which quote a check's verbatim output — before any heading pattern ever
+    runs over the text (HRN-6.A.2). A heading-shaped line quoted inside one of these fences
+    (part of an earlier entry's own check output, or a handoff's own account of what an older
+    log looked like) must never be read as a real, closed step — the exact live defect HRN-5's
+    own executor found (ai/harness/work-system/HRN-5_the-handover-command/log.md, line 219)."""
+    lines = text.split("\n")
+    out = []
+    in_fence = False
+    for line in lines:
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        out.append(line)
+    return "\n".join(out)
+
 
 def closed_steps_for_phase(log_text, phase_id):
     """The step numbers log.md names closed for one phase, read by name rather than by a
-    step's position in plan.md's own list (HRN-2.E) — two independent forms of heading are
-    matched and their results combined:
-      - the mechanical form bin/work-log itself prints, "## <phase_id>.<N> — <state>": the
-        step's own permanent name (bin/work-plan's own stamp), matched literally.
-      - the older, hand-typed form HRN-2.A's own executor established before bin/work-log
-        existed, "## <phase_id>, шаг <N>" or "…, шаг <N>–<M>" (en dash) — still read
-        unchanged, so a log written before this command existed keeps working.
-    Both are matched per line, never across a newline, so a heading with nothing after the
-    step numbers is still read correctly."""
-    pattern = STEP_CLOSED_RE_CACHE.get(phase_id)
-    if pattern is None:
-        pattern = re.compile(
-            r'^#{1,6}\s*' + re.escape(phase_id) + r'\s*,\s*шаг\s+([0-9][0-9,–\- ]*)',
-            re.MULTILINE,
-        )
-        STEP_CLOSED_RE_CACHE[phase_id] = pattern
+    step's position in plan.md's own list (HRN-2.E). HRN-6.A.2 narrows this to only the one
+    form bin/work-plan ever stamps and bin/work-note ever echoes — "## <phase_id>.<N> —
+    <state>" — matched per line, never across a newline, so a heading with nothing after the
+    step number is still read correctly. The older, pre-HRN-6.A.2, hand-typed "## <phase_id>,
+    шаг <N>" convention is no longer recognised at all, and the text is stripped of every
+    fenced code block first, so a heading-shaped line quoted verbatim inside a check's own
+    output can never be mistaken for a real one."""
+    text = strip_fenced_blocks(log_text)
     named_pattern = NAMED_STEP_CLOSED_RE_CACHE.get(phase_id)
     if named_pattern is None:
         named_pattern = re.compile(
@@ -558,17 +569,7 @@ def closed_steps_for_phase(log_text, phase_id):
         )
         NAMED_STEP_CLOSED_RE_CACHE[phase_id] = named_pattern
     closed = set()
-    for m in pattern.finditer(log_text):
-        for token in re.split(r'[,\s]+', m.group(1).strip()):
-            if not token:
-                continue
-            if "–" in token or "-" in token:
-                parts = re.split(r'[–\-]', token)
-                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                    closed.update(range(int(parts[0]), int(parts[1]) + 1))
-            elif token.isdigit():
-                closed.add(int(token))
-    for m in named_pattern.finditer(log_text):
+    for m in named_pattern.finditer(text):
         closed.add(int(m.group(1)))
     return closed
 
@@ -722,7 +723,9 @@ if brief.get("role") == "executor" and card_dir is not None:
         tool_name in ("Write", "Edit") and fp is not None and
         os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md"))
     )
-    is_work_log_call = tool_name == "Bash" and bash_names(command_of(tool_input), "work-log")
+    is_work_log_call = tool_name == "Bash" and (
+        bash_names(command_of(tool_input), "work-log") or
+        bash_names(command_of(tool_input), "work-note"))
     count_path = log_call_count_path(agent_id)
     if is_this_cards_log_write_now or is_work_log_call:
         write_log_call_count(count_path, 0)
