@@ -399,6 +399,11 @@ def is_phase_boundary_save_call():
     m = re.match(r'^\s*git\s+(\S+)', command)
     return m is not None and m.group(1) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
 
+# A command invoking bin/work-log or bin/work-note, by the bare relative path or by any
+# path ending in that same bin/<name> component — never by basename alone, so that a path
+# such as ~/elsewhere/work-note is not exempt while /abs/path/to/bin/work-note is.
+PHASE_BOUNDARY_LOG_CALL_RE = re.compile(r'^\s*(\S*/)?bin/work-(log|note)\b')
+
 def is_phase_boundary_log_call():
     """True only for a Bash call that is a single invocation of bin/work-log — exempted at
     the boundary for the same reason git add/commit already are (HRN-21.A.1), added by
@@ -413,7 +418,16 @@ def is_phase_boundary_log_call():
     its own heredoc marker, carries none of `&&`/`;`/`|` and starts with `bin/work-log`; and
     when a heredoc marker is present, the command's own last line is exactly that marker and
     nothing follows it. A command naming no heredoc marker at all still may not chain,
-    exactly like git add/commit."""
+    exactly like git add/commit.
+
+    The command may name the script by an absolute path as well as by the bare relative one
+    (found live closing HRN-6.B): an executor works in its own linked working copy while
+    this environment resets every Bash call's own working directory to the shared checkout,
+    so the relative form reaches the wrong copy — or no file at all, when the command being
+    called is one the card itself is still building — and the only other way of reaching it,
+    a `cd` in front, is chaining and refused. Matching is on the path's own trailing
+    `bin/work-log`/`bin/work-note` component, never on the basename alone, so a command
+    merely mentioning the name somewhere is still not exempt."""
     if tool_name != "Bash":
         return False
     command = command_of(tool_input)
@@ -424,12 +438,12 @@ def is_phase_boundary_log_call():
         head = first_line[:heredoc_m.start()]
         if re.search(r'(&&|;|\|)', head):
             return False
-        if re.match(r'^\s*bin/work-(log|note)\b', head) is None:
+        if PHASE_BOUNDARY_LOG_CALL_RE.match(head) is None:
             return False
         return lines[-1].strip() == heredoc_m.group(2)
     if re.search(r'(&&|;|\||\n)', command):
         return False
-    return re.match(r'^\s*bin/work-(log|note)\b', command) is not None
+    return PHASE_BOUNDARY_LOG_CALL_RE.match(command) is not None
 
 # The two kinds of work a card can belong to, each its own folder directly under the work
 # root — identical to bin/work-plan's own KINDS, kept as its own small copy here rather
