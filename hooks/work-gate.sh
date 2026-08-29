@@ -137,8 +137,9 @@
 #     повторный запуск одной и той же команды"). HRN-21.C.1: the very first Write that
 #     brings a file into existence — one that does not yet exist on disk at the moment this
 #     hook runs — is not a "правка" of anything and is never counted either, whatever count
-#     already sits on file for that path; every further Edit/Write of that same file, once
-#     it exists, counts exactly as before, starting at 1 ("тормоз ловит долбёжку по одному
+#     already sits on file for that path; and since the brake exists to catch hammering of
+#     code that was already on disk when the run began, that creation also takes the path
+#     out of the count for the rest of the run, marker file and all ("тормоз ловит долбёжку по одному
 #     месту, а не написание нового файла").
 #
 # 12. REPEATED REFUSAL → GLOBAL BREAKAGE (HRN-13.C): every call to deny_and_exit(reason,
@@ -1071,6 +1072,14 @@ def write_file_edit_count(path, n):
     with open(path, "w", encoding="utf-8") as f:
         f.write(str(n))
 
+def file_created_marker_path(aid, real_fp):
+    return file_edit_count_path(aid, real_fp) + ".created"
+
+def mark_file_created_this_run(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("1")
+
 if tool_name in ("Write", "Edit"):
     fp = file_path_of(tool_input)
     if fp is not None:
@@ -1084,7 +1093,18 @@ if tool_name in ("Write", "Edit"):
         # its own: the next Write/Edit of this same path finds the file now on disk (this
         # call's own effect, once it actually runs) and counts normally from there.
         is_fresh_creation = tool_name == "Write" and not os.path.exists(real_fp)
-        if not is_card_file and not is_fresh_creation:
+        # The brake exists to catch an agent hammering code that was already on disk when
+        # its run began. A file this same run brought into existence is not that: an agent
+        # authoring a new script honestly edits it a dozen times, and refusing that stops
+        # real work while catching nothing. So the creation lays down a marker for this
+        # (run, path) pair, and every later Write/Edit of that path inside the same run is
+        # left uncounted. The run stays bounded either way — the spend, context and pace
+        # ceilings all still apply to it.
+        created_marker = file_created_marker_path(agent_id, real_fp)
+        if is_fresh_creation:
+            mark_file_created_this_run(created_marker)
+        was_created_this_run = os.path.exists(created_marker)
+        if not is_card_file and not is_fresh_creation and not was_created_this_run:
             count_path = file_edit_count_path(agent_id, real_fp)
             n = read_file_edit_count(count_path) + 1
             write_file_edit_count(count_path, n)
