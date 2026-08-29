@@ -385,24 +385,39 @@ if brief is None:
 # "no newline anywhere" test below cannot apply to it.
 PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS = ("add", "commit")
 
+# Every quoted span of a shell command — single-quoted, or double-quoted with backslash
+# escapes honoured. Blanking these out before looking for chaining is what keeps an
+# argument's own contents from being read as shell syntax.
+QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", re.S)
+CHAINING_RE = re.compile(r'(&&|;|\||\n)')
+
+def chains(command):
+    """True when the command runs more than one statement. Judged against the command with
+    every quoted span blanked out, because a `;`, `|`, `&&` or newline inside an argument is
+    ordinary prose — a handoff entry's own text carries all four — and reading it as shell
+    syntax refused exactly the calls this boundary is supposed to let through (found live
+    closing HRN-6.C)."""
+    return CHAINING_RE.search(QUOTED_SPAN_RE.sub("", command)) is not None
+
 def is_phase_boundary_save_call():
     """True only for a Bash call whose entire command is a single `git add` or `git commit`
     invocation — never a substring or resemblance match. A command that chains more than one
-    statement (`&&`, `;`, a pipe, or a second line after a newline) is never exempt, even
-    when one of its parts is itself a bare `git add` or `git commit`, since the exemption
-    names one specific action, not a shell script that happens to contain it somewhere."""
+    statement is never exempt, even when one of its parts is itself a bare `git add` or
+    `git commit`, since the exemption names one specific action, not a shell script that
+    happens to contain it somewhere."""
     if tool_name != "Bash":
         return False
     command = command_of(tool_input)
-    if re.search(r'(&&|;|\||\n)', command):
+    if chains(command):
         return False
     m = re.match(r'^\s*git\s+(\S+)', command)
     return m is not None and m.group(1) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
 
-# A command invoking bin/work-log or bin/work-note, by the bare relative path or by any
-# path ending in that same bin/<name> component — never by basename alone, so that a path
-# such as ~/elsewhere/work-note is not exempt while /abs/path/to/bin/work-note is.
-PHASE_BOUNDARY_LOG_CALL_RE = re.compile(r'^\s*(\S*/)?bin/work-(log|note)\b')
+# A command invoking one of the three commands that record and land a closed phase, by the
+# bare relative path or by any path ending in that same bin/<name> component — never by
+# basename alone, so that a path such as ~/elsewhere/work-note is not exempt while
+# /abs/path/to/bin/work-note is.
+PHASE_BOUNDARY_LOG_CALL_RE = re.compile(r'^\s*(\S*/)?bin/work-(log|note|commit)\b')
 
 def is_phase_boundary_log_call():
     """True only for a Bash call that is a single invocation of bin/work-log — exempted at
@@ -427,7 +442,14 @@ def is_phase_boundary_log_call():
     called is one the card itself is still building — and the only other way of reaching it,
     a `cd` in front, is chaining and refused. Matching is on the path's own trailing
     `bin/work-log`/`bin/work-note` component, never on the basename alone, so a command
-    merely mentioning the name somewhere is still not exempt."""
+    merely mentioning the name somewhere is still not exempt.
+
+    `bin/work-commit` is exempt alongside the two log-writing commands, for the same reason
+    and found the same way (closing HRN-6.C): it is what this system puts in place of the
+    bare `git add`/`git commit` already exempt here, and an executor that cannot call it at
+    the boundary cannot land the work whose closure it has just recorded — as happened, one
+    phase after the absolute-path defect above, leaving a finished phase's code stranded
+    uncommitted in its own working copy."""
     if tool_name != "Bash":
         return False
     command = command_of(tool_input)
@@ -436,12 +458,12 @@ def is_phase_boundary_log_call():
     heredoc_m = re.search(r'<<-?\s*([\'"]?)(\w+)\1\s*$', first_line)
     if heredoc_m:
         head = first_line[:heredoc_m.start()]
-        if re.search(r'(&&|;|\|)', head):
+        if CHAINING_RE.search(QUOTED_SPAN_RE.sub("", head)):
             return False
         if PHASE_BOUNDARY_LOG_CALL_RE.match(head) is None:
             return False
         return lines[-1].strip() == heredoc_m.group(2)
-    if re.search(r'(&&|;|\||\n)', command):
+    if chains(command):
         return False
     return PHASE_BOUNDARY_LOG_CALL_RE.match(command) is not None
 
