@@ -204,7 +204,44 @@ def allow_and_exit():
     print(ALLOW_JSON)
     sys.exit(0)
 
-def deny_and_exit(reason):
+def _journal_shared_checkout_root():
+    """The shared checkout's own absolute path, the same `git worktree list --porcelain`
+    resolution bin/work_journal.py's own _checkout_root() uses — this hook cannot import
+    that module across the repository boundary, so it re-derives the same path here, never
+    raising."""
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            return line[len("worktree "):].strip()
+    return None
+
+def _write_refusal_journal(rule, input_text):
+    """Best-effort call to bin/work-journal --refusal in the separate validite-app
+    repository (HRN-13.B.4, HRN-13.A.4's own bin/work-journal) — never raises and never
+    changes deny_and_exit's own return value or exit code, exactly like every other rule in
+    this file that already fails open on an unreadable input rather than denying for a
+    reason of its own making."""
+    try:
+        root = _journal_shared_checkout_root()
+        if root is None:
+            return
+        journal_cmd = os.path.join(root, "bin", "work-journal")
+        who = "hooks/work-gate.sh:" + str(globals().get("agent_id") or "session")
+        subprocess.run([journal_cmd, "--refusal", who, rule, input_text],
+                        capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+def deny_and_exit(reason, rule):
+    _write_refusal_journal(rule, reason)
     print(deny_json(reason))
     sys.exit(0)
 
@@ -218,7 +255,7 @@ try:
         raise ValueError("empty stdin")
     data = json.loads(stdin_data)
 except Exception:
-    deny_and_exit("Blocked by work-gate: gate error (unreadable hook payload), failing closed.")
+    deny_and_exit("Blocked by work-gate: gate error (unreadable hook payload), failing closed.", "work-gate.unreadable-payload")
 
 tool_name  = data.get("tool_name") or ""
 tool_input = data.get("tool_input") or {}
@@ -286,7 +323,8 @@ if not fitness_ok:
         "every call rather than failing silently. Run bin/work-refusals to clear this; "
         "while it stands, the only calls that still get through are that run itself, an "
         "Edit/Write of hooks/work-gate.sh, and a Write/Edit of any card's own log.md. Set "
-        "CLAUDE_GATE_BYPASS=1 only for a deliberate, known exception."
+        "CLAUDE_GATE_BYPASS=1 only for a deliberate, known exception.",
+        "work-gate.fitness-blocks-until-suite-passes"
     )
 
 # --- 3. the session's own call passes without inspection ------------------------------
@@ -359,7 +397,8 @@ if brief is None:
         "role and the card it is working — this hook writes %s the moment it sees that "
         "call, and the script itself separately writes %s; neither exists yet (or neither "
         "is valid JSON naming a role and a card). «Нет файла — нет запуска.»" %
-        (agent_brief_path(agent_id), session_brief_path(session_id))
+        (agent_brief_path(agent_id), session_brief_path(session_id)),
+        "work-gate.no-brief-no-launch"
     )
 
 # --- 5. PHASE BOUNDARY: an executor whose current phase has no open steps left is refused
@@ -640,7 +679,8 @@ if brief.get("role") == "executor" and card_dir is not None:
             "(rule 4). Re-launch with bin/work-agent-brief --role executor --card %s "
             "--phase <ID>, naming the phase this run is actually working. The only call "
             "that still gets through is a Write/Edit of this card's own log.md: «допиши "
-            "передачу и остановись»." % brief["card"]
+            "передачу и остановись»." % brief["card"],
+            "work-gate.phase-boundary-blocks-unnamed-phase"
         )
     else:
         try:
@@ -670,7 +710,8 @@ if brief.get("role") == "executor" and card_dir is not None:
                         "own log.md, a Bash call that does nothing but `git add` or `git "
                         "commit`, and a Bash call running bin/work-log — saving work "
                         "already done, never starting anything new: «допиши передачу и "
-                        "остановись»." % phase_id
+                        "остановись»." % phase_id,
+                        "work-gate.phase-boundary-own-phase-closed-later-untouched"
                     )
 
 # --- 6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" ------------------------------
@@ -698,19 +739,22 @@ if tool_name in ("Write", "Edit") and card_dir is not None:
                     "executor's file to write — the orchestrator alone edits the plan. "
                     "Write the proposed change to question.md in this card's own folder "
                     "instead and keep working; the orchestrator watches for that file and "
-                    "answers it. «Один файл, один автор.»"
+                    "answers it. «Один файл, один автор.»",
+                    "work-gate.file-authorship-plan"
                 )
             if role == "executor" and fname in EXECUTOR_LOCKED_FILES:
                 deny_and_exit(
                     "Blocked by work-gate's FILE AUTHORSHIP rule: %s is not the executor's "
                     "file to write — «Один файл, один автор». See "
-                    "ai/harness/system/project.md, \"Правка чужого файла\"." % fname
+                    "ai/harness/system/project.md, \"Правка чужого файла\"." % fname,
+                    "work-gate.file-authorship-executor-locked"
                 )
             if role == "acceptor" and fname == "log.md":
                 deny_and_exit(
                     "Blocked by work-gate's FILE AUTHORSHIP rule: log.md is not the "
                     "acceptor's file to write — «Один файл, один автор». See "
-                    "ai/harness/system/project.md, \"Правка чужого файла\"."
+                    "ai/harness/system/project.md, \"Правка чужого файла\".",
+                    "work-gate.file-authorship-acceptor-log"
                 )
 
 # --- 7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): twenty calls without a log.md
@@ -774,7 +818,8 @@ if brief.get("role") == "executor" and card_dir is not None:
                 "executor last wrote to this card's own log.md — record state there now. "
                 "The only call that still gets through is a Write/Edit of log.md, or a Bash "
                 "call running bin/work-log, either of which resets this count to zero. "
-                "«Запиши состояние в лог и остановись.»" % n
+                "«Запиши состояние в лог и остановись.»" % n,
+                "work-gate.log-ceiling"
             )
 
 # --- shared by rules 8-11 below: "is this call a Write/Edit of THIS run's own card's
@@ -870,7 +915,8 @@ if run_stats is not None and run_stats["last_context"] is not None and \
         "%d tokens of context, past the %d ceiling. «Запиши состояние в лог и остановись.» "
         "A fresh executor picks the card up from there with an empty context. The only "
         "call that still gets through is a Write/Edit of this card's own log.md." %
-        (run_stats["last_context"], CONTEXT_SIZE_CEILING)
+        (run_stats["last_context"], CONTEXT_SIZE_CEILING),
+        "work-gate.context-size"
     )
 
 # --- 9. SPEND CEILING (HRN-2.C): role "executor" only, counted on this run's own
@@ -887,7 +933,8 @@ if brief.get("role") == "executor" and run_stats is not None and \
         "ceiling counted for this run alone, never accumulated across the whole card — a "
         "fresh executor's own transcript starts this same count at zero. «Запиши "
         "состояние в лог и остановись.» The only call that still gets through is a "
-        "Write/Edit of this card's own log.md." % (run_stats["spend"], SPEND_CEILING)
+        "Write/Edit of this card's own log.md." % (run_stats["spend"], SPEND_CEILING),
+        "work-gate.spend-ceiling"
     )
 
 # --- 10. PACE CEILING (HRN-2.C): role "executor" only, tokens spent per tool call this
@@ -915,7 +962,8 @@ if brief.get("role") == "executor":
             "threshold this rule judges every call against must live there as a bare "
             "integer, and its absence refuses every call for this executor rather than "
             "silently skipping the check. The only call that still gets through is a "
-            "Write/Edit of this card's own log.md." % pace_threshold_file()
+            "Write/Edit of this card's own log.md." % pace_threshold_file(),
+            "work-gate.pace-threshold-missing"
         )
     elif run_stats is not None and run_stats["calls"] > PACE_CALL_ALLOWANCE:
         pace = run_stats["spend"] / run_stats["calls"]
@@ -928,7 +976,8 @@ if brief.get("role") == "executor":
                 "«Запиши состояние в лог и остановись.» The only call that still gets "
                 "through is a Write/Edit of this card's own log.md." %
                 (pace, run_stats["spend"], run_stats["calls"], pace_threshold,
-                 pace_threshold_file())
+                 pace_threshold_file()),
+                "work-gate.pace-ceiling"
             )
 
 # --- 11. FILE-EDIT BRAKE (HRN-2.C): the Nth Edit/Write of one file inside one run -------
@@ -977,7 +1026,8 @@ if tool_name in ("Write", "Edit"):
                     "count is per file path and per run; it never counts a write to one "
                     "of this card's own files, and a Bash call re-running the same "
                     "command however many times is never limited at all." %
-                    (fp, n, FILE_EDIT_BRAKE_THRESHOLD)
+                    (fp, n, FILE_EDIT_BRAKE_THRESHOLD),
+                    "work-gate.file-edit-brake"
                 )
 
 allow_and_exit()
