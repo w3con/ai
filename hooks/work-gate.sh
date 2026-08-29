@@ -357,7 +357,33 @@ if brief is None:
     )
 
 # --- 5. PHASE BOUNDARY: an executor whose current phase has no open steps left is refused
-# every call except a Write/Edit of its own card's log.md (HRN-2.D) --------------------
+# every call except a Write/Edit of its own card's log.md, and a Bash call that does nothing
+# but `git add` or `git commit` (HRN-2.D, extended by HRN-21.A) -----------------------
+
+# HRN-21.A: the boundary exists to stop an executor from STARTING new work once its own
+# phase is closed, not to stop it from SAVING work already done — writing the log entry that
+# closes the phase is worthless if the very next call, the commit that lands it, is refused.
+# This list is closed and literal, per this card's own plan ("Решения, принятые при
+# написании плана", "Защёлка ничего не толкует и ничего не угадывает"): no rule here
+# recognises a call by resemblance to a save. `git merge`, `git push` and `git rebase` are
+# refused at the boundary exactly as before, because the executor may not run them at all,
+# boundary or not — they are not in this list and never will be. A harmless `git status`, or
+# any command not in this list, is refused exactly like any other call.
+PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS = ("add", "commit")
+
+def is_phase_boundary_save_call():
+    """True only for a Bash call whose entire command is a single `git add` or `git commit`
+    invocation — never a substring or resemblance match. A command that chains more than one
+    statement (`&&`, `;`, a pipe, or a second line after a newline) is never exempt, even
+    when one of its parts is itself a bare `git add` or `git commit`, since the exemption
+    names one specific action, not a shell script that happens to contain it somewhere."""
+    if tool_name != "Bash":
+        return False
+    command = command_of(tool_input)
+    if re.search(r'(&&|;|\||\n)', command):
+        return False
+    m = re.match(r'^\s*git\s+(\S+)', command)
+    return m is not None and m.group(1) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
 
 # The two kinds of work a card can belong to, each its own folder directly under the work
 # root — identical to bin/work-plan's own KINDS, kept as its own small copy here rather
@@ -549,15 +575,17 @@ if brief.get("role") == "executor" and card_dir is not None:
                     log_text = ""
                 closed = len(closed_steps_for_phase(log_text, phase_id) & set(range(1, total + 1)))
                 if closed >= total:
-                    if is_this_cards_log_write():
+                    if is_this_cards_log_write() or is_phase_boundary_save_call():
                         allow_and_exit()
                     deny_and_exit(
                         "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s "
                         "— the phase this run's own caller-brief names — is already closed "
                         "in log.md, regardless of what any other phase in the plan looks "
                         "like. A fresh executor takes the next phase, not this one. The "
-                        "only call that still gets through is a Write/Edit of this card's "
-                        "own log.md: «допиши передачу и остановись»." % phase_id
+                        "only calls that still get through are a Write/Edit of this card's "
+                        "own log.md, and a Bash call that does nothing but `git add` or "
+                        "`git commit` — saving work already done, never starting anything "
+                        "new: «допиши передачу и остановись»." % phase_id
                     )
 
 # --- 6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" ------------------------------
