@@ -17,7 +17,7 @@ Sequential work — one task after another, which is the ordinary case — needs
 **Why:** Alex, 2026-08-15 — «мне нужно, чтобы у нас не было запущено несколько задач в параллели. Тогда я могу легко делать /rewind с сохранением файлов… а когда у тебя несколько задач, я не успеваю делать ни /rewind ни /compact — боясь потерять информацию важную для других задач». And the cost driver behind it, in his words: «и таких вызовов может быть много — и все с контекстом в 100-200тыс. токенов… растет как снежный ком. потому что ты дорогой». Every tool call re-sends the entire session context, so a small session makes every call cheaper, and a large one multiplies the price of each idle probe.
 
 **How to apply:**
-- Take one task per session; when it is accepted, say so plainly and let Alex rewind. Start nothing new in that session.
+- Take one live task at a time; when it is accepted, say so plainly and let Alex rewind. Start the next card only once the current one is accepted — in the same conversation is fine.
 - Do not poll a background agent — the harness notifies when it finishes.
 - Verify an executor's report with machinery first, not by reading: run the acceptance command, which re-runs the card's own gates, and look at the diff **stat** rather than the diff. Read files only when one of those two shows something off. If reading keeps finding the same class of fault, turn that finding into a committed check instead of reading again next time — see [[feedback_reusable_tooling]].
 - When a gate or script refuses and names its reason, that message is the instruction: act on it in one call. Do not re-derive it with a chain of status, stat and diff probes.
