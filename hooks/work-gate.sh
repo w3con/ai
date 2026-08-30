@@ -680,11 +680,16 @@ if not agent_id and tool_name in ("Task", "Agent") and \
         deny_and_exit(DENY_NO_SANCTION, "work-gate.no-sanction-executor-spawn")
     matched_card = matched_sanction.get("card")
     matched_estimate = matched_sanction.get("estimate")
+    matched_short = bool(matched_sanction.get("short"))
     # HRN-52.A.2, threshold raised from 1 to 2 by HRN-53.A.1: a sanction proven to carry the
     # integer 1 or 2 as its own estimate skips rule 2b entirely — never denied by it, never
-    # recorded as occupying the conversation. Anything else (no estimate field, or one that is
-    # not exactly 1 or 2) is judged by rule 2b exactly as before this exemption existed.
-    if not (isinstance(matched_estimate, int) and matched_estimate in (1, 2)):
+    # recorded as occupying the conversation. HRN-54.B.3: a sanction carrying the short-card
+    # flag skips it the same way regardless of its own estimate — the structural fact
+    # work_journal.is_short_card already named on the bin/work-handover side, so a short
+    # card's own estimate (always 1 per rule 66) never has to be the thing this rule reads.
+    # Anything else (no estimate field, one that is not exactly 1 or 2, and no short flag) is
+    # judged by rule 2b exactly as before either exemption existed.
+    if not (matched_short or (isinstance(matched_estimate, int) and matched_estimate in (1, 2))):
         second_reason = second_task_deny_reason(matched_card, data.get("transcript_path"))
         if second_reason is not None:
             deny_and_exit(second_reason, "work-gate.second-task-in-conversation")
@@ -981,6 +986,17 @@ def parse_plan_phases(plan_text, card_id):
         phases.append((phase_id, steps))
     return phases
 
+def short_card_total_steps(description_text):
+    """A short card's own step count — the number of bullets under description.md's own
+    "## Шаги" section (HRN-54.B.3). Mirrors bin/work_journal.py's own
+    short_card_step_names() exactly (the same heading, the same bullet pattern), because
+    this hook lives in a separate repository and cannot import that module — this function
+    is therefore the one deliberate second copy of that parsing, kept in sync by hand
+    whenever the Python module's own parsing changes."""
+    section = find_section(description_text, "Шаги")
+    lines = section.split("\n")
+    return sum(1 for l in lines if BULLET_RE.match(l))
+
 NAMED_STEP_CLOSED_RE_CACHE = {}
 
 def strip_fenced_blocks(text):
@@ -1069,37 +1085,56 @@ if brief.get("role") == "executor" and card_dir is not None:
             "work-gate.phase-boundary-blocks-unnamed-phase"
         )
     else:
+        # HRN-54.B.3: a card folder carrying no plan.md at all is a short card by
+        # definition (work_journal.is_short_card, in the Python module this shell-embedded
+        # hook cannot import) — its own steps are counted off description.md's own "## Шаги"
+        # section instead, through short_card_total_steps() above, rather than left
+        # unenforced by falling through the "plan_text is not None" branch below with
+        # total never computed at all, which is what this rule did before HRN-54.
         try:
             with open(os.path.join(card_dir, "plan.md"), "r", encoding="utf-8") as f:
                 plan_text = f.read()
+            is_short_card_dir = False
         except OSError:
             plan_text = None
-        if plan_text is not None:
+            is_short_card_dir = True
+        if is_short_card_dir:
+            try:
+                with open(os.path.join(card_dir, "description.md"), "r",
+                          encoding="utf-8") as f:
+                    description_text = f.read()
+            except OSError:
+                description_text = None
+            total = (short_card_total_steps(description_text)
+                     if description_text is not None else None)
+        elif plan_text is not None:
             total = total_steps_for_phase(plan_text, brief["card"], phase_id)
-            if total:
-                try:
-                    with open(os.path.join(card_dir, "log.md"), "r", encoding="utf-8") as f:
-                        log_text = f.read()
-                except OSError:
-                    log_text = ""
-                closed = len(closed_steps_for_phase(log_text, phase_id) & set(range(1, total + 1)))
-                if closed >= total:
-                    if is_this_cards_log_write() or is_phase_boundary_save_call() or \
-                            is_phase_boundary_log_call():
-                        allow_and_exit()
-                    deny_and_exit(
-                        "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s "
-                        "— the phase this run's own caller-brief names — is already closed "
-                        "in log.md, regardless of what any other phase in the plan looks "
-                        "like. A fresh executor takes the next phase, not this one. The "
-                        "only calls that still get through are a Read/Write/Edit of this "
-                        "card's own log.md, a Bash call that does nothing but `git add` or "
-                        "`git commit`, and a single, unchained Bash call running "
-                        "bin/work-note or bin/work-commit — saving work "
-                        "already done, never starting anything new: «допиши передачу и "
-                        "остановись»." % phase_id,
-                        "work-gate.phase-boundary-own-phase-closed-later-untouched"
-                    )
+        else:
+            total = None
+        if total:
+            try:
+                with open(os.path.join(card_dir, "log.md"), "r", encoding="utf-8") as f:
+                    log_text = f.read()
+            except OSError:
+                log_text = ""
+            closed = len(closed_steps_for_phase(log_text, phase_id) & set(range(1, total + 1)))
+            if closed >= total:
+                if is_this_cards_log_write() or is_phase_boundary_save_call() or \
+                        is_phase_boundary_log_call():
+                    allow_and_exit()
+                deny_and_exit(
+                    "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s "
+                    "— the phase this run's own caller-brief names — is already closed "
+                    "in log.md, regardless of what any other phase in the plan looks "
+                    "like. A fresh executor takes the next phase, not this one. The "
+                    "only calls that still get through are a Read/Write/Edit of this "
+                    "card's own log.md, a Bash call that does nothing but `git add` or "
+                    "`git commit`, and a single, unchained Bash call running "
+                    "bin/work-note or bin/work-commit — saving work "
+                    "already done, never starting anything new: «допиши передачу и "
+                    "остановись»." % phase_id,
+                    "work-gate.phase-boundary-own-phase-closed-later-untouched"
+                )
 
 # --- 6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" ------------------------------
 # ai/harness/system/project.md, "Правка чужого файла": the executor may not write
