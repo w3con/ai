@@ -12,16 +12,9 @@
 # bin/path-check for what counts and what is deliberately exempt.
 # Check two: every hook script still parses, and none of them differs from the last
 # commit without having been installed through bin/hook-install.
-# Check three: a staged hooks/work-gate.sh proves its own fitness before it can land. The
-# staged bytes (not the working tree's) are extracted to a scratch file inside hooks/
-# itself — never $TMPDIR — because the hook resolves its ledger and its pace-threshold
-# machine file both relative to its own path, and a scratch file living anywhere else
-# would silently break that resolution for every rule bin/work-refusals --only hook runs,
-# not only the ones about the ledger. That scratch file is run through validite-app's
-# bin/work-refusals --only hook, which appends the proven fingerprint to
-# hooks/work-gate.verified-hashes.txt — the committed ledger the hook itself reads FITNESS
-# from at every tool call (HRN-41). A passing run's updated ledger is staged into the same
-# commit; a failing run refuses the commit outright.
+# Check three, that used to prove a staged hooks/work-gate.sh against bin/work-refusals
+# before letting it land, is gone: rule 62 of validite-app's rules.md retires that command
+# for good, and HRN-48 removes the FITNESS machinery only it could satisfy.
 
 set -uo pipefail
 
@@ -49,29 +42,6 @@ for hook in "$REPO_ROOT"/hooks/*.py; do
         FAILED=1
     fi
 done
-
-STAGED_HOOK_STATUS="$(git -C "$REPO_ROOT" diff --cached --name-status -- hooks/work-gate.sh)"
-if [ -n "$STAGED_HOOK_STATUS" ] && [ "${STAGED_HOOK_STATUS:0:1}" != "D" ]; then
-    REFUSALS_PROJECT="${WORK_GATE_REFUSALS_PROJECT:-$HOME/Dev/validite/validite-app}"
-    if [ ! -x "$REFUSALS_PROJECT/bin/work-refusals" ]; then
-        echo "pre-commit: hooks/work-gate.sh is staged, but bin/work-refusals cannot be found at $REFUSALS_PROJECT." >&2
-        echo "pre-commit: set WORK_GATE_REFUSALS_PROJECT to the validite-app checkout that carries it, or commit hooks/work-gate.sh from a machine that has one." >&2
-        FAILED=1
-    else
-        REFUSALS_BRANCH="$(git -C "$REFUSALS_PROJECT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")"
-        REFUSALS_COMMIT="$(git -C "$REFUSALS_PROJECT" rev-parse --short HEAD 2>/dev/null || echo "?")"
-        echo "pre-commit: proving staged hooks/work-gate.sh against $REFUSALS_PROJECT (branch $REFUSALS_BRANCH @ $REFUSALS_COMMIT)…"
-        STAGED_HOOK_TMP="$(mktemp "$REPO_ROOT/hooks/.pre-commit-staged-work-gate.XXXXXX")"
-        git -C "$REPO_ROOT" show ":hooks/work-gate.sh" > "$STAGED_HOOK_TMP"
-        if WORK_GATE_HOOK="$STAGED_HOOK_TMP" "$REFUSALS_PROJECT/bin/work-refusals" --only hook; then
-            git -C "$REPO_ROOT" add "hooks/work-gate.verified-hashes.txt"
-        else
-            echo "pre-commit: bin/work-refusals --only hook refused the staged hooks/work-gate.sh; commit refused." >&2
-            FAILED=1
-        fi
-        rm -f "$STAGED_HOOK_TMP"
-    fi
-fi
 
 if [ "$FAILED" -ne 0 ]; then
     echo >&2
