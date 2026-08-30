@@ -49,10 +49,21 @@
 #     a bug in this rule must never widen into a refusal that rule did not itself make.
 #
 #  3. CALLER IDENTITY: a call carrying no agent_id in its payload is the session's own — the
-#     orchestrator — and passes with no further inspection past rules 2 and 2b above ("вызов
-#     самой сессии пропускает без разбора" holds for every rule from here on; rules 2 and 2b
-#     are the one exception, since they inspect the very call that would create a subagent).
-#     Everything from here on applies only to a subagent's own call.
+#     orchestrator — and passes past rules 2 and 2b above. Rules 4 onward judge only a
+#     subagent's own call — none of them can read anything a session-only call carries.
+#
+#  3a. COORDINATOR COUNTS (HRN-48.D): the session's own call, judged by rule 3 above, is never
+#     refused by anything from here on, but it is watched on two separate rubrics, both
+#     ceilings carried over unchanged from the retired hooks/card-touch-gate.sh's own COORD
+#     and SEARCH-AGENT rules (HRN-123). Every one of the session's own calls, keyed on a
+#     sanitized transcript_path, bumps a running total against a ceiling of 761; a Task/Agent
+#     spawn whose own subagent_type is a reading role (Explore, Plan, trace-audit — the same
+#     three hooks/plan-gate.sh once allowlisted) bumps a second, separate running total, same
+#     key, against a ceiling of 28. Crossing either ceiling changes nothing about the call's
+#     own outcome — it still allows — and only adds the count to that allow's own
+#     permissionDecisionReason, so a long coordinator session can see its own pace without a
+#     refusal ever breaking the single-conversation pipeline rule 65 of this project's own
+#     CLAUDE.md requires.
 #
 #  4. NO BRIEF, NO LAUNCH: a subagent is known to this hook only because something told it —
 #     a small caller-brief file naming its role and the card it works, {"role": ...,
@@ -259,8 +270,21 @@ def deny_json(reason):
             '"permissionDecision":"deny",'
             '"permissionDecisionReason":' + json.dumps(reason) + '}}')
 
-def allow_and_exit():
-    print(ALLOW_JSON)
+def allow_and_exit(reason=None):
+    # HRN-48.D: an "allow" decision can still carry a permissionDecisionReason — used by rule
+    # 3a's two coordinator-count rubrics to warn without ever refusing. reason=None (every
+    # call site before HRN-48.D) reproduces the exact ALLOW_JSON string this function always
+    # printed, so no other allow point in this file changes shape.
+    if reason:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": reason,
+            }
+        }))
+    else:
+        print(ALLOW_JSON)
     sys.exit(0)
 
 def _journal_shared_checkout_root():
@@ -483,9 +507,75 @@ if not agent_id and tool_name in ("Task", "Agent") and \
     if second_reason is not None:
         deny_and_exit(second_reason, "work-gate.second-task-in-conversation")
 
-# --- 3. the session's own call passes without inspection ------------------------------
+# --- 3. / 3a. the session's own call passes, but is watched by two warn-only rubrics
+# (HRN-48.D) whose ceilings are carried over unchanged from the retired
+# hooks/card-touch-gate.sh's own COORD and SEARCH-AGENT rules -----------------------------
+COORD_CALL_CEILING = 761  # card-touch-gate.sh's own COORD_CEILING
+SEARCH_AGENT_RAISE_CEILING = 28  # card-touch-gate.sh's own SEARCH_AGENT_CEILING
+SEARCH_AGENT_ROLE_TYPES = {"Explore", "Plan", "trace-audit"}  # plan-gate.sh's own
+                                                               # ALLOWLISTED_SUBTYPES
+
+COORD_CALLS_DIR = os.path.join(STATE_DIR, "coord-calls")
+SEARCH_AGENT_RAISES_DIR = os.path.join(STATE_DIR, "search-agent-raises")
+
+COORD_COUNT_WARN_TEMPLATE = (
+    "work-gate's COORD count: this coordinator session has made {count} tool calls, past its "
+    "own watched ceiling of {ceiling} (carried over from the retired card-touch-gate.sh's own "
+    "COORD rule). This is a count, not a refusal — the call still passes."
+)
+
+SEARCH_AGENT_RAISE_WARN_TEMPLATE = (
+    "work-gate's SEARCH-AGENT count: this session has raised {count} reading agents "
+    "(subagent_type={agent_type} included), past its own watched ceiling of {ceiling} "
+    "(carried over from the retired card-touch-gate.sh's own SEARCH-AGENT rule). This is a "
+    "count, not a refusal — the spawn still passes."
+)
+
+def _sanitized_transcript_token(transcript_path):
+    if not transcript_path:
+        return None
+    return re.sub(r'[^A-Za-z0-9_-]', '_', os.path.basename(str(transcript_path)))
+
+def _bump_counter(dir_path, token, field):
+    """Best-effort increment-and-read of a per-token counter file; never raises — returns the
+    new count (starting at 1) on success, None when the count cannot be established at all,
+    the same fail-open posture every other rule in this file already takes."""
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+        path = os.path.join(dir_path, token + ".json")
+        count = 0
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    count = loaded.get(field, 0)
+            except Exception:
+                count = 0
+        count += 1
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({field: count}, f)
+        return count
+    except Exception:
+        return None
+
 if not agent_id:
-    allow_and_exit()
+    warn_reason = None
+    token = _sanitized_transcript_token(data.get("transcript_path"))
+    if token:
+        coord_count = _bump_counter(COORD_CALLS_DIR, token, "coord_count")
+        if coord_count is not None and coord_count > COORD_CALL_CEILING:
+            warn_reason = COORD_COUNT_WARN_TEMPLATE.format(
+                count=coord_count, ceiling=COORD_CALL_CEILING)
+        subagent_type = (tool_input.get("subagent_type") or "").strip()
+        if tool_name in ("Task", "Agent") and subagent_type in SEARCH_AGENT_ROLE_TYPES:
+            raise_count = _bump_counter(SEARCH_AGENT_RAISES_DIR, token, "raise_count")
+            if raise_count is not None and raise_count > SEARCH_AGENT_RAISE_CEILING:
+                search_warn = SEARCH_AGENT_RAISE_WARN_TEMPLATE.format(
+                    agent_type=subagent_type, count=raise_count,
+                    ceiling=SEARCH_AGENT_RAISE_CEILING)
+                warn_reason = (warn_reason + " " + search_warn) if warn_reason else search_warn
+    allow_and_exit(warn_reason)
 
 # --- 4. no brief, no launch (one exemption: writing the very first brief) -------------
 KNOWN_ROLES = {"critic", "mapper", "executor", "tracer", "acceptor"}
