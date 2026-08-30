@@ -41,12 +41,16 @@
 #     already keyed its per-session ceiling on). A later spawn in the SAME conversation whose
 #     own sanction names a DIFFERENT card is refused, naming both cards and both ways out —
 #     finish the current task and close the conversation with /clear, or open a separate
-#     session with /parallel when both are genuinely needed at once. A later spawn whose
-#     sanction names the SAME card passes every time, without limit — an ordinary relay after
-#     a pace stop, not a second task. This rule keeps its own try/except and never denies on
-#     an error of its own — a transcript_path it cannot read or a state file it cannot write
-#     falls through to an allow, since rule 2 has already decided this exact spawn is fine and
-#     a bug in this rule must never widen into a refusal that rule did not itself make.
+#     session with /parallel when both are genuinely needed at once — UNLESS the remembered
+#     card's own folder has since gained a done.md or a cancelled.md (HRN-51): a card closed
+#     this way no longer occupies the conversation, the new spawn passes, and its own card
+#     takes the closed one's place in the state file. A later spawn whose sanction names the
+#     SAME card passes every time, without limit — an ordinary relay after a pace stop, not a
+#     second task. This rule keeps its own try/except and never denies on an error of its
+#     own — a transcript_path it cannot read, a state file it cannot write or parse, or a
+#     remembered card's own folder it cannot find while checking for done.md/cancelled.md,
+#     all fall through to an allow, since rule 2 has already decided this exact spawn is fine
+#     and a bug in this rule must never widen into a refusal that rule did not itself make.
 #
 #  3. CALLER IDENTITY: a call carrying no agent_id in its payload is the session's own — the
 #     orchestrator — and passes past rules 2 and 2b above. Rules 4 onward judge only a
@@ -424,6 +428,62 @@ def bash_names(command, script_basename):
     harness-stamp-gate.sh already uses for 'bootstrap.sh' in its own command."""
     return script_basename in command
 
+# The two kinds of work a card can belong to, each its own folder directly under the work
+# root — identical to bin/work-plan's own KINDS, kept as its own small copy here rather
+# than imported, the same way this repository's other git-plumbing helpers each carry their
+# own copy (bin/session-start's own repo_root()/primary_worktree_path() comments name the
+# same convention). Moved above rule 2b (HRN-51), which is the first rule below that needs
+# to resolve a card's own folder — rule 5 further down still uses these same four names.
+CARD_KINDS = ("harness", "timeline")
+
+def find_work_root():
+    """The directory holding the "harness" and "timeline" kind folders. A card's own folder
+    always lives in the shared checkout, never inside a linked worktree's own copy
+    (ai/harness/system/project.md, "Папка карточки всегда живёт в общем каталоге, а не в
+    копии"), so this is resolved from the shared checkout's own path — `git worktree
+    list --porcelain`'s first entry, readable from inside any linked worktree too — not
+    from whatever repository copy this call's own cwd happens to sit in. Returns None when
+    that cannot be resolved (cwd is not inside a git working tree at all, or git itself is
+    unavailable), in which case the phase-boundary rule and rule 2b's own card-closure check
+    are both skipped rather than denied."""
+    override = os.environ.get("WORK_GATE_WORK_ROOT")
+    if override:
+        return override
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            return os.path.join(line[len("worktree "):].strip(), "ai")
+    return None
+
+def epic_dirs(work_root):
+    found = []
+    for kind in CARD_KINDS:
+        base = os.path.join(work_root, kind)
+        if not os.path.isdir(base):
+            continue
+        for epic_name in sorted(os.listdir(base)):
+            epic_dir = os.path.join(base, epic_name)
+            if os.path.isdir(epic_dir):
+                found.append(epic_dir)
+    return found
+
+def find_card_dir(work_root, card_id):
+    for epic_dir in epic_dirs(work_root):
+        for card_name in sorted(os.listdir(epic_dir)):
+            if card_name == card_id or card_name.startswith(card_id + "_"):
+                card_dir = os.path.join(epic_dir, card_name)
+                if os.path.isdir(card_dir):
+                    return card_dir
+    return None
+
 # --- 2. no sanction, no executor spawn (HRN-48.B) --------------------------------------
 def sanction_path(sid):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(sid)) if sid else "_no_session_id_"
@@ -465,12 +525,44 @@ SECOND_TASK_TEMPLATE = (
     "time, open a separate session with /parallel instead of spawning a second executor here."
 )
 
+def owned_card_is_closed(card_id):
+    """HRN-51: True only when card_id's own folder can be found and it carries a done.md or
+    cancelled.md file — the two terminal markers rules.md's own rule 51 names ("A folder
+    carrying none of these three is still in progress" — the third, rejected.md, is never
+    checked here, since a rejected card is sent back for a plan fix and still occupies the
+    conversation). False when the folder is found but carries neither file — the ordinary,
+    still-open case. None when the card's own folder cannot be established at all (no work
+    root, no matching folder, or a listing that raises) — this function's own reading error,
+    which second_task_deny_reason below must treat as a permission, never as grounds to
+    deny, exactly like every other reading error this rule already tolerates."""
+    try:
+        root = find_work_root()
+        if root is None:
+            return None
+        card_dir = find_card_dir(root, card_id)
+        if card_dir is None:
+            return None
+        return os.path.isfile(os.path.join(card_dir, "done.md")) or \
+            os.path.isfile(os.path.join(card_dir, "cancelled.md"))
+    except Exception:
+        return None
+
 def second_task_deny_reason(card, transcript_path):
     """None to allow (recording the card as needed); the deny reason string otherwise. This
     rule never creates a permission of its own — it only ever turns an allow rule 2 has
     already decided into a deny — and it never raises: every failure of its own (an
-    unwritable state directory, a corrupt state file) falls through to None, an allow,
-    because a bug in this rule must never widen into a refusal rule 2 did not itself make."""
+    unwritable state directory, a corrupt state file, an unresolvable card folder) falls
+    through to None, an allow, because a bug in this rule must never widen into a refusal
+    rule 2 did not itself make.
+
+    HRN-51: a remembered card stops occupying the conversation the moment its own folder
+    carries done.md or cancelled.md — a later spawn naming a different card then passes,
+    and that card takes the remembered one's place in the state file, the same write the
+    fresh-start branch below already performs. While neither marker is on disk, the denial
+    is unchanged, naming both exits below. owned_card_is_closed()'s own reading error (its
+    own None) is answered with an allow that leaves the state file untouched, never with a
+    denial — this rule can turn an already-decided allow into a deny, never manufacture one
+    of its own out of a failure to read."""
     try:
         state_path = one_task_state_path(transcript_path)
         if not state_path:
@@ -490,6 +582,14 @@ def second_task_deny_reason(card, transcript_path):
                 json.dump({"card": card}, f)
             return None
         if owned == card:
+            return None
+        closed = owned_card_is_closed(owned)
+        if closed is None:
+            return None  # a reading error of this check's own — never a reason to deny
+        if closed:
+            os.makedirs(ONE_TASK_STATE_DIR, exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump({"card": card}, f)
             return None
         return SECOND_TASK_TEMPLATE.format(owned=owned, attempted=card)
     except Exception:
@@ -753,61 +853,9 @@ def is_phase_boundary_log_call():
         return False
     return PHASE_BOUNDARY_LOG_CALL_RE.match(command) is not None
 
-# The two kinds of work a card can belong to, each its own folder directly under the work
-# root — identical to bin/work-plan's own KINDS, kept as its own small copy here rather
-# than imported, the same way this repository's other git-plumbing helpers each carry their
-# own copy (bin/session-start's own repo_root()/primary_worktree_path() comments name the
-# same convention).
-CARD_KINDS = ("harness", "timeline")
-
-def find_work_root():
-    """The directory holding the "harness" and "timeline" kind folders. A card's own folder
-    always lives in the shared checkout, never inside a linked worktree's own copy
-    (ai/harness/system/project.md, "Папка карточки всегда живёт в общем каталоге, а не в
-    копии"), so this is resolved from the shared checkout's own path — `git worktree
-    list --porcelain`'s first entry, readable from inside any linked worktree too — not
-    from whatever repository copy this call's own cwd happens to sit in. Returns None when
-    that cannot be resolved (cwd is not inside a git working tree at all, or git itself is
-    unavailable), in which case the phase-boundary rule below is skipped rather than
-    denied."""
-    override = os.environ.get("WORK_GATE_WORK_ROOT")
-    if override:
-        return override
-    try:
-        result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        if line.startswith("worktree "):
-            return os.path.join(line[len("worktree "):].strip(), "ai")
-    return None
-
-def epic_dirs(work_root):
-    found = []
-    for kind in CARD_KINDS:
-        base = os.path.join(work_root, kind)
-        if not os.path.isdir(base):
-            continue
-        for epic_name in sorted(os.listdir(base)):
-            epic_dir = os.path.join(base, epic_name)
-            if os.path.isdir(epic_dir):
-                found.append(epic_dir)
-    return found
-
-def find_card_dir(work_root, card_id):
-    for epic_dir in epic_dirs(work_root):
-        for card_name in sorted(os.listdir(epic_dir)):
-            if card_name == card_id or card_name.startswith(card_id + "_"):
-                card_dir = os.path.join(epic_dir, card_name)
-                if os.path.isdir(card_dir):
-                    return card_dir
-    return None
-
+# CARD_KINDS, find_work_root(), epic_dirs() and find_card_dir() moved up next to rule 2b
+# (HRN-51), which now needs them to resolve a card's own folder before rule 5 below does;
+# rule 5 still uses the same four names, unchanged.
 BULLET_RE = re.compile(r'^-\s+\S')
 PHASE_HEADING_RE = re.compile(r'^###\s+(\S+)')
 
