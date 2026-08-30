@@ -17,9 +17,25 @@
 #     other hooks in this directory share (memory-store-guard.sh, plan-gate.sh,
 #     card-touch-gate.sh).
 #
+#  2. NO SANCTION, NO EXECUTOR SPAWN (HRN-48.B): judged only against a Task/Agent call that
+#     carries no agent_id yet — this hook sees the SPAWN call itself, before the subagent it
+#     would create exists — whose own subagent_type is "executor". Refused unless this
+#     session's own sanction file exists and names a card that the spawn's own prompt or
+#     description actually contains. bin/work-handover and bin/work-resume are the only two
+#     writers of a sanction file, and each writes one only once every refusal it checks has
+#     already passed and the executor's own brief has been printed —
+#     sanctions/<session_id>.json, sibling of briefs/<session_id>.json, keyed on the same
+#     session_id this hook's own payload already carries (proved identical to
+#     CLAUDE_CODE_SESSION_ID on a live call, HRN-48.B.1). The refusal names exactly one exit:
+#     bin/work-handover <ID> for a fresh phase, bin/work-resume <ID> for an interrupted one.
+#     A reading role's own spawn (critic, mapper, tracer, acceptor) is never judged by this
+#     rule — only subagent_type "executor" is.
+#
 #  3. CALLER IDENTITY: a call carrying no agent_id in its payload is the session's own — the
-#     orchestrator — and passes with no further inspection ("вызов самой сессии пропускает
-#     без разбора"). Everything from here on applies only to a subagent's own call.
+#     orchestrator — and passes with no further inspection past rule 2 above ("вызов самой
+#     сессии пропускает без разбора" holds for every rule from here on; rule 2 is the one
+#     exception, since it inspects the very call that would create a subagent). Everything
+#     from here on applies only to a subagent's own call.
 #
 #  4. NO BRIEF, NO LAUNCH: a subagent is known to this hook only because something told it —
 #     a small caller-brief file naming its role and the card it works, {"role": ...,
@@ -165,15 +181,14 @@
 #
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
-# already uses for its own per-agent state): briefs/agent-<agent_id>.json /
-# briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7),
+# already uses for its own per-agent state): sanctions/<session_id>.json (rule 2, written by
+# bin/work-handover / bin/work-resume, never by this hook itself), briefs/agent-<agent_id>.json
+# / briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7),
 # file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11) and
 # consecutive-refusals/agent-<agent_id>.txt (rule 12: the last rule that denied this agent,
-# and how many times in a row). Rule 2's own ledger lives outside this per-session state
-# tree entirely — it is a committed file, deployed with this hook and read the same way by
-# every session, never per-agent or per-run state. Rule 5 keeps no state of its own — it
-# re-reads plan.md and log.md fresh on every call, and rules 8-10 keep no state of their own
-# either — each re-reads this run's own transcript fresh on every call.
+# and how many times in a row). Rule 5 keeps no state of its own — it re-reads plan.md and
+# log.md fresh on every call, and rules 8-10 keep no state of their own either — each
+# re-reads this run's own transcript fresh on every call.
 #
 # TEST OVERRIDES, read only by bin/work-refusals, never present in a real deployed session:
 #   WORK_GATE_STATE_DIR            overrides the whole state tree above.
@@ -343,6 +358,7 @@ session_id = data.get("session_id") or ""
 STATE_DIR = os.environ.get("WORK_GATE_STATE_DIR") or \
     os.path.join(os.environ.get("TMPDIR", "/tmp"), "claude-work-gate")
 BRIEFS_DIR = os.path.join(STATE_DIR, "briefs")
+SANCTIONS_DIR = os.path.join(STATE_DIR, "sanctions")
 
 # A card's own log.md, under the new folder shape ai/<kind>/<epic>/<ID>_<slug>/log.md, kind
 # being "harness" or "timeline" (ai/harness/system/project.md, "Эпик"). Only log.md is
@@ -363,6 +379,34 @@ def bash_names(command, script_basename):
     occurrence of the basename in the command line, the same coarse-but-safe matching
     harness-stamp-gate.sh already uses for 'bootstrap.sh' in its own command."""
     return script_basename in command
+
+# --- 2. no sanction, no executor spawn (HRN-48.B) --------------------------------------
+def sanction_path(sid):
+    safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(sid)) if sid else "_no_session_id_"
+    return os.path.join(SANCTIONS_DIR, safe + ".json")
+
+def read_sanction(sid):
+    try:
+        with open(sanction_path(sid), "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+DENY_NO_SANCTION = (
+    "Blocked by work-gate: no sanction on file for this session raising an executor "
+    "subagent — call bin/work-handover <ID> for a fresh phase, or bin/work-resume <ID> "
+    "for an interrupted one, and let it print the executor's own brief before spawning "
+    "the executor with it."
+)
+
+if not agent_id and tool_name in ("Task", "Agent") and \
+        (tool_input.get("subagent_type") or "").strip() == "executor":
+    sanction = read_sanction(session_id)
+    prompt_text = ((tool_input.get("prompt") or "") + " " +
+                   (tool_input.get("description") or ""))
+    if sanction is None or not sanction.get("card") or sanction.get("card") not in prompt_text:
+        deny_and_exit(DENY_NO_SANCTION, "work-gate.no-sanction-executor-spawn")
 
 # --- 3. the session's own call passes without inspection ------------------------------
 if not agent_id:
@@ -496,20 +540,21 @@ def is_phase_boundary_save_call():
 PHASE_BOUNDARY_LOG_CALL_RE = re.compile(r'^\s*(\S*/)?bin/work-(log|note|commit)\b')
 
 def is_phase_boundary_log_call():
-    """True only for a Bash call that is a single invocation of bin/work-log — exempted at
-    the boundary for the same reason git add/commit already are (HRN-21.A.1), added by
-    HRN-21.C.3: writing the log entry that closes a phase is worthless if the very next
-    call, the one command this system requires to record it, is itself refused.
+    """True only for a Bash call that is a single invocation of bin/work-note or
+    bin/work-commit — exempted at the boundary for the same reason git add/commit already
+    are (HRN-21.A.1), added by HRN-21.C.3: writing the log entry that closes a phase is
+    worthless if the very next call, the one command this system requires to record it, is
+    itself refused.
 
-    Unlike git add/commit, a real invocation always carries a heredoc body (bin/work-log's
+    Unlike git add/commit, a real invocation always carries a heredoc body (bin/work-note's
     own stdin, the check's own verbatim output) — legitimately spanning many lines and
     containing any character at all, including `&&`/`;`/`|` — so the plain "no newline
     anywhere" test is_phase_boundary_save_call() applies to git cannot apply here. Chaining
     is instead judged only against the text OUTSIDE the heredoc body: the first line, up to
-    its own heredoc marker, carries none of `&&`/`;`/`|` and starts with `bin/work-log`; and
-    when a heredoc marker is present, the command's own last line is exactly that marker and
-    nothing follows it. A command naming no heredoc marker at all still may not chain,
-    exactly like git add/commit.
+    its own heredoc marker, carries none of `&&`/`;`/`|` and starts with `bin/work-note` (or
+    `bin/work-commit`); and when a heredoc marker is present, the command's own last line is
+    exactly that marker and nothing follows it. A command naming no heredoc marker at all
+    still may not chain, exactly like git add/commit.
 
     The command may name the script by an absolute path as well as by the bare relative one
     (found live closing HRN-6.B): an executor works in its own linked working copy while
@@ -517,13 +562,13 @@ def is_phase_boundary_log_call():
     so the relative form reaches the wrong copy — or no file at all, when the command being
     called is one the card itself is still building — and the only other way of reaching it,
     a `cd` in front, is chaining and refused. Matching is on the path's own trailing
-    `bin/work-log`/`bin/work-note` component, never on the basename alone, so a command
+    `bin/work-note`/`bin/work-commit` component, never on the basename alone, so a command
     merely mentioning the name somewhere is still not exempt.
 
-    `bin/work-commit` is exempt alongside the two log-writing commands, for the same reason
-    and found the same way (closing HRN-6.C): it is what this system puts in place of the
-    bare `git add`/`git commit` already exempt here, and an executor that cannot call it at
-    the boundary cannot land the work whose closure it has just recorded — as happened, one
+    `bin/work-commit` is exempt alongside `bin/work-note`, for the same reason and found the
+    same way (closing HRN-6.C): it is what this system puts in place of the bare `git
+    add`/`git commit` already exempt here, and an executor that cannot call it at the
+    boundary cannot land the work whose closure it has just recorded — as happened, one
     phase after the absolute-path defect above, leaving a finished phase's code stranded
     uncommitted in its own working copy."""
     if tool_name != "Bash":
