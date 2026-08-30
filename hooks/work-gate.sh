@@ -17,20 +17,6 @@
 #     other hooks in this directory share (memory-store-guard.sh, plan-gate.sh,
 #     card-touch-gate.sh).
 #
-#  2. FITNESS: every call is refused — the coordinator's own included — unless this file's
-#     own current SHA-256 is a member of the committed hash ledger (HRN-41,
-#     hooks/work-gate.verified-hashes.txt next to this file, one proven fingerprint per
-#     line) rather than a single value in a machine-wide temp marker every session used to
-#     compete over. bin/work-refusals appends the current fingerprint to that ledger on a
-#     full pass (never rewriting the file — see append_to_ledger() there); this hook only
-#     ever checks whether its own current hash already appears somewhere in the ledger.
-#     This repository's own ~/Dev/ai/.githooks/pre-commit runs bin/work-refusals --only
-#     hook against a staged edit's own indexed bytes and appends its fingerprint to the
-#     ledger in the same commit, so a committed edit never lands unfit (HRN-41.B).
-#     Three things get through regardless, because without them a broken gate could never
-#     be repaired: running bin/work-refusals itself, an Edit/Write of this file, and a
-#     Write/Edit of any card's own log.md.
-#
 #  3. CALLER IDENTITY: a call carrying no agent_id in its payload is the session's own — the
 #     orchestrator — and passes with no further inspection ("вызов самой сессии пропускает
 #     без разбора"). Everything from here on applies only to a subagent's own call.
@@ -92,6 +78,23 @@
 #     A card whose plan.md cannot be read is not yet in a state this rule can judge, so it is
 #     skipped rather than denied — the same fail-open choice bin/work-agent-brief's own
 #     malformed-command case already makes in rule 4 above.
+#
+#  6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" (ai/harness/system/project.md,
+#     "Правка чужого файла") — applies only to a Write/Edit whose target actually sits inside
+#     the run's own card folder. An executor may not write description.md, attention.md or
+#     done.md, each belonging to a different role (the owner via the orchestrator, the
+#     critic, the acceptor); an executor targeting plan.md is refused the same way, but the
+#     refusal names question.md instead ("Проблема в плане") — the plan itself is never the
+#     executor's own to edit, so it records the proposed change there and keeps working. An
+#     acceptor may not write log.md — that file is the executor's own.
+#
+#  7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): applies only to role "executor",
+#     once card_dir is known. Twenty calls in a row without a Write/Edit of this card's own
+#     log.md refuse the next call — "Двадцать вызовов без записи в log.md" — with every call
+#     that still gets through named: a Write/Edit of log.md itself, or a single, unchained
+#     Bash call running bin/work-note, either of which resets the count to zero, since
+#     bin/work-note IS that write, only spelled through a command rather than through the
+#     tool directly.
 #
 #  8. CONTEXT SIZE CEILING (HRN-2.C): applies to every subagent call carrying a brief, any
 #     role — "агента", not "исполнителя", is the word project.md's own paragraph uses. The
@@ -174,9 +177,6 @@
 #
 # TEST OVERRIDES, read only by bin/work-refusals, never present in a real deployed session:
 #   WORK_GATE_STATE_DIR            overrides the whole state tree above.
-#   WORK_GATE_LEDGER_PATH          overrides the path rule 2 reads its hash ledger from
-#                                   (default hooks/work-gate.verified-hashes.txt, next to
-#                                   this file).
 #   WORK_GATE_WORK_ROOT            overrides the work root rule 5 resolves a card id
 #                                   against (the directory holding the "harness" and
 #                                   "timeline" kind folders, normally found via `git
@@ -363,49 +363,6 @@ def bash_names(command, script_basename):
     occurrence of the basename in the command line, the same coarse-but-safe matching
     harness-stamp-gate.sh already uses for 'bootstrap.sh' in its own command."""
     return script_basename in command
-
-# --- 2. FITNESS: the current hash must be a proven member of the committed ledger --------
-def own_hash():
-    try:
-        with open(self_path, "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest()
-    except OSError:
-        return None
-
-def ledger_path():
-    return os.environ.get("WORK_GATE_LEDGER_PATH") or \
-        os.path.join(os.path.dirname(self_path), "work-gate.verified-hashes.txt")
-
-def ledger_contains(h):
-    try:
-        with open(ledger_path(), "r", encoding="utf-8") as f:
-            return h in {line.strip() for line in f}
-    except OSError:
-        return False
-
-is_refusals_run = tool_name == "Bash" and bash_names(command_of(tool_input), "work-refusals")
-is_gate_self_edit = tool_name in ("Write", "Edit") and \
-    file_path_of(tool_input) is not None and \
-    os.path.realpath(file_path_of(tool_input)) == self_path
-is_log_write = tool_name in ("Write", "Edit") and \
-    file_path_of(tool_input) is not None and \
-    LOG_FILE_RE.search(file_path_of(tool_input).replace(os.sep, "/")) is not None
-
-current = own_hash()
-fitness_ok = current is not None and ledger_contains(current)
-
-if not fitness_ok:
-    if is_refusals_run or is_gate_self_edit or is_log_write:
-        allow_and_exit()
-    deny_and_exit(
-        "Blocked by work-gate's FITNESS rule: this hook's own file has changed since "
-        "bin/work-refusals last passed against it, and a gate that might be broken stops "
-        "every call rather than failing silently. Run bin/work-refusals to clear this; "
-        "while it stands, the only calls that still get through are that run itself, an "
-        "Edit/Write of hooks/work-gate.sh, and a Write/Edit of any card's own log.md. Set "
-        "CLAUDE_GATE_BYPASS=1 only for a deliberate, known exception.",
-        "work-gate.fitness-blocks-until-suite-passes"
-    )
 
 # --- 3. the session's own call passes without inspection ------------------------------
 if not agent_id:
@@ -798,7 +755,7 @@ if brief.get("role") == "executor" and card_dir is not None:
                         "only calls that still get through are a Read/Write/Edit of this "
                         "card's own log.md, a Bash call that does nothing but `git add` or "
                         "`git commit`, and a single, unchained Bash call running "
-                        "bin/work-log, bin/work-note or bin/work-commit — saving work "
+                        "bin/work-note or bin/work-commit — saving work "
                         "already done, never starting anything new: «допиши передачу и "
                         "остановись»." % phase_id,
                         "work-gate.phase-boundary-own-phase-closed-later-untouched"
@@ -855,20 +812,19 @@ if tool_name in ("Write", "Edit") and card_dir is not None:
 # reset it, and would end up denying that write itself). agent_id is guaranteed present here
 # — rule 3 above already exited for any call carrying none, so every call that reaches this
 # point is a real subagent's own. The count lives in its own state file, one per agent_id,
-# keyed the same way the brief files already are; a call denied by an earlier rule (FITNESS,
-# no-brief, phase boundary, file authorship) never reaches here and so neither increments
+# keyed the same way the brief files already are; a call denied by an earlier rule (no-brief,
+# phase boundary, file authorship) never reaches here and so neither increments
 # nor resets it.
 #
-# HRN-21.B: the system requires the executor to write log.md only through `bin/work-log`,
+# HRN-21.B: the system requires the executor to write log.md only through `bin/work-note`,
 # never by hand (ai/harness/system/project.md, "log.md — пишет исполнитель"), and that
-# command runs through Bash — so a bare Bash call naming it is exempted the same way rule 2
-# above already exempts a Bash call naming `bin/work-refusals`: a closed, literal match on
-# the script's own basename appearing anywhere in the command line, never a chain-aware
-# parse. Exempting it is not enough on its own — a call that merely passes the ceiling but
-# still counts toward it would still eventually starve the executor of the one command it
-# needs — so this same call also resets the counter to zero, exactly like a direct Write/Edit
-# of log.md, because a `bin/work-log` invocation IS that write, only spelled through a
-# command rather than through the tool directly.
+# command runs through Bash — so a bare Bash call naming it is exempted: a closed, literal
+# match on the script's own basename appearing anywhere in the command line, never a
+# chain-aware parse. Exempting it is not enough on its own — a call that merely passes the
+# ceiling but still counts toward it would still eventually starve the executor of the one
+# command it needs — so this same call also resets the counter to zero, exactly like a
+# direct Write/Edit of log.md, because a `bin/work-note` invocation IS that write, only
+# spelled through a command rather than through the tool directly.
 LOG_CALL_CEILING = 20
 
 def log_call_count_path(aid):
@@ -907,7 +863,7 @@ if brief.get("role") == "executor" and card_dir is not None:
                 "Blocked by work-gate's LOG CEILING rule: %d calls have passed since this "
                 "executor last wrote to this card's own log.md — record state there now. "
                 "The only call that still gets through is a Write/Edit of log.md, or a Bash "
-                "call running bin/work-log or bin/work-note, any of which resets this count "
+                "call running bin/work-note, which resets this count "
                 "to zero. This ceiling does not end the run: it exists so that a run cut "
                 "short stays resumable, so write the state and go straight on with the work. "
                 "«Запиши состояние в лог и работай дальше.»" % n,
