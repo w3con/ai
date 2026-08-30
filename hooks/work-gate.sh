@@ -17,14 +17,16 @@
 #     other hooks in this directory share (memory-store-guard.sh, plan-gate.sh,
 #     card-touch-gate.sh).
 #
-#  2. FITNESS: every call is refused — the coordinator's own included — unless
-#     bin/work-refusals has passed against this exact file since it was last edited.
-#     bin/work-refusals itself lays down the fingerprint on a full pass (writes the SHA-256
-#     of hooks/work-gate.sh's own bytes to WORK_GATE_STATE_DIR/verified-hash.txt); this hook
-#     only ever compares its own current hash against that marker. Three things get through
-#     regardless, because without them a broken gate could never be repaired: running
-#     bin/work-refusals itself, an Edit/Write of this file, and a Write/Edit of any card's
-#     own log.md.
+#  2. FITNESS: every call is refused — the coordinator's own included — unless this file's
+#     own current SHA-256 is a member of the committed hash ledger (HRN-41,
+#     hooks/work-gate.verified-hashes.txt next to this file, one proven fingerprint per
+#     line) rather than a single value in a machine-wide temp marker every session used to
+#     compete over. bin/work-refusals appends the current fingerprint to that ledger on a
+#     full pass (never rewriting the file — see append_to_ledger() there); this hook only
+#     ever checks whether its own current hash already appears somewhere in the ledger.
+#     Three things get through regardless, because without them a broken gate could never
+#     be repaired: running bin/work-refusals itself, an Edit/Write of this file, and a
+#     Write/Edit of any card's own log.md.
 #
 #  3. CALLER IDENTITY: a call carrying no agent_id in its payload is the session's own — the
 #     orchestrator — and passes with no further inspection ("вызов самой сессии пропускает
@@ -157,17 +159,21 @@
 #
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
-# already uses for its own per-agent state): verified-hash.txt (rule 2, written by
-# bin/work-refusals, read only here), briefs/agent-<agent_id>.json /
+# already uses for its own per-agent state): briefs/agent-<agent_id>.json /
 # briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7),
 # file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11) and
 # consecutive-refusals/agent-<agent_id>.txt (rule 12: the last rule that denied this agent,
-# and how many times in a row). Rule 5 keeps no state of its own — it re-reads plan.md and
-# log.md fresh on every call, and rules 8-10 keep no state of their own either — each
-# re-reads this run's own transcript fresh on every call.
+# and how many times in a row). Rule 2's own ledger lives outside this per-session state
+# tree entirely — it is a committed file, deployed with this hook and read the same way by
+# every session, never per-agent or per-run state. Rule 5 keeps no state of its own — it
+# re-reads plan.md and log.md fresh on every call, and rules 8-10 keep no state of their own
+# either — each re-reads this run's own transcript fresh on every call.
 #
 # TEST OVERRIDES, read only by bin/work-refusals, never present in a real deployed session:
 #   WORK_GATE_STATE_DIR            overrides the whole state tree above.
+#   WORK_GATE_LEDGER_PATH          overrides the path rule 2 reads its hash ledger from
+#                                   (default hooks/work-gate.verified-hashes.txt, next to
+#                                   this file).
 #   WORK_GATE_WORK_ROOT            overrides the work root rule 5 resolves a card id
 #                                   against (the directory holding the "harness" and
 #                                   "timeline" kind folders, normally found via `git
@@ -334,7 +340,6 @@ session_id = data.get("session_id") or ""
 STATE_DIR = os.environ.get("WORK_GATE_STATE_DIR") or \
     os.path.join(os.environ.get("TMPDIR", "/tmp"), "claude-work-gate")
 BRIEFS_DIR = os.path.join(STATE_DIR, "briefs")
-HASH_MARKER = os.path.join(STATE_DIR, "verified-hash.txt")
 
 # A card's own log.md, under the new folder shape ai/<kind>/<epic>/<ID>_<slug>/log.md, kind
 # being "harness" or "timeline" (ai/harness/system/project.md, "Эпик"). Only log.md is
@@ -356,7 +361,7 @@ def bash_names(command, script_basename):
     harness-stamp-gate.sh already uses for 'bootstrap.sh' in its own command."""
     return script_basename in command
 
-# --- 2. FITNESS: the suite must have passed against this exact file since its last edit -
+# --- 2. FITNESS: the current hash must be a proven member of the committed ledger --------
 def own_hash():
     try:
         with open(self_path, "rb") as f:
@@ -364,12 +369,16 @@ def own_hash():
     except OSError:
         return None
 
-def stored_hash():
+def ledger_path():
+    return os.environ.get("WORK_GATE_LEDGER_PATH") or \
+        os.path.join(os.path.dirname(self_path), "work-gate.verified-hashes.txt")
+
+def ledger_contains(h):
     try:
-        with open(HASH_MARKER, "r", encoding="utf-8") as f:
-            return f.readline().strip()
+        with open(ledger_path(), "r", encoding="utf-8") as f:
+            return h in {line.strip() for line in f}
     except OSError:
-        return None
+        return False
 
 is_refusals_run = tool_name == "Bash" and bash_names(command_of(tool_input), "work-refusals")
 is_gate_self_edit = tool_name in ("Write", "Edit") and \
@@ -380,8 +389,7 @@ is_log_write = tool_name in ("Write", "Edit") and \
     LOG_FILE_RE.search(file_path_of(tool_input).replace(os.sep, "/")) is not None
 
 current = own_hash()
-verified = stored_hash()
-fitness_ok = current is not None and verified is not None and current == verified
+fitness_ok = current is not None and ledger_contains(current)
 
 if not fitness_ok:
     if is_refusals_run or is_gate_self_edit or is_log_write:
