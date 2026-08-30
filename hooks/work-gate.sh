@@ -44,18 +44,24 @@
 #     hooks/plan-gate.sh's own HRN-203 — read as the model, never rebuilt from memory): runs
 #     only once rule 2 above has already decided to allow this exact spawn, on the very same
 #     call, and it can only turn that decided allow into a deny — it never grants an allow of
-#     its own. Short work is exempt from this rule outright (HRN-52.A.2): the sanction rule 2
-#     matched this spawn against carries its own card's estimate (written by bin/work-handover
-#     / bin/work-resume, read straight from `description.md`'s own "Оценка" field), and when
-#     that estimate reads exactly the integer 1 — bin/work-short's own signature, one step,
-#     nothing to lose on a rollback — this rule neither denies the spawn nor records that card
-#     as occupying the conversation, so any number of short cards pass at once, before, after
-#     or alongside whatever else the conversation is already doing. A sanction carrying no
-#     estimate field, or one that is not readable as the integer 1, is judged as an ordinary
-#     card exactly as before this exemption existed — giving a missing or unreadable estimate
-#     the same pass as a proven 1 would lift a denial this rule used to make, not merely
-#     withhold a denial it was never going to make on its own account. For every card this
-#     exemption does not cover: on the first ordinary executor spawn a conversation sanctions,
+#     its own. Short work is exempt from this rule outright (HRN-52.A.2; threshold raised from
+#     1 to 2 by HRN-53.A.1, owner's own word 2026-08-30): the sanction rule 2 matched this
+#     spawn against carries its own card's estimate (written by bin/work-handover /
+#     bin/work-resume, read straight from `description.md`'s own "Оценка" field), and when
+#     that estimate reads the integer 1 or 2 — bin/work-short's own signature at 1, and, since
+#     HRN-53, the most common size of a small fix at 2 — this rule neither denies the spawn
+#     nor records that card as occupying the conversation, so any number of these cards pass
+#     at once, before, after or alongside whatever else the conversation is already doing. A
+#     card estimated 2 goes through the whole conveyor and may carry more than one step or
+#     more than one phase, so "nothing to lose on a rollback" is no longer a structural
+#     guarantee of its shape the way it is for a one-step estimate-1 card — for a 2 it is only
+#     the plan author's own judgement (HRN-53's own "Причина"). A sanction carrying no
+#     estimate field, or one that is not readable as the integer 1 or 2, is judged as an
+#     ordinary card exactly as before this exemption existed — giving a missing or unreadable
+#     estimate the same pass as a proven 1 or 2 would lift a denial this rule used to make,
+#     not merely withhold a denial it was never going to make on its own account. For every
+#     card this exemption does not cover: on the first ordinary executor spawn a conversation
+#     sanctions,
 #     the card named in that spawn's own sanction is written into a small per-conversation
 #     state file, keyed on a sanitized transcript_path (the same value
 #     hooks/card-touch-gate.sh's own COORD rule already keyed its per-session ceiling on). A
@@ -238,8 +244,8 @@
 # per card this conversation was ever handed over to, written by bin/work-handover /
 # bin/work-resume, never by this hook itself — reshaped per-card by HRN-52.A.1),
 # one-task/<sanitized-transcript-path>.json (rule 2b, the one ordinary card this conversation
-# has already sanctioned an executor spawn for — short-work cards, estimate 1, never occupy
-# this file — written by this hook itself, the only writer),
+# has already sanctioned an executor spawn for — cards estimated 1 or 2 never occupy this
+# file — written by this hook itself, the only writer),
 # briefs/agent-<agent_id>.json
 # / briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7),
 # file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11) and
@@ -674,11 +680,11 @@ if not agent_id and tool_name in ("Task", "Agent") and \
         deny_and_exit(DENY_NO_SANCTION, "work-gate.no-sanction-executor-spawn")
     matched_card = matched_sanction.get("card")
     matched_estimate = matched_sanction.get("estimate")
-    # HRN-52.A.2: a sanction proven to carry the integer 1 as its own estimate is short work
-    # (bin/work-short) and skips rule 2b entirely — never denied by it, never recorded as
-    # occupying the conversation. Anything else (no estimate field, or one that is not
-    # exactly the integer 1) is judged by rule 2b exactly as before this exemption existed.
-    if not (isinstance(matched_estimate, int) and matched_estimate == 1):
+    # HRN-52.A.2, threshold raised from 1 to 2 by HRN-53.A.1: a sanction proven to carry the
+    # integer 1 or 2 as its own estimate skips rule 2b entirely — never denied by it, never
+    # recorded as occupying the conversation. Anything else (no estimate field, or one that is
+    # not exactly 1 or 2) is judged by rule 2b exactly as before this exemption existed.
+    if not (isinstance(matched_estimate, int) and matched_estimate in (1, 2)):
         second_reason = second_task_deny_reason(matched_card, data.get("transcript_path"))
         if second_reason is not None:
             deny_and_exit(second_reason, "work-gate.second-task-in-conversation")
