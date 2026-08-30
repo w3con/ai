@@ -42,6 +42,7 @@ in the body of `~/.claude/CLAUDE.md`, not here. This store holds the rest.
 - [Commit periodically](feedback-commit-periodically.md) — land work at each milestone and remind Alex, don't let uncommitted changes pile up for hours
 - [Approve the letter before writing it down](feedback-approve-letter-before-writing-it-down.md) — a letter lives in the chat message until Alex approves the text; only then does it reach the drafts page, the card and the tracker
 - [Record only confirmed decisions](record-only-confirmed-decisions.md) — proposals stay in chat; nothing lands in a durable record until Alex confirms it
+- [Four edge questions before the critic](feedback-plan-edges-before-critic.md) — landing moment, unreachable branches, measurable gates, which bytes exactly; run them on your own plan before spending a critic on it
 - [Questions first, silence, one report](feedback-questions-first-silence-then-report.md) — ask everything before the first edit, build without a word, hand over one report with the findings, the decisions taken alone and the mistakes with their fixes
 - [No lazy defaults](feedback_no_lazy_defaults.md) — when pressed for a decision, don't collapse to "do everything / do nothing"; do the discriminating work and give the tiered call
 - [Decide technical details yourself](feedback-decide-technical-details-yourself.md) — never hand Alex a choice with no product consequence; choose on the merits, act, and tell him afterwards
