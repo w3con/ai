@@ -31,11 +31,28 @@
 #     A reading role's own spawn (critic, mapper, tracer, acceptor) is never judged by this
 #     rule — only subagent_type "executor" is.
 #
+#  2b. ONE CONVERSATION RUNS ONE TASK (HRN-48.C, carried over from the retired
+#     hooks/plan-gate.sh's own HRN-203 — read as the model, never rebuilt from memory): runs
+#     only once rule 2 above has already decided to allow this exact spawn, on the very same
+#     call, and it can only turn that decided allow into a deny — it never grants an allow of
+#     its own. On the first executor spawn a conversation sanctions, the card named in that
+#     spawn's own sanction is written into a small per-conversation state file, keyed on a
+#     sanitized transcript_path (the same value hooks/card-touch-gate.sh's own COORD rule
+#     already keyed its per-session ceiling on). A later spawn in the SAME conversation whose
+#     own sanction names a DIFFERENT card is refused, naming both cards and both ways out —
+#     finish the current task and close the conversation with /clear, or open a separate
+#     session with /parallel when both are genuinely needed at once. A later spawn whose
+#     sanction names the SAME card passes every time, without limit — an ordinary relay after
+#     a pace stop, not a second task. This rule keeps its own try/except and never denies on
+#     an error of its own — a transcript_path it cannot read or a state file it cannot write
+#     falls through to an allow, since rule 2 has already decided this exact spawn is fine and
+#     a bug in this rule must never widen into a refusal that rule did not itself make.
+#
 #  3. CALLER IDENTITY: a call carrying no agent_id in its payload is the session's own — the
-#     orchestrator — and passes with no further inspection past rule 2 above ("вызов самой
-#     сессии пропускает без разбора" holds for every rule from here on; rule 2 is the one
-#     exception, since it inspects the very call that would create a subagent). Everything
-#     from here on applies only to a subagent's own call.
+#     orchestrator — and passes with no further inspection past rules 2 and 2b above ("вызов
+#     самой сессии пропускает без разбора" holds for every rule from here on; rules 2 and 2b
+#     are the one exception, since they inspect the very call that would create a subagent).
+#     Everything from here on applies only to a subagent's own call.
 #
 #  4. NO BRIEF, NO LAUNCH: a subagent is known to this hook only because something told it —
 #     a small caller-brief file naming its role and the card it works, {"role": ...,
@@ -182,7 +199,10 @@
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
 # already uses for its own per-agent state): sanctions/<session_id>.json (rule 2, written by
-# bin/work-handover / bin/work-resume, never by this hook itself), briefs/agent-<agent_id>.json
+# bin/work-handover / bin/work-resume, never by this hook itself),
+# one-task/<sanitized-transcript-path>.json (rule 2b, the one card this conversation has
+# already sanctioned an executor spawn for — written by this hook itself, the only writer),
+# briefs/agent-<agent_id>.json
 # / briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7),
 # file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11) and
 # consecutive-refusals/agent-<agent_id>.txt (rule 12: the last rule that denied this agent,
@@ -400,6 +420,58 @@ DENY_NO_SANCTION = (
     "the executor with it."
 )
 
+# --- 2b. one conversation runs one task (HRN-48.C, carried from the retired
+# hooks/plan-gate.sh's own second_task_deny_reason(), HRN-203) -------------------------
+ONE_TASK_STATE_DIR = os.path.join(STATE_DIR, "one-task")
+
+def one_task_state_path(transcript_path):
+    """None when there is no transcript_path to key state on — this rule then has nothing
+    to judge and falls through to an allow, the same fail-open posture card-touch-gate.sh's
+    own COORD rule already takes when it cannot establish a session identifier."""
+    if not transcript_path:
+        return None
+    safe = re.sub(r'[^A-Za-z0-9_-]', '_', os.path.basename(str(transcript_path)))
+    return os.path.join(ONE_TASK_STATE_DIR, safe + ".json")
+
+SECOND_TASK_TEMPLATE = (
+    "Blocked by work-gate: this conversation already sanctioned an executor on {owned}, and "
+    "this spawn's own sanction names a different card, {attempted}. One conversation runs "
+    "one task: finish the current task and close this conversation with /clear before "
+    "starting the next one, or, when the two pieces of work genuinely must run at the same "
+    "time, open a separate session with /parallel instead of spawning a second executor here."
+)
+
+def second_task_deny_reason(card, transcript_path):
+    """None to allow (recording the card as needed); the deny reason string otherwise. This
+    rule never creates a permission of its own — it only ever turns an allow rule 2 has
+    already decided into a deny — and it never raises: every failure of its own (an
+    unwritable state directory, a corrupt state file) falls through to None, an allow,
+    because a bug in this rule must never widen into a refusal rule 2 did not itself make."""
+    try:
+        state_path = one_task_state_path(transcript_path)
+        if not state_path:
+            return None
+        owned = None
+        if os.path.isfile(state_path):
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    owned = loaded.get("card")
+            except Exception:
+                owned = None  # a corrupt state file is a fresh start, not an error to deny on
+        if owned is None:
+            os.makedirs(ONE_TASK_STATE_DIR, exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump({"card": card}, f)
+            return None
+        if owned == card:
+            return None
+        return SECOND_TASK_TEMPLATE.format(owned=owned, attempted=card)
+    except Exception:
+        return None
+# --- end 2b -----------------------------------------------------------------------------
+
 if not agent_id and tool_name in ("Task", "Agent") and \
         (tool_input.get("subagent_type") or "").strip() == "executor":
     sanction = read_sanction(session_id)
@@ -407,6 +479,9 @@ if not agent_id and tool_name in ("Task", "Agent") and \
                    (tool_input.get("description") or ""))
     if sanction is None or not sanction.get("card") or sanction.get("card") not in prompt_text:
         deny_and_exit(DENY_NO_SANCTION, "work-gate.no-sanction-executor-spawn")
+    second_reason = second_task_deny_reason(sanction.get("card"), data.get("transcript_path"))
+    if second_reason is not None:
+        deny_and_exit(second_reason, "work-gate.second-task-in-conversation")
 
 # --- 3. the session's own call passes without inspection ------------------------------
 if not agent_id:
