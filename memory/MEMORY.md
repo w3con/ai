@@ -30,8 +30,8 @@ in the body of `~/.claude/CLAUDE.md`, not here. This store holds the rest.
 - [Caffeinate before long runs](feedback-caffeinate-before-long-runs.md) — start caffeinate when you hand work over, not after the first agent dies; a sleeping Mac kills every executor at once
 - [Critic and research sub-agents](feedback_reviewer_agent.md) — whether you may spawn one at all: only on Alex's explicit word, never automatically
 - [Spawn subagents visibly](feedback-spawn-subagents-visibly.md) — executor subagents ALWAYS foreground, never background/wrapper; read-only agents (critic, checker) are not covered
-- [See a problem, found a card](feedback-see-a-problem-found-a-card.md) — found it the moment you notice it and never merely propose it; but a small reversible machinery repair inside work you are already doing is fixed now and recorded in one line, not carded
-- [Never report your own problems](feedback-never-report-your-own-problems.md) — a problem you caused or a leftover you could finish is yours to solve, record and card up; never hand it back as a question
+- [See a problem, offer to fix it](feedback-see-a-problem-offer-to-fix.md) — name it and offer the fix, or ask what to do with it; founding the work is his call, never yours; a small reversible repair inside work you are already doing is still done now and recorded in one line
+- [Never report your own problems](feedback-never-report-your-own-problems.md) — a problem you caused or a leftover you could finish is yours to solve and record; never hand it back as a question
 - [Resolve before reporting](feedback-resolve-before-reporting.md) — a blocked commit, a dirty tree, a missing tool is yours to fix; never hand Alex an obstacle you have not tried to clear
 - [Report broken tooling at once](feedback-report-broken-tooling.md) — a script, hook, skill, command or server that is missing or misconfigured gets one line in the same answer, even when a fallback quietly produced the result
 - [Install what you need](feedback-install-what-you-need.md) — a missing tool gets installed, not reported and waited on; destructive or outward-facing actions still need his word
