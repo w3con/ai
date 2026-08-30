@@ -737,7 +737,13 @@ if brief.get("role") == "executor" and card_dir is not None:
     fp = file_path_of(tool_input)
 
     def is_this_cards_log_write():
-        return (tool_name in ("Write", "Edit") and fp is not None and
+        # "Read" is exempted alongside "Write"/"Edit" (found live closing HRN-34.B): the
+        # Edit tool's own client-side staleness check refuses to edit a file that changed
+        # on disk since this session last read it, and log.md is dirtied outside Claude's
+        # own file tracking by every bin/work-note call — so with Read still refused at the
+        # boundary, Edit could never satisfy its own precondition and the boundary's one
+        # designated escape (a Write/Edit of this file) became unreachable via Edit.
+        return (tool_name in ("Read", "Write", "Edit") and fp is not None and
                 os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md")))
 
     phase_id = brief.get("phase")
@@ -778,9 +784,10 @@ if brief.get("role") == "executor" and card_dir is not None:
                         "— the phase this run's own caller-brief names — is already closed "
                         "in log.md, regardless of what any other phase in the plan looks "
                         "like. A fresh executor takes the next phase, not this one. The "
-                        "only calls that still get through are a Write/Edit of this card's "
-                        "own log.md, a Bash call that does nothing but `git add` or `git "
-                        "commit`, and a Bash call running bin/work-log — saving work "
+                        "only calls that still get through are a Read/Write/Edit of this "
+                        "card's own log.md, a Bash call that does nothing but `git add` or "
+                        "`git commit`, and a single, unchained Bash call running "
+                        "bin/work-log, bin/work-note or bin/work-commit — saving work "
                         "already done, never starting anything new: «допиши передачу и "
                         "остановись»." % phase_id,
                         "work-gate.phase-boundary-own-phase-closed-later-untouched"
