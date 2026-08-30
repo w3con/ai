@@ -207,8 +207,13 @@
 #     PACE_CALL_ALLOWANCE (120) tool calls — "темп не проверяется первые сто двадцать
 #     вызовов" — every call up to and including the 120th passes with no inspection.
 #
-# 11. FILE-EDIT BRAKE (HRN-2.C, extended by HRN-21.C.1): the Nth Edit/Write of one and the
-#     same file inside one run refuses — mirrors hooks/card-touch-gate.sh's own BRAKE rule
+# 11. FILE-EDIT BRAKE (HRN-2.C, extended by HRN-21.C.1, softened 2026-08-31): past the Nth
+#     Edit/Write of one and the same file inside one run, a point edit (Edit) of that file
+#     refuses and a whole-file rewrite (Write of the same path) is allowed instead. The rule
+#     exists to stop an agent hammering one place with a long series of small edits, not to
+#     forbid finishing the file, so the refusal names the rewrite as the way through rather
+#     than leaving the run with nothing to do but abandon the file
+#     — mirrors hooks/card-touch-gate.sh's own BRAKE rule
 #     and its measured threshold (BRAKE_THRESHOLD = 9, HRN-123.1's own p90 of the per-path
 #     edit-count distribution across archived executor runs) rather than deriving a fresh
 #     number for the same fact, matching the number this card's own plan names directly
@@ -1461,15 +1466,22 @@ if tool_name in ("Write", "Edit"):
             n = read_file_edit_count(count_path) + 1
             write_file_edit_count(count_path, n)
             if n >= FILE_EDIT_BRAKE_THRESHOLD:
+                # Past the threshold the brake stops point edits, never the file's remaining
+                # work: a whole-file Write is the way through, and it is allowed here.
+                if tool_name == "Write":
+                    allow_and_exit()
                 deny_and_exit(
-                    "Blocked by work-gate's FILE-EDIT BRAKE rule: this run has now edited "
-                    "%s %d times, past the %d threshold. A whole-file Write is counted the "
-                    "same as a point edit, so there is no way to keep working on this one "
-                    "file in this run: either move on to other work, or record the state "
-                    "with bin/work-note and hand the file's remaining work to a fresh run. "
-                    "This count is per file path and per run; it never counts a write to one "
-                    "of this card's own files, and a Bash call re-running the same "
-                    "command however many times is never limited at all." %
+                    "Blocked by work-gate's FILE-EDIT BRAKE rule: this run has now touched "
+                    "%s %d times, past the %d threshold, so point edits of this file are "
+                    "refused from here on. This is not a ban on finishing the file. The way "
+                    "through is one whole-file rewrite: read the file, work out every "
+                    "remaining change at once, and write the complete new content back in a "
+                    "single Write call of this same path — a Write is allowed past the "
+                    "threshold, an Edit is not. If the remaining work is too large to hold in "
+                    "one rewrite, record the state with bin/work-note and hand the rest to a "
+                    "fresh run. This count is per file path and per run; it never counts a "
+                    "write to one of this card's own files, and a Bash call re-running the "
+                    "same command however many times is never limited at all." %
                     (fp, n, FILE_EDIT_BRAKE_THRESHOLD),
                     "work-gate.file-edit-brake"
                 )
