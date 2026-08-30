@@ -19,38 +19,59 @@
 #
 #  2. NO SANCTION, NO EXECUTOR SPAWN (HRN-48.B): judged only against a Task/Agent call that
 #     carries no agent_id yet — this hook sees the SPAWN call itself, before the subagent it
-#     would create exists — whose own subagent_type is "executor". Refused unless this
-#     session's own sanction file exists and names a card that the spawn's own prompt or
-#     description actually contains. bin/work-handover and bin/work-resume are the only two
-#     writers of a sanction file, and each writes one only once every refusal it checks has
-#     already passed and the executor's own brief has been printed —
-#     sanctions/<session_id>.json, sibling of briefs/<session_id>.json, keyed on the same
-#     session_id this hook's own payload already carries (proved identical to
-#     CLAUDE_CODE_SESSION_ID on a live call, HRN-48.B.1). The refusal names exactly one exit:
-#     bin/work-handover <ID> for a fresh phase, bin/work-resume <ID> for an interrupted one.
-#     A reading role's own spawn (critic, mapper, tracer, acceptor) is never judged by this
-#     rule — only subagent_type "executor" is.
+#     would create exists — whose own subagent_type is "executor". `bin/work-handover` and
+#     `bin/work-resume` are the only two writers of a sanction file, and each writes one only
+#     once every refusal it checks has already passed and the executor's own brief has been
+#     printed — one file per card this conversation was ever handed over to,
+#     sanctions/<key>/<card id>.json, sibling of briefs/<session_id>.json, `<key>` the
+#     sanitized session_id this hook's own payload already carries (proved identical to
+#     CLAUDE_CODE_SESSION_ID on a live call, HRN-48.B.1). Reshaped per-card by HRN-52.A.1: a
+#     second handover in the same conversation, for a different card, used to overwrite the
+#     first card's own sanction — the exact hole that made two short cards handed over back
+#     to back never both stay sanctioned — and now leaves both on disk instead. This rule
+#     allows when at least one of this conversation's own sanction files names a card the
+#     spawn's own prompt or description actually contains AND that card's own folder carries
+#     none of `done.md`, `cancelled.md`, `rejected.md` or `question.md` — a sanction written
+#     before a card was returned to the orchestrator for one of those four reasons must never
+#     let a later spawn resurrect it past `bin/work-handover`'s own fourth refusal. Refused
+#     with the same text either way — no sanction names the spawned card at all, or the one
+#     that does belongs to a card in one of those four states. The refusal names exactly one
+#     exit: bin/work-handover <ID> for a fresh phase, bin/work-resume <ID> for an interrupted
+#     one. A reading role's own spawn (critic, mapper, tracer, acceptor) is never judged by
+#     this rule — only subagent_type "executor" is.
 #
 #  2b. ONE CONVERSATION RUNS ONE TASK (HRN-48.C, carried over from the retired
 #     hooks/plan-gate.sh's own HRN-203 — read as the model, never rebuilt from memory): runs
 #     only once rule 2 above has already decided to allow this exact spawn, on the very same
 #     call, and it can only turn that decided allow into a deny — it never grants an allow of
-#     its own. On the first executor spawn a conversation sanctions, the card named in that
-#     spawn's own sanction is written into a small per-conversation state file, keyed on a
-#     sanitized transcript_path (the same value hooks/card-touch-gate.sh's own COORD rule
-#     already keyed its per-session ceiling on). A later spawn in the SAME conversation whose
-#     own sanction names a DIFFERENT card is refused, naming both cards and both ways out —
-#     finish the current task and close the conversation with /clear, or open a separate
-#     session with /parallel when both are genuinely needed at once — UNLESS the remembered
-#     card's own folder has since gained a done.md or a cancelled.md (HRN-51): a card closed
-#     this way no longer occupies the conversation, the new spawn passes, and its own card
-#     takes the closed one's place in the state file. A later spawn whose sanction names the
-#     SAME card passes every time, without limit — an ordinary relay after a pace stop, not a
-#     second task. This rule keeps its own try/except and never denies on an error of its
-#     own — a transcript_path it cannot read, a state file it cannot write or parse, or a
-#     remembered card's own folder it cannot find while checking for done.md/cancelled.md,
-#     all fall through to an allow, since rule 2 has already decided this exact spawn is fine
-#     and a bug in this rule must never widen into a refusal that rule did not itself make.
+#     its own. Short work is exempt from this rule outright (HRN-52.A.2): the sanction rule 2
+#     matched this spawn against carries its own card's estimate (written by bin/work-handover
+#     / bin/work-resume, read straight from `description.md`'s own "Оценка" field), and when
+#     that estimate reads exactly the integer 1 — bin/work-short's own signature, one step,
+#     nothing to lose on a rollback — this rule neither denies the spawn nor records that card
+#     as occupying the conversation, so any number of short cards pass at once, before, after
+#     or alongside whatever else the conversation is already doing. A sanction carrying no
+#     estimate field, or one that is not readable as the integer 1, is judged as an ordinary
+#     card exactly as before this exemption existed — giving a missing or unreadable estimate
+#     the same pass as a proven 1 would lift a denial this rule used to make, not merely
+#     withhold a denial it was never going to make on its own account. For every card this
+#     exemption does not cover: on the first ordinary executor spawn a conversation sanctions,
+#     the card named in that spawn's own sanction is written into a small per-conversation
+#     state file, keyed on a sanitized transcript_path (the same value
+#     hooks/card-touch-gate.sh's own COORD rule already keyed its per-session ceiling on). A
+#     later spawn in the SAME conversation whose own sanction names a DIFFERENT ordinary card
+#     is refused, naming both cards and both ways out — finish the current task and close the
+#     conversation with /clear, or open a separate session with /parallel when both are
+#     genuinely needed at once — UNLESS the remembered card's own folder has since gained a
+#     done.md or a cancelled.md (HRN-51): a card closed this way no longer occupies the
+#     conversation, the new spawn passes, and its own card takes the closed one's place in the
+#     state file. A later spawn whose sanction names the SAME card passes every time, without
+#     limit — an ordinary relay after a pace stop, not a second task. This rule keeps its own
+#     try/except and never denies on an error of its own — a transcript_path it cannot read, a
+#     state file it cannot write or parse, or a remembered card's own folder it cannot find
+#     while checking for done.md/cancelled.md, all fall through to an allow, since rule 2 has
+#     already decided this exact spawn is fine and a bug in this rule must never widen into a
+#     refusal that rule did not itself make.
 #
 #  3. CALLER IDENTITY: a call carrying no agent_id in its payload is the session's own — the
 #     orchestrator — and passes past rules 2 and 2b above. Rules 4 onward judge only a
@@ -213,10 +234,12 @@
 #
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
-# already uses for its own per-agent state): sanctions/<session_id>.json (rule 2, written by
-# bin/work-handover / bin/work-resume, never by this hook itself),
-# one-task/<sanitized-transcript-path>.json (rule 2b, the one card this conversation has
-# already sanctioned an executor spawn for — written by this hook itself, the only writer),
+# already uses for its own per-agent state): sanctions/<key>/<card id>.json (rule 2, one file
+# per card this conversation was ever handed over to, written by bin/work-handover /
+# bin/work-resume, never by this hook itself — reshaped per-card by HRN-52.A.1),
+# one-task/<sanitized-transcript-path>.json (rule 2b, the one ordinary card this conversation
+# has already sanctioned an executor spawn for — short-work cards, estimate 1, never occupy
+# this file — written by this hook itself, the only writer),
 # briefs/agent-<agent_id>.json
 # / briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7),
 # file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11) and
@@ -484,18 +507,56 @@ def find_card_dir(work_root, card_id):
                     return card_dir
     return None
 
-# --- 2. no sanction, no executor spawn (HRN-48.B) --------------------------------------
-def sanction_path(sid):
+# --- 2. no sanction, no executor spawn (HRN-48.B, reshaped per-card by HRN-52.A.1) -----
+def sanctions_dir(sid):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(sid)) if sid else "_no_session_id_"
-    return os.path.join(SANCTIONS_DIR, safe + ".json")
+    return os.path.join(SANCTIONS_DIR, safe)
 
-def read_sanction(sid):
+def read_sanctions(sid):
+    """Every sanction this conversation has ever written, each as a dict, read from every
+    *.json file under sanctions/<key>/ — one file per card that conversation was handed
+    over to (HRN-52.A.1). Best-effort throughout: a directory that does not exist yet, or a
+    single file that will not parse, is simply skipped rather than denying the whole call —
+    the same fail-open posture rule 2b already takes on a reading error of its own."""
+    d = sanctions_dir(sid)
+    result = []
     try:
-        with open(sanction_path(sid), "r", encoding="utf-8") as f:
-            obj = json.load(f)
+        names = sorted(os.listdir(d))
+    except Exception:
+        return result
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                obj = json.load(f)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            result.append(obj)
+    return result
+
+TERMINAL_STATE_FILES = ("done.md", "cancelled.md", "rejected.md", "question.md")
+
+def sanction_card_is_terminal(card_id):
+    """True when card_id's own folder already carries one of the four terminal-state files
+    bin/work-handover itself refuses a handover on — a sanction written before the card
+    reached one of these states must never let a later spawn resurrect it past that
+    refusal. False when the folder is found and carries none of the four. None on any
+    reading error of this check's own (no work root, no matching folder, a listing that
+    raises) — read as "not terminal" by the caller, since a bug here must never manufacture
+    a denial out of a card name rule 2 already found sanctioned and matched in the prompt."""
+    try:
+        root = find_work_root()
+        if root is None:
+            return None
+        card_dir = find_card_dir(root, card_id)
+        if card_dir is None:
+            return None
+        return any(os.path.isfile(os.path.join(card_dir, fname))
+                    for fname in TERMINAL_STATE_FILES)
     except Exception:
         return None
-    return obj if isinstance(obj, dict) else None
 
 DENY_NO_SANCTION = (
     "Blocked by work-gate: no sanction on file for this session raising an executor "
@@ -598,14 +659,29 @@ def second_task_deny_reason(card, transcript_path):
 
 if not agent_id and tool_name in ("Task", "Agent") and \
         (tool_input.get("subagent_type") or "").strip() == "executor":
-    sanction = read_sanction(session_id)
     prompt_text = ((tool_input.get("prompt") or "") + " " +
                    (tool_input.get("description") or ""))
-    if sanction is None or not sanction.get("card") or sanction.get("card") not in prompt_text:
+    # HRN-52.A.1: this conversation may have handed over more than one card — walk every
+    # sanction it ever wrote and take the first whose own card name shows up in this spawn's
+    # own prompt/description, exactly the same substring test the single-sanction form used.
+    matched_sanction = None
+    for candidate in read_sanctions(session_id):
+        card = candidate.get("card")
+        if card and card in prompt_text:
+            matched_sanction = candidate
+            break
+    if matched_sanction is None or sanction_card_is_terminal(matched_sanction.get("card")):
         deny_and_exit(DENY_NO_SANCTION, "work-gate.no-sanction-executor-spawn")
-    second_reason = second_task_deny_reason(sanction.get("card"), data.get("transcript_path"))
-    if second_reason is not None:
-        deny_and_exit(second_reason, "work-gate.second-task-in-conversation")
+    matched_card = matched_sanction.get("card")
+    matched_estimate = matched_sanction.get("estimate")
+    # HRN-52.A.2: a sanction proven to carry the integer 1 as its own estimate is short work
+    # (bin/work-short) and skips rule 2b entirely — never denied by it, never recorded as
+    # occupying the conversation. Anything else (no estimate field, or one that is not
+    # exactly the integer 1) is judged by rule 2b exactly as before this exemption existed.
+    if not (isinstance(matched_estimate, int) and matched_estimate == 1):
+        second_reason = second_task_deny_reason(matched_card, data.get("transcript_path"))
+        if second_reason is not None:
+            deny_and_exit(second_reason, "work-gate.second-task-in-conversation")
 
 # --- 3. / 3a. the session's own call passes, but is watched by two warn-only rubrics
 # (HRN-48.D) whose ceilings are carried over unchanged from the retired
