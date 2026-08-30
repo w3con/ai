@@ -24,6 +24,9 @@
 #     compete over. bin/work-refusals appends the current fingerprint to that ledger on a
 #     full pass (never rewriting the file — see append_to_ledger() there); this hook only
 #     ever checks whether its own current hash already appears somewhere in the ledger.
+#     This repository's own ~/Dev/ai/.githooks/pre-commit runs bin/work-refusals --only
+#     hook against a staged edit's own indexed bytes and appends its fingerprint to the
+#     ledger in the same commit, so a committed edit never lands unfit (HRN-41.B).
 #     Three things get through regardless, because without them a broken gate could never
 #     be repaired: running bin/work-refusals itself, an Edit/Write of this file, and a
 #     Write/Edit of any card's own log.md.
