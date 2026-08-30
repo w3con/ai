@@ -452,11 +452,11 @@ if brief is None:
 # boundary or not — they are not in this list and never will be. A harmless `git status`, or
 # any command not in this list, is refused exactly like any other call.
 #
-# HRN-21.C.3: the same closed list also exempts a Bash call running bin/work-log, one more
+# HRN-21.C.3: the same closed list also exempts a Bash call running bin/work-note, one more
 # entry added the same deliberate way — the boundary must not strand an executor holding the
 # one command this system requires it to close its own last step with. That call gets its
 # own recognising function, is_phase_boundary_log_call() below, rather than joining this
-# git-only one: a real bin/work-log invocation always carries a heredoc body (its own
+# git-only one: a real bin/work-note invocation always carries a heredoc body (its own
 # stdin — the check's own verbatim output), which legitimately spans many lines, so the bare
 # "no newline anywhere" test below cannot apply to it.
 PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS = ("add", "commit")
