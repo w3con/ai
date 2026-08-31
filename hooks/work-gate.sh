@@ -6,10 +6,12 @@
 #
 # This file currently builds phases HRN-2.A (the fitness guard and caller identity),
 # HRN-2.B (one-file-one-author and the log-write ceiling), HRN-2.D/F (the phase boundary,
-# judged against the run's own named phase), HRN-2.E's own rewrite of closed_steps_for_phase
-# to read a step's closure by its permanent name rather than only the older free-form "шаг N"
-# convention, and HRN-2.C (the context/spend/pace ceilings, read from the run's own
-# transcript, plus the file-edit brake).
+# judged against the run's own named phase), HRN-2.C (the context/spend/pace ceilings, read
+# from the run's own transcript, plus the file-edit brake), and HRN-63.B, which replaced the
+# phase boundary's own log.md-header counting (HRN-2.E's, in turn, own rewrite of that
+# counting to a step's permanent name) with running the phase's own gate-<фаза>.sh, found in
+# the card's own linked working copy, on every bin/work-note call, and reading the boundary
+# off the <фаза>.closed marker that gate leaves rather than off log.md at all.
 #
 # WHAT THIS FILE DOES, IN THE ORDER IT DOES IT
 #
@@ -569,6 +571,39 @@ def find_card_dir(work_root, card_id):
                     return card_dir
     return None
 
+# Moved up from next to rule 6a (HRN-70) by HRN-63.B.1, which now needs this to find a
+# phase's own gate script before rule 5 runs; rule 6a still uses the same function unchanged.
+def find_card_worktree_root(card_id):
+    """The path of card_id's own linked working copy, resolved the same way bin/work-session
+    cuts one and bin/work-commit already finds it by name (rules.md rule 53): the entry in
+    `git worktree list --porcelain` whose own branch is refs/heads/work/<card id, lowercased>.
+    WORK_GATE_CARD_WORKTREE_ROOT overrides this outright, the same test-only escape every
+    other git-plumbing lookup in this file already carries. None when no such branch is found
+    at all — an ordinary case for a role other than executor, and for an executor whose
+    brief names a card this session never actually ran bin/work-session for; the caller then
+    skips this rule, since it has nothing to judge a boundary against."""
+    override = os.environ.get("WORK_GATE_CARD_WORKTREE_ROOT")
+    if override:
+        return override
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    target_branch = "refs/heads/work/" + card_id.lower()
+    current_path = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):].strip()
+        elif line.startswith("branch "):
+            if line[len("branch "):].strip() == target_branch and current_path:
+                return current_path
+    return None
+
 # --- 2. no sanction, no executor spawn (HRN-48.B, reshaped per-card by HRN-52.A.1) -----
 def sanctions_dir(sid):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(sid)) if sid else "_no_session_id_"
@@ -973,22 +1008,24 @@ def is_phase_boundary_save_call():
 # /abs/path/to/bin/work-note is.
 PHASE_BOUNDARY_LOG_CALL_RE = re.compile(r'^\s*(\S*/)?bin/work-(log|note|commit)\b')
 
-def is_phase_boundary_log_call():
-    """True only for a Bash call that is a single invocation of bin/work-note or
-    bin/work-commit — exempted at the boundary for the same reason git add/commit already
-    are (HRN-21.A.1), added by HRN-21.C.3: writing the log entry that closes a phase is
-    worthless if the very next call, the one command this system requires to record it, is
-    itself refused.
+def matched_log_call_kind():
+    """Which of bin/work-note / bin/work-commit / bin/work-log this Bash call actually
+    invokes — "note", "commit" or "log" — matched the same rigorous, heredoc-aware,
+    chain-aware way is_phase_boundary_log_call() always has; None when the call is not a
+    single, genuine invocation of any of the three. The one shared parser behind two
+    different callers: is_phase_boundary_log_call() below (any of the three, unchanged
+    behaviour) and is_work_note_invocation() (HRN-63.B.1's own trigger for a phase's own
+    gate — "note" only, never "commit" or "log").
 
-    Unlike git add/commit, a real invocation always carries a heredoc body (bin/work-note's
-    own stdin, the check's own verbatim output) — legitimately spanning many lines and
-    containing any character at all, including `&&`/`;`/`|` — so the plain "no newline
-    anywhere" test is_phase_boundary_save_call() applies to git cannot apply here. Chaining
-    is instead judged only against the text OUTSIDE the heredoc body: the first line, up to
-    its own heredoc marker, carries none of `&&`/`;`/`|` and starts with `bin/work-note` (or
-    `bin/work-commit`); and when a heredoc marker is present, the command's own last line is
-    exactly that marker and nothing follows it. A command naming no heredoc marker at all
-    still may not chain, exactly like git add/commit.
+    A real invocation always carries a heredoc body (bin/work-note's own stdin, the check's
+    own verbatim output) — legitimately spanning many lines and containing any character at
+    all, including `&&`/`;`/`|` — so the plain "no newline anywhere" test
+    is_phase_boundary_save_call() applies to git cannot apply here. Chaining is instead
+    judged only against the text OUTSIDE the heredoc body: the first line, up to its own
+    heredoc marker, carries none of `&&`/`;`/`|` and starts with one of the three script
+    names; and when a heredoc marker is present, the command's own last line is exactly that
+    marker and nothing follows it. A command naming no heredoc marker at all still may not
+    chain, exactly like git add/commit.
 
     The command may name the script by an absolute path as well as by the bare relative one
     (found live closing HRN-6.B): an executor works in its own linked working copy while
@@ -996,17 +1033,10 @@ def is_phase_boundary_log_call():
     so the relative form reaches the wrong copy — or no file at all, when the command being
     called is one the card itself is still building — and the only other way of reaching it,
     a `cd` in front, is chaining and refused. Matching is on the path's own trailing
-    `bin/work-note`/`bin/work-commit` component, never on the basename alone, so a command
-    merely mentioning the name somewhere is still not exempt.
-
-    `bin/work-commit` is exempt alongside `bin/work-note`, for the same reason and found the
-    same way (closing HRN-6.C): it is what this system puts in place of the bare `git
-    add`/`git commit` already exempt here, and an executor that cannot call it at the
-    boundary cannot land the work whose closure it has just recorded — as happened, one
-    phase after the absolute-path defect above, leaving a finished phase's code stranded
-    uncommitted in its own working copy."""
+    component, never on the basename alone, so a command merely mentioning the name
+    somewhere is still not exempt."""
     if tool_name != "Bash":
-        return False
+        return None
     command = command_of(tool_input)
     lines = command.rstrip("\n").split("\n")
     first_line = lines[0]
@@ -1014,127 +1044,123 @@ def is_phase_boundary_log_call():
     if heredoc_m:
         head = first_line[:heredoc_m.start()]
         if CHAINING_RE.search(QUOTED_SPAN_RE.sub("", head)):
-            return False
-        if PHASE_BOUNDARY_LOG_CALL_RE.match(head) is None:
-            return False
-        return lines[-1].strip() == heredoc_m.group(2)
+            return None
+        m = PHASE_BOUNDARY_LOG_CALL_RE.match(head)
+        if m is None:
+            return None
+        if lines[-1].strip() != heredoc_m.group(2):
+            return None
+        return m.group(2)
     if chains(command):
-        return False
-    return PHASE_BOUNDARY_LOG_CALL_RE.match(command) is not None
+        return None
+    m = PHASE_BOUNDARY_LOG_CALL_RE.match(command)
+    return m.group(2) if m else None
 
-# CARD_KINDS, find_work_root(), epic_dirs() and find_card_dir() moved up next to rule 2b
-# (HRN-51), which now needs them to resolve a card's own folder before rule 5 below does;
-# rule 5 still uses the same four names, unchanged.
-BULLET_RE = re.compile(r'^-\s+\S')
-PHASE_HEADING_RE = re.compile(r'^###\s+(\S+)')
+def is_phase_boundary_log_call():
+    """True only for a Bash call that is a single invocation of bin/work-note or
+    bin/work-commit — exempted at the boundary for the same reason git add/commit already
+    are (HRN-21.A.1), added by HRN-21.C.3: writing the log entry that closes a phase is
+    worthless if the very next call, the one command this system requires to record it, is
+    itself refused.
 
-def find_section(text, heading_name):
-    """The lines of a `## <heading_name>` section, up to the next `## ` heading (never a
-    `### ` one, which `^##\\s+\\S` cannot match — the char right after the two hashes of a
-    `### ` line is a third hash, not whitespace) or end of file. Empty string when the
-    heading is not present at all."""
-    lines = text.split("\n")
-    start = None
-    end = len(lines)
-    heading_re = re.compile(r'^##\s+' + re.escape(heading_name) + r'\s*$')
-    next_re = re.compile(r'^##\s+\S')
-    for i, line in enumerate(lines):
-        if start is None and heading_re.match(line):
-            start = i + 1
-            continue
-        if start is not None and next_re.match(line):
-            end = i
-            break
-    if start is None:
-        return ""
-    return "\n".join(lines[start:end])
+    `bin/work-commit` is exempt alongside `bin/work-note`, for the same reason and found the
+    same way (closing HRN-6.C): it is what this system puts in place of the bare `git
+    add`/`git commit` already exempt here, and an executor that cannot call it at the
+    boundary cannot land the work whose closure it has just recorded — as happened, one
+    phase after the absolute-path defect above, leaving a finished phase's code stranded
+    uncommitted in its own working copy."""
+    return matched_log_call_kind() in ("note", "commit")
 
-def parse_plan_phases(plan_text, card_id):
-    """Every phase in plan.md's own "## Шаги" section, in the order the plan itself lists
-    them, as (phase_id, step_count) pairs — phase_id being the token right after a "### "
-    subheading (e.g. "HRN-2.A"). A plan not split into phases at all — no "### " subheading
-    anywhere in the section — is one implicit phase named by the bare card_id, its step
-    count the section's own bullet lines."""
-    section = find_section(plan_text, "Шаги")
-    lines = section.split("\n")
-    starts = [i for i, l in enumerate(lines) if PHASE_HEADING_RE.match(l)]
-    if not starts:
-        return [(card_id, sum(1 for l in lines if BULLET_RE.match(l)))]
-    phases = []
-    for idx, start in enumerate(starts):
-        stop = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
-        phase_id = PHASE_HEADING_RE.match(lines[start]).group(1)
-        steps = sum(1 for l in lines[start + 1:stop] if BULLET_RE.match(l))
-        phases.append((phase_id, steps))
-    return phases
+def is_work_note_invocation():
+    """True only for a Bash call that is a single, genuine invocation of bin/work-note —
+    matched_log_call_kind() narrowed to that one script (HRN-63.B.1): the trigger for
+    running the run's own named phase's gate-<фаза>.sh, never fired by bin/work-commit or
+    bin/work-log, which record or land a phase but never close one on their own."""
+    return matched_log_call_kind() == "note"
 
-def short_card_total_steps(description_text):
-    """A short card's own step count — the number of bullets under description.md's own
-    "## Шаги" section (HRN-54.B.3). Mirrors bin/work_journal.py's own
-    short_card_step_names() exactly (the same heading, the same bullet pattern), because
-    this hook lives in a separate repository and cannot import that module — this function
-    is therefore the one deliberate second copy of that parsing, kept in sync by hand
-    whenever the Python module's own parsing changes."""
-    section = find_section(description_text, "Шаги")
-    lines = section.split("\n")
-    return sum(1 for l in lines if BULLET_RE.match(l))
+# CARD_KINDS, find_work_root(), epic_dirs(), find_card_dir() and find_card_worktree_root()
+# moved up next to rule 2b (HRN-51 / HRN-63.B.1), which now need them to resolve a card's
+# own folder, and its own working copy, before rule 5 below runs; rule 5 still uses the
+# same names, unchanged.
 
-NAMED_STEP_CLOSED_RE_CACHE = {}
+# HRN-63.B: the phase boundary no longer counts closed-step headings in log.md at all — it
+# reads one fact, whether <phase_id>.closed already sits in the card's own folder in the
+# shared checkout, laid only by that phase's own gate-<phase_id>.sh returning zero
+# (run_phase_gate_if_due() below). parse_plan_phases(), short_card_total_steps(),
+# closed_steps_for_phase() and total_steps_for_phase() — the whole log.md-header-counting
+# machinery HRN-2.E and HRN-54.B.3 built — are gone with them; plan.md and description.md
+# are no longer read by this rule at all.
+PHASE_GATE_RUNNING_ENV = "WORK_GATE_PHASE_GATE_RUNNING"
+PHASE_GATE_TIMEOUT = 900  # seconds — generous for a real check, bounded against a hang
 
-def strip_fenced_blocks(text):
-    """Blank out everything between a pair of lines beginning with three backticks — log.md's
-    own code fences, which quote a check's verbatim output — before any heading pattern ever
-    runs over the text (HRN-6.A.2). A heading-shaped line quoted inside one of these fences
-    (part of an earlier entry's own check output, or a handoff's own account of what an older
-    log looked like) must never be read as a real, closed step — the exact live defect HRN-5's
-    own executor found (ai/harness/work-system/HRN-5_the-handover-command/log.md, line 219)."""
-    lines = text.split("\n")
-    out = []
-    in_fence = False
-    for line in lines:
-        if line.strip().startswith("```"):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        out.append(line)
-    return "\n".join(out)
+def phase_closed_marker_path(card_dir, phase_id):
+    return os.path.join(card_dir, phase_id + ".closed")
 
+def phase_closed(card_dir, phase_id):
+    return os.path.isfile(phase_closed_marker_path(card_dir, phase_id))
 
-def closed_steps_for_phase(log_text, phase_id):
-    """The step numbers log.md names closed for one phase, read by name rather than by a
-    step's position in plan.md's own list (HRN-2.E). HRN-6.A.2 narrows this to only the one
-    form bin/work-plan ever stamps and bin/work-note ever echoes — "## <phase_id>.<N> —
-    <state>" — matched per line, never across a newline. HRN-40 requires the same space
-    and long dash the stamped form actually carries right after the step number, the
-    same requirement bin/work-handover's own STEP_HEADING_RE already puts on the same
-    question, so an interim progress note such as "## <phase_id>.<N>-progress — interim:
-    ..." is never mistaken for that step's own closing heading. The older, pre-HRN-6.A.2,
-    hand-typed "## <phase_id>, шаг <N>" convention is no longer recognised at all, and the
-    text is stripped of every fenced code block first, so a heading-shaped line quoted
-    verbatim inside a check's own output can never be mistaken for a real one."""
-    text = strip_fenced_blocks(log_text)
-    named_pattern = NAMED_STEP_CLOSED_RE_CACHE.get(phase_id)
-    if named_pattern is None:
-        named_pattern = re.compile(
-            r'^#{1,6}\s*' + re.escape(phase_id) + r'\.(\d+)\s+—',
-            re.MULTILINE,
+def run_phase_gate_if_due(card_dir, phase_id):
+    """HRN-63.B.1/B.2: on a genuine bin/work-note invocation (is_work_note_invocation()
+    above), while phase_id is not yet closed, run that phase's own gate-<phase_id>.sh — the
+    one copy that lives in the card's own linked working copy (find_card_worktree_root()
+    above), with that working copy as the script's own working directory — and, on a zero
+    return, lay and commit the boundary marker <phase_id>.closed in the card's folder in the
+    shared checkout, the same way bin/work_journal.py's own record_breakage() commits a
+    single file directly by path, except that a brand-new marker is untracked the first time
+    and needs its own `git add` first — a bare `git commit -- <path>` refuses an untracked
+    path outright, proved live writing this same step. Never raises and never denies on its
+    own account: every failure to resolve, run or commit falls through silently, leaving the
+    phase open exactly as it was.
+
+    Guarded by PHASE_GATE_RUNNING_ENV against recursing into itself: a phase's own gate
+    script may itself drive this very hook through synthetic bin/work-note calls of its own
+    (gate-HRN-63.B.sh does exactly this, on this very card), and since
+    find_card_worktree_root() always resolves to the one real working copy a card's branch
+    actually has, whatever state directory the outer run used, that nested run would
+    otherwise ask this same function to run the very gate that is already running, without
+    ever returning. Set once, in the environment the gate script's own subprocess (and every
+    `sh work-gate.sh` call it makes in turn) inherits, so at most one nested real run
+    happens and stops there."""
+    if not is_work_note_invocation():
+        return
+    if phase_closed(card_dir, phase_id):
+        return
+    if os.environ.get(PHASE_GATE_RUNNING_ENV) == "1":
+        return
+    own_root = find_card_worktree_root(brief["card"])
+    if not own_root:
+        return
+    working_copy_card_dir = find_card_dir(os.path.join(own_root, "ai"), brief["card"])
+    if not working_copy_card_dir:
+        return
+    gate_path = os.path.join(working_copy_card_dir, "gate-" + phase_id + ".sh")
+    if not (os.path.isfile(gate_path) and os.access(gate_path, os.X_OK)):
+        return
+    try:
+        env = dict(os.environ)
+        env[PHASE_GATE_RUNNING_ENV] = "1"
+        result = subprocess.run([gate_path], cwd=own_root, env=env,
+                                 capture_output=True, timeout=PHASE_GATE_TIMEOUT)
+    except Exception:
+        return
+    if result.returncode != 0:
+        return
+    marker = phase_closed_marker_path(card_dir, phase_id)
+    try:
+        with open(marker, "w", encoding="utf-8"):
+            pass
+        add = subprocess.run(["git", "add", "--", marker], cwd=card_dir,
+                              capture_output=True, timeout=30)
+        if add.returncode != 0:
+            return
+        subprocess.run(
+            ["git", "commit", "--no-verify", "-m",
+             "chore(%s): mark phase %s closed by its own gate" % (brief["card"], phase_id),
+             "--", marker],
+            cwd=card_dir, capture_output=True, timeout=30,
         )
-        NAMED_STEP_CLOSED_RE_CACHE[phase_id] = named_pattern
-    closed = set()
-    for m in named_pattern.finditer(text):
-        closed.add(int(m.group(1)))
-    return closed
-
-def total_steps_for_phase(plan_text, card_id, phase_id):
-    """The step count plan.md's own "## Шаги" section gives the one phase named phase_id, or
-    None when that phase does not appear in the plan at all (including when the plan is not
-    split into phases and phase_id is not the bare card_id parse_plan_phases falls back to
-    naming)."""
-    for pid, total in parse_plan_phases(plan_text, card_id):
-        if pid == phase_id:
-            return total
-    return None
+    except Exception:
+        pass
 
 work_root = find_work_root()
 card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
@@ -1167,66 +1193,36 @@ if brief.get("role") == "executor" and card_dir is not None:
             "work-gate.phase-boundary-blocks-unnamed-phase"
         )
     else:
-        # HRN-54.B.3: a card folder carrying no plan.md at all is a short card by
-        # definition (work_journal.is_short_card, in the Python module this shell-embedded
-        # hook cannot import) — its own steps are counted off description.md's own "## Шаги"
-        # section instead, through short_card_total_steps() above, rather than left
-        # unenforced by falling through the "plan_text is not None" branch below with
-        # total never computed at all, which is what this rule did before HRN-54.
-        try:
-            with open(os.path.join(card_dir, "plan.md"), "r", encoding="utf-8") as f:
-                plan_text = f.read()
-            is_short_card_dir = False
-        except OSError:
-            plan_text = None
-            is_short_card_dir = True
-        if is_short_card_dir:
-            try:
-                with open(os.path.join(card_dir, "description.md"), "r",
-                          encoding="utf-8") as f:
-                    description_text = f.read()
-            except OSError:
-                description_text = None
-            total = (short_card_total_steps(description_text)
-                     if description_text is not None else None)
-        elif plan_text is not None:
-            total = total_steps_for_phase(plan_text, brief["card"], phase_id)
-        else:
-            total = None
-        if total:
-            try:
-                with open(os.path.join(card_dir, "log.md"), "r", encoding="utf-8") as f:
-                    log_text = f.read()
-            except OSError:
-                log_text = ""
-            closed = len(closed_steps_for_phase(log_text, phase_id) & set(range(1, total + 1)))
-            if closed >= total:
-                if is_this_cards_log_write() or is_phase_boundary_save_call() or \
-                        is_phase_boundary_log_call():
-                    allow_and_exit()
-                deny_and_exit(
-                    "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s "
-                    "— the phase this run's own caller-brief names — is already closed "
-                    "in log.md, regardless of what any other phase in the plan looks "
-                    "like. A fresh executor takes the next phase, not this one. Save "
-                    "what is already built and stop — «допиши передачу и остановись».\n"
-                    "These four calls, and nothing else, still get through. Each is a "
-                    "single command: no `cd` in front, no `&&`, no `;`, no `|` — every "
-                    "chained command is refused here, whatever it chains.\n"
-                    "  1. Commit this phase's own code (this command finds the card's own "
-                    "working copy itself, from the step name — you do not have to be "
-                    "standing in it, and there is no path to pass):\n"
-                    "         bin/work-commit %s.<N> \"<что сделал шаг>\"\n"
-                    "  2. Write the phase's own handoff entry:\n"
-                    "         bin/work-note %s --handoff %s \"<состояние, находки, что "
-                    "дальше>\"\n"
-                    "  3. A bare `git add` or `git commit`, including the `git -C <путь "
-                    "копии> …` form, when you need git directly rather than the two "
-                    "commands above.\n"
-                    "  4. A Read, Write or Edit of this card's own log.md, and of no "
-                    "other file." % (phase_id, phase_id, brief["card"], phase_id),
-                    "work-gate.phase-boundary-own-phase-closed-later-untouched"
-                )
+        run_phase_gate_if_due(card_dir, phase_id)
+        if phase_closed(card_dir, phase_id):
+            if is_this_cards_log_write() or is_phase_boundary_save_call() or \
+                    is_phase_boundary_log_call():
+                allow_and_exit()
+            deny_and_exit(
+                "Blocked by work-gate's PHASE BOUNDARY rule: phase %s — the phase this "
+                "run's own caller-brief names — is already closed: its own gate-%s.sh has "
+                "already returned zero, and %s.closed sits in this card's own folder, "
+                "regardless of what any other phase in the plan looks like. A fresh "
+                "executor takes the next phase, not this one. Save what is already built "
+                "and stop — «допиши передачу и остановись».\n"
+                "These four calls, and nothing else, still get through. Each is a "
+                "single command: no `cd` in front, no `&&`, no `;`, no `|` — every "
+                "chained command is refused here, whatever it chains.\n"
+                "  1. Commit this phase's own code (this command finds the card's own "
+                "working copy itself, from the step name — you do not have to be "
+                "standing in it, and there is no path to pass):\n"
+                "         bin/work-commit %s.<N> \"<что сделал шаг>\"\n"
+                "  2. Write the phase's own handoff entry:\n"
+                "         bin/work-note %s --handoff %s \"<состояние, находки, что "
+                "дальше>\"\n"
+                "  3. A bare `git add` or `git commit`, including the `git -C <путь "
+                "копии> …` form, when you need git directly rather than the two "
+                "commands above.\n"
+                "  4. A Read, Write or Edit of this card's own log.md, and of no "
+                "other file." % (phase_id, phase_id, phase_id, phase_id, brief["card"],
+                                  phase_id),
+                "work-gate.phase-boundary-own-phase-closed-later-untouched"
+            )
 
 # --- 6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" ------------------------------
 # ai/harness/system/project.md, "Правка чужого файла": the executor may not write
@@ -1286,37 +1282,6 @@ def resolve_shared_checkout_root():
     if not work_root:
         return None
     return os.path.dirname(work_root)
-
-def find_card_worktree_root(card_id):
-    """The path of card_id's own linked working copy, resolved the same way bin/work-session
-    cuts one and bin/work-commit already finds it by name (rules.md rule 53): the entry in
-    `git worktree list --porcelain` whose own branch is refs/heads/work/<card id, lowercased>.
-    WORK_GATE_CARD_WORKTREE_ROOT overrides this outright, the same test-only escape every
-    other git-plumbing lookup in this file already carries. None when no such branch is found
-    at all — an ordinary case for a role other than executor, and for an executor whose
-    brief names a card this session never actually ran bin/work-session for; the caller then
-    skips this rule, since it has nothing to judge a boundary against."""
-    override = os.environ.get("WORK_GATE_CARD_WORKTREE_ROOT")
-    if override:
-        return override
-    try:
-        result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    target_branch = "refs/heads/work/" + card_id.lower()
-    current_path = None
-    for line in result.stdout.splitlines():
-        if line.startswith("worktree "):
-            current_path = line[len("worktree "):].strip()
-        elif line.startswith("branch "):
-            if line[len("branch "):].strip() == target_branch and current_path:
-                return current_path
-    return None
 
 WORKING_COPY_BOUNDARY_TEMPLATE = (
     "Blocked by work-gate's WORKING COPY BOUNDARY rule: this call would edit %s, inside the "
