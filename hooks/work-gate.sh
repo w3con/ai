@@ -175,8 +175,9 @@
 #     role — "агента", not "исполнителя", is the word project.md's own paragraph uses. The
 #     size of the context the agent's own most recent turn actually held (input_tokens +
 #     cache_creation_input_tokens + cache_read_input_tokens of the LAST assistant record in
-#     this run's own transcript, named by transcript_path in the hook's payload — what that
-#     one generation was actually given to read, not a sum across the run) is compared
+#     this run's own transcript, resolved from the call's own agent_id — see "WHICH
+#     TRANSCRIPT RULES 8-10 JUDGE" below — what that one generation was actually given to
+#     read, not a sum across the run) is compared
 #     against CONTEXT_SIZE_CEILING (300,000 tokens). Past it, every call is refused except a
 #     Write/Edit of this card's own log.md, with the words «запиши состояние в лог и
 #     остановись» the plan itself quotes. A transcript that cannot be read, or carries no
@@ -283,6 +284,7 @@ STDIN_DATA="$(cat)"
 SELF_PATH="${BASH_SOURCE[0]}"
 
 exec python3 - "$SELF_PATH" "$STDIN_DATA" <<'PYEOF'
+import glob
 import hashlib
 import json
 import os
@@ -1364,7 +1366,47 @@ def run_transcript_stats(path):
         return None
     return {"last_context": last_context, "spend": spend, "calls": calls}
 
-transcript_path = data.get("transcript_path")
+# --- WHICH TRANSCRIPT RULES 8-10 JUDGE (2026-08-31) ------------------------------------
+# The payload's own `transcript_path` names the SESSION's transcript and never a subagent's
+# own: a subagent's turns are written to `<...>/tasks/<agent_id>.output` instead. Reading
+# that field for a subagent call therefore measured the coordinator's own run, and all
+# three of the ceilings below — context size, spend, pace — judged the wrong numbers and
+# never fired once for any subagent. Measured on HRN-59's own executor, 2026-08-31: its
+# last turn held 385,246 tokens of context, 59 of its turns sat above the 300,000 ceiling,
+# no refusal was ever issued, while the coordinator's own transcript peaked at 202,592 and
+# so passed every check. The rules themselves were sound — fed that executor's real
+# transcript by hand, rule 8 refused exactly as written.
+#
+# So a call carrying an agent_id resolves that agent's own transcript, by the same two
+# globs bin/agent-spend's own TRANSCRIPT_GLOBS already use (the durable per-session file
+# first, the temporary subagent mirror second). Not finding it leaves these rules nothing
+# to judge and they skip — the same fail-open choice they already make for an unreadable
+# transcript — rather than falling back to the payload's path, since measuring the wrong
+# run is exactly the defect this replaces. A call carrying no agent_id is the session's
+# own, and there the payload's path names the right file.
+AGENT_TRANSCRIPT_GLOBS = [
+    os.path.expanduser("~/.claude/projects/*/%s.jsonl"),
+    "/private/tmp/claude-*/*/*/tasks/%s.output",
+]
+
+def agent_transcript_path(aid):
+    """The newest transcript file on disk for one agent id, or None when there is none."""
+    if not aid or not re.fullmatch(r'[A-Za-z0-9_-]+', str(aid)):
+        return None
+    for pattern in AGENT_TRANSCRIPT_GLOBS:
+        hits = glob.glob(pattern % aid)
+        if not hits:
+            continue
+        try:
+            return max(hits, key=os.path.getmtime)
+        except OSError:
+            return hits[0]
+    return None
+
+if agent_id:
+    transcript_path = agent_transcript_path(agent_id)
+else:
+    transcript_path = data.get("transcript_path")
 run_stats = run_transcript_stats(transcript_path)
 
 # --- 8. CONTEXT SIZE CEILING (HRN-2.C): every role -------------------------------------
