@@ -181,6 +181,29 @@
 #     this rule cannot resolve — the same fail-open posture every other rule in this file
 #     already takes on an unresolvable state of its own.
 #
+#  6b. GIT COMMAND (HRN-70): applies only to role "executor", judged against every Bash call.
+#     A `git …` invocation is read-only by default — status, diff, log, show, rev-parse,
+#     ls-files, worktree list — and every other subcommand is refused, naming the reference
+#     command that does the same thing correctly instead of a bare git call: bin/work-commit
+#     for saving or discarding work (stash, add, commit, checkout, switch, restore, reset,
+#     branch, clean — each one of these can lose uncommitted work exactly the way a bare
+#     `git stash` already has, HRN-63 2026-09-01), acceptance for landing this card's own
+#     branch (merge, rebase, push), and the same generic pointer for a subcommand this rule
+#     does not recognise at all. `npm install` is refused the same way, in favour of `npm
+#     ci`, as its own separate check inside this rule. Only a git call that actually targets
+#     one of THIS project's own repositories is judged: a bare `git …` (no `-C`) always
+#     targets cwd, which every Bash call's own cwd is reset to — the shared checkout — so it
+#     is always in scope; a `git -C <path> …` is judged only when <path> resolves inside one
+#     of the paths `git worktree list --porcelain` reports for that same repository. A git
+#     call targeting a repository outside this project entirely — the separate ~/Dev/ai
+#     configuration repository this rule itself was built and committed in, by this same
+#     kind of executor, being the load-bearing example — is never judged by this rule at
+#     all. A command carrying a heredoc (`<<marker`) is judged only on the part before the
+#     heredoc operator, never inside the heredoc's own body — that body is stdin content,
+#     most often a check's own verbatim output pasted into a bin/work-note call, and a line
+#     inside it that happens to read "git status" or "$ git commit -m x" as PROSE is never
+#     mistaken for a real invocation.
+#
 #  7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): applies only to role "executor",
 #     once card_dir is known. Twenty calls in a row without a Write/Edit of this card's own
 #     log.md refuse the next call — "Двадцать вызовов без записи в log.md" — with every call
@@ -263,7 +286,8 @@
 #     отказами счёт не сбрасывает").
 #
 # Rule 6a keeps no state of its own either — it re-reads `git worktree list --porcelain`
-# fresh on every call, exactly like rule 5's own resolution of the work root.
+# fresh on every call, exactly like rule 5's own resolution of the work root. Rule 6b keeps
+# no state of its own for the same reason.
 #
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
@@ -1322,6 +1346,198 @@ if brief.get("role") == "executor" and tool_name in ("Write", "Edit") and card_d
                         WORKING_COPY_BOUNDARY_TEMPLATE % (real_fp, real_own_root, right_path),
                         "work-gate.working-copy-boundary"
                     )
+
+# --- 6b. GIT COMMAND (HRN-70): an executor's own `git` invocation is read-only by default —
+# status, diff, log, show, rev-parse, ls-files, worktree list — and anything else is refused,
+# naming the reference command that does the same thing correctly instead of a bare git call:
+# bin/work-commit for saving or discarding work (stash, add, commit, checkout, switch,
+# restore, reset, branch, clean — every one of these can lose uncommitted work exactly the
+# way a bare `git stash` already has, HRN-63 2026-09-01), acceptance for landing this card's
+# own branch (merge, rebase, push), and the same generic pointer for anything this rule does
+# not recognise at all. `npm install` is refused the same way in favour of `npm ci`, as its
+# own separate check inside this rule. Judged only for role "executor" — every other role
+# passes through untouched, since none of them carries a card whose own working copy this
+# rule could even resolve a scope from.
+#
+# SCOPE: only a git call that actually targets one of THIS project's own repositories — the
+# shared checkout every Bash call's own cwd is reset to, or one of its own linked working
+# copies (…-hrnNN) — is judged at all. A bare `git …` (no `-C`) always targets cwd, which is
+# always the shared checkout, so it is always in scope; a `git -C <path> …` is judged only
+# when <path> resolves inside one of the paths `git worktree list --porcelain` reports for
+# that same repository. This is deliberate and load-bearing, not an incidental gap: this
+# card's own fix lives in the separate ~/Dev/ai configuration repository (ai/harness/system/
+# project.md, "правка живёт в файле hooks/work-gate.sh репозитория конфигурации"), committed
+# there by a direct `git -C /Users/tknff/Dev/ai commit …`, by the same executor this very
+# rule governs — a rule that refused that call would refuse its own fix's own delivery.
+GIT_PRE_SUBCOMMAND_VALUE_OPTS_6B = GIT_PRE_SUBCOMMAND_VALUE_OPTS  # same two options, same skip
+
+def git_subcommand_and_arg(command):
+    """(subcommand, the token right after it) of a `git …` invocation, walking past the same
+    pre-subcommand options git_subcommand() above already walks past. The second element is
+    used only to tell `git worktree list` apart from `git worktree add`/`remove`/… — None
+    when there is no further token. (None, None) when `command` is not a git invocation."""
+    tokens = command.split()
+    if not tokens or tokens[0] != "git":
+        return None, None
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token in GIT_PRE_SUBCOMMAND_VALUE_OPTS_6B:
+            i += 2
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        return token, (tokens[i + 1] if i + 1 < len(tokens) else None)
+    return None, None
+
+def git_dash_c_path(command):
+    """The path argument of this `git …` invocation's own `-C <path>` option, or None when
+    it carries none — used only to resolve which repository a git call actually targets."""
+    tokens = command.split()
+    if not tokens or tokens[0] != "git":
+        return None
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "-C":
+            return tokens[i + 1] if i + 1 < len(tokens) else None
+        if token == "-c":
+            i += 2
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        return None
+    return None
+
+def command_head_before_heredoc(command):
+    """The part of `command` that actually runs — everything up to the start of a heredoc
+    operator (`<<marker`, `<<-marker`, `<<'marker'`, `<<"marker"`), or the whole command when
+    it carries none. A heredoc's own BODY is never scanned by this rule: it is stdin content,
+    most often a check's own verbatim output pasted into a bin/work-note call, and a line
+    inside it that happens to read "git status" or "$ git commit -m x" as PROSE must never be
+    mistaken for a real invocation — found while writing this very rule's own card, HRN-70,
+    whose own log entries quote exactly that kind of line."""
+    m = re.search(r'<<-?\s*([\'"]?)(\w+)\1', command)
+    return command[:m.start()] if m else command
+
+def git_statements(command):
+    """Every top-level statement of `command`'s own head (command_head_before_heredoc above)
+    — split on `&&`, `;`, `|` or a newline outside any quoted span, the same quote-aware rule
+    chains() already uses to decide whether a command chains at all, kept position-aligned
+    with the original text (padded, not stripped) so the split points land in the same place
+    in both strings."""
+    head = command_head_before_heredoc(command)
+    blanked = QUOTED_SPAN_RE.sub(lambda m: "x" * len(m.group(0)), head)
+    parts, last = [], 0
+    for m in CHAINING_RE.finditer(blanked):
+        parts.append(head[last:m.start()])
+        last = m.end()
+    parts.append(head[last:])
+    return [p.strip() for p in parts if p.strip()]
+
+def project_worktree_roots():
+    """Every worktree path `git worktree list --porcelain` reports for the repository
+    reachable from this hook's own default working directory — the shared checkout every
+    Bash call's own cwd is always reset to — covering both that shared checkout itself and
+    every card's own linked working copy cut alongside it. None on any failure to run git at
+    all, in which case a `-C <path>` git call is treated as unresolvable and not judged, the
+    same fail-open posture every other rule in this file already takes on a reading error of
+    its own."""
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    roots = [line[len("worktree "):].strip()
+             for line in result.stdout.splitlines() if line.startswith("worktree ")]
+    return roots or None
+
+def path_is_in_project(path, roots):
+    if not path or not roots:
+        return False
+    try:
+        real = os.path.realpath(path)
+    except Exception:
+        return False
+    for root in roots:
+        real_root = os.path.realpath(root)
+        if real == real_root or real.startswith(real_root + os.sep):
+            return True
+    return False
+
+GIT_READ_ONLY_SUBCOMMANDS = {"status", "diff", "log", "show", "rev-parse", "ls-files"}
+GIT_COMMAND_SAVE_SUBCOMMANDS = {"stash", "add", "commit", "checkout", "switch",
+                                 "restore", "reset", "branch", "clean"}
+GIT_COMMAND_LAND_SUBCOMMANDS = {"merge", "rebase", "push"}
+
+GIT_COMMAND_SAVE_TEMPLATE = (
+    "Blocked by work-gate's GIT COMMAND rule: `git %s` is not the executor's own way to "
+    "save or discard work — call bin/work-commit <шаг> \"<итог>\" instead, which stages and "
+    "commits everything this step changed through the project's own pre-commit checks, "
+    "after recording the same step's own state with bin/work-note %s <шаг> \"<состояние>\". "
+    "Reading commands stay open without limit: git status, diff, log, show, rev-parse, "
+    "ls-files, worktree list."
+)
+GIT_COMMAND_LAND_TEMPLATE = (
+    "Blocked by work-gate's GIT COMMAND rule: `git %s` lands or moves this card's own "
+    "branch, and that is never the executor's own move — acceptance (bin/work-accept, run "
+    "by the coordinator once the card's work is done) is what folds the branch in. Reading "
+    "commands stay open without limit: git status, diff, log, show, rev-parse, ls-files, "
+    "worktree list."
+)
+GIT_COMMAND_UNKNOWN_TEMPLATE = (
+    "Blocked by work-gate's GIT COMMAND rule: `git %s` is not one of the reading commands an "
+    "executor may run directly — status, diff, log, show, rev-parse, ls-files, worktree "
+    "list. Save or discard work with bin/work-commit <шаг> \"<итог>\", record it with "
+    "bin/work-note %s <шаг> \"<состояние>\", and leave landing the branch to acceptance."
+)
+
+def git_command_denial(subcommand_label, card_id):
+    if subcommand_label in GIT_COMMAND_SAVE_SUBCOMMANDS:
+        return GIT_COMMAND_SAVE_TEMPLATE % (subcommand_label, card_id)
+    if subcommand_label in GIT_COMMAND_LAND_SUBCOMMANDS:
+        return GIT_COMMAND_LAND_TEMPLATE % subcommand_label
+    return GIT_COMMAND_UNKNOWN_TEMPLATE % (subcommand_label, card_id)
+
+NPM_INSTALL_RE = re.compile(r'(?:^|[\s;&|])npm\s+install\b')
+
+if brief.get("role") == "executor" and tool_name == "Bash":
+    command = command_of(tool_input)
+    head_blanked = QUOTED_SPAN_RE.sub(lambda m: "x" * len(m.group(0)),
+                                       command_head_before_heredoc(command))
+    if NPM_INSTALL_RE.search(head_blanked):
+        deny_and_exit(
+            "Blocked by work-gate's GIT COMMAND rule: `npm install` rewrites the lock file "
+            "— call `npm ci` instead, which installs exactly what the lock file already "
+            "records.",
+            "work-gate.npm-install"
+        )
+
+    project_roots = None
+    for statement in git_statements(command):
+        subcommand, nxt = git_subcommand_and_arg(statement)
+        if subcommand is None:
+            continue
+        dash_c = git_dash_c_path(statement)
+        if dash_c is not None:
+            if project_roots is None:
+                project_roots = project_worktree_roots()
+            if not path_is_in_project(dash_c, project_roots):
+                continue  # a repository outside this project (e.g. ~/Dev/ai) — not judged
+        if subcommand == "worktree":
+            if nxt == "list":
+                continue
+            deny_and_exit(git_command_denial("worktree " + (nxt or ""), brief["card"]),
+                          "work-gate.git-command")
+        if subcommand in GIT_READ_ONLY_SUBCOMMANDS:
+            continue
+        deny_and_exit(git_command_denial(subcommand, brief["card"]), "work-gate.git-command")
 
 # --- 7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): twenty calls without a log.md
 # write ------------------------------------------------------------------------------------
