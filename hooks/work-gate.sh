@@ -1165,6 +1165,31 @@ def run_phase_gate_if_due(card_dir, phase_id):
 work_root = find_work_root()
 card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
 
+# A brief naming a card whose folder cannot be found is refused rather than let through.
+# card_dir being None used to fail open everywhere it is read, which is right for the one
+# case it was written for — git unavailable, so work_root itself is None and nothing about
+# this repository can be resolved at all. It is wrong for the other case: work_root resolved
+# fine and the brief simply names something that is not a card. Every rule scoped to a card —
+# the phase boundary, the run of that phase's own gate, the file-authorship rule — then
+# vanishes silently, and the run continues with no boundary over it while every party
+# believes there is one. Measured live 2026-09-01 on HRN-63: an executor re-ran
+# bin/work-agent-brief with its own card folder's absolute path in place of the identifier,
+# and worked the rest of its run ungoverned, laying no phase marker and never once being
+# stopped. bin/work-agent-brief now refuses that value at the source; this refuses whatever
+# still reaches here by another road.
+if work_root and card_dir is None:
+    deny_and_exit(
+        "Blocked by work-gate: this run's own caller-brief names %r as its card, and no "
+        "card folder of that name exists under %s. A card is named by its identifier — "
+        "HRN-6, MAT-7 — never by a path to its own folder. Every rule this gate scopes to "
+        "a card is off while the brief says this, so the run is stopped here rather than "
+        "allowed to continue ungoverned. Re-write the brief with the identifier: "
+        "bin/work-agent-brief --role %s --card <ID>%s" %
+        (brief["card"], work_root, brief.get("role") or "executor",
+         (" --phase " + brief["phase"]) if brief.get("phase") else ""),
+        "work-gate.brief-names-no-card"
+    )
+
 if brief.get("role") == "executor" and card_dir is not None:
     fp = file_path_of(tool_input)
 
