@@ -163,6 +163,24 @@
 #     executor's own to edit, so it records the proposed change there and keeps working. An
 #     acceptor may not write log.md — that file is the executor's own.
 #
+#  6a. WORKING COPY BOUNDARY (HRN-70): applies only to role "executor", judged the same way
+#     rule 6 above is — only once card_dir is known, and only for a Write/Edit whose target
+#     does NOT sit inside the run's own card folder (every file that folder holds is written
+#     by whichever command owns it, in the shared checkout, by rules.md's own rule 51 — this
+#     rule is never about those, question.md included). The target's own realpath is compared
+#     against two other paths: the shared checkout's own root (os.path.dirname of the work
+#     root rule 5 already resolves) and this card's own linked working copy, found the same
+#     way bin/work-session cuts one and bin/work-commit already finds one by name — the `git
+#     worktree list --porcelain` entry whose own branch is refs/heads/work/<card id,
+#     lowercased> (rules.md rule 53). A target inside the shared checkout but NOT inside that
+#     working copy is refused, naming both the wrong path it actually named and the right
+#     one — the same path, rewritten under the working copy's own root — so the fix is
+#     repeating the same edit at the right address, never guessing what that address is. A
+#     target already inside the card's own working copy, or outside the shared checkout
+#     entirely, is never judged by this rule at all; nor is a call whose own working copy
+#     this rule cannot resolve — the same fail-open posture every other rule in this file
+#     already takes on an unresolvable state of its own.
+#
 #  7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): applies only to role "executor",
 #     once card_dir is known. Twenty calls in a row without a Write/Edit of this card's own
 #     log.md refuse the next call — "Двадцать вызовов без записи в log.md" — with every call
@@ -244,6 +262,9 @@
 #     still hits three in a row on its next matching denial ("разрешённый вызов между
 #     отказами счёт не сбрасывает").
 #
+# Rule 6a keeps no state of its own either — it re-reads `git worktree list --porcelain`
+# fresh on every call, exactly like rule 5's own resolution of the work root.
+#
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
 # already uses for its own per-agent state): sanctions/<key>/<card id>.json (rule 2, one file
@@ -272,6 +293,10 @@
 #   WORK_GATE_PACE_THRESHOLD_FILE  overrides the path rule 10 reads its threshold from
 #                                   (default hooks/work-gate-pace-threshold.txt, next to
 #                                   this file).
+#   WORK_GATE_CARD_WORKTREE_ROOT   overrides the working copy path rule 6a resolves for the
+#                                   run's own card (normally found via `git worktree list
+#                                   --porcelain`'s own branch line, refs/heads/work/<card
+#                                   id, lowercased>).
 #
 # Fail-closed: unparseable stdin denies.
 
@@ -1221,6 +1246,82 @@ if tool_name in ("Write", "Edit") and card_dir is not None:
                     "ai/harness/system/project.md, \"Правка чужого файла\".",
                     "work-gate.file-authorship-acceptor-log"
                 )
+
+# --- 6a. WORKING COPY BOUNDARY (HRN-70): an executor's own Write/Edit lands inside its
+# card's own linked working copy, never inside the shared checkout every other session on
+# this machine shares. Judged only for role "executor", and only once card_dir is known —
+# the same fail-open posture rule 6 above already takes when card_dir cannot be resolved. A
+# target inside the card's own folder is never judged here at all: description.md, plan.md,
+# log.md, question.md and every other file that folder holds are written by whichever
+# command owns each one, in the shared checkout, by design (rules.md rule 51) — this rule
+# exists for the executor's own product-code edits, not for those.
+def resolve_shared_checkout_root():
+    """The shared checkout's own path — os.path.dirname(work_root), since find_work_root()
+    above always returns that path with "ai" appended, by construction or by its own test
+    override. None when work_root itself is None."""
+    if not work_root:
+        return None
+    return os.path.dirname(work_root)
+
+def find_card_worktree_root(card_id):
+    """The path of card_id's own linked working copy, resolved the same way bin/work-session
+    cuts one and bin/work-commit already finds it by name (rules.md rule 53): the entry in
+    `git worktree list --porcelain` whose own branch is refs/heads/work/<card id, lowercased>.
+    WORK_GATE_CARD_WORKTREE_ROOT overrides this outright, the same test-only escape every
+    other git-plumbing lookup in this file already carries. None when no such branch is found
+    at all — an ordinary case for a role other than executor, and for an executor whose
+    brief names a card this session never actually ran bin/work-session for; the caller then
+    skips this rule, since it has nothing to judge a boundary against."""
+    override = os.environ.get("WORK_GATE_CARD_WORKTREE_ROOT")
+    if override:
+        return override
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    target_branch = "refs/heads/work/" + card_id.lower()
+    current_path = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):].strip()
+        elif line.startswith("branch "):
+            if line[len("branch "):].strip() == target_branch and current_path:
+                return current_path
+    return None
+
+WORKING_COPY_BOUNDARY_TEMPLATE = (
+    "Blocked by work-gate's WORKING COPY BOUNDARY rule: this call would edit %s, inside the "
+    "shared checkout — not this card's own working copy, %s. Repeat the same edit at the "
+    "right address instead: %s."
+)
+
+if brief.get("role") == "executor" and tool_name in ("Write", "Edit") and card_dir is not None:
+    fp = file_path_of(tool_input)
+    if fp is not None:
+        real_fp = os.path.realpath(fp)
+        real_card_dir = os.path.realpath(card_dir)
+        if os.path.dirname(real_fp) != real_card_dir:
+            shared_root = resolve_shared_checkout_root()
+            own_root = find_card_worktree_root(brief["card"])
+            if shared_root and own_root:
+                real_shared_root = os.path.realpath(shared_root)
+                real_own_root = os.path.realpath(own_root)
+                inside_shared = (real_fp == real_shared_root or
+                                  real_fp.startswith(real_shared_root + os.sep))
+                inside_own = (real_fp == real_own_root or
+                              real_fp.startswith(real_own_root + os.sep))
+                if inside_shared and not inside_own:
+                    rel = os.path.relpath(real_fp, real_shared_root)
+                    right_path = os.path.join(real_own_root, rel)
+                    deny_and_exit(
+                        WORKING_COPY_BOUNDARY_TEMPLATE % (real_fp, real_own_root, right_path),
+                        "work-gate.working-copy-boundary"
+                    )
 
 # --- 7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): twenty calls without a log.md
 # write ------------------------------------------------------------------------------------
