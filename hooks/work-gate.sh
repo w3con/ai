@@ -1522,5 +1522,74 @@ if tool_name in ("Write", "Edit"):
                     "work-gate.file-edit-brake"
                 )
 
+# --- 13. COMMAND REFERENCE ON THE FIRST SAVE-SHAPED CALL (owner's word, 2026-08-31) ----
+# The brief carries the command reference, and a run that needs it does so long after it
+# read the brief — HRN-59's own executor spent twelve refused calls guessing a form its
+# brief had already given it forty turns earlier. A skill cannot fix that: the model chooses
+# a skill by reading its description, which is the same memory that just failed. This hook
+# is the only thing that fires without asking the model anything, so it is what carries the
+# reference back to the moment of need.
+#
+# Never refuses, and never fires twice in one run: the first Bash call this run makes that
+# looks like saving work — bin/work-note, bin/work-commit, `git add`, `git commit` — is
+# allowed with the reference attached to it, and a marker for that run means every later
+# call goes through silently. The text is not written here: it is sliced out of the one
+# template the brief itself is built from, so the two can never drift apart. Every failure
+# along the way (no template, no card, an unreadable file) falls through to a plain allow.
+REFERENCE_MARKER_DIR = os.path.join(STATE_DIR, "reference-shown")
+
+def reference_marker_path(aid):
+    safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(aid)) if aid else "_no_agent_"
+    return os.path.join(REFERENCE_MARKER_DIR, "agent-" + safe + ".txt")
+
+def looks_like_save_call(command):
+    """True for the shapes an executor saves finished work with — the two commands of this
+    system, and the two bare git subcommands the phase boundary already exempts."""
+    if re.search(r'(^|\s)(\S*/)?bin/work-(note|commit)\b', command):
+        return True
+    return git_subcommand(command) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
+
+def command_reference_text(card_id, phase, card_dir_path):
+    """The brief's own command reference, read out of bin/templates/executor-brief.md —
+    from its 'Справочник команд:' heading up to the standing-behaviour heading that follows
+    it — with the same three placeholders the brief itself fills. None when anything at all
+    cannot be resolved, so this rule can only ever add text to an allow, never withhold
+    one."""
+    if not work_root or not card_id:
+        return None
+    template = os.path.join(os.path.dirname(work_root.rstrip("/")), "bin", "templates",
+                            "executor-brief.md")
+    try:
+        with open(template, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    start = text.find("Справочник команд:")
+    if start < 0:
+        return None
+    end = text.find("Постоянное поведение исполнителя", start)
+    section = text[start:end] if end > start else text[start:]
+    section = section.replace("{{CARD_ID}}", card_id)
+    section = section.replace("{{PHASE}}", phase or "<фаза>")
+    section = section.replace("{{CARD_DIR}}", card_dir_path or "<папка карточки>")
+    return section.strip()
+
+if brief.get("role") == "executor" and tool_name == "Bash":
+    marker = reference_marker_path(agent_id)
+    if not os.path.exists(marker) and looks_like_save_call(command_of(tool_input)):
+        reference = command_reference_text(brief.get("card"), brief.get("phase"), card_dir)
+        if reference is not None:
+            try:
+                os.makedirs(os.path.dirname(marker), exist_ok=True)
+                with open(marker, "w", encoding="utf-8") as f:
+                    f.write("shown\n")
+            except OSError:
+                pass
+            allow_and_exit(
+                "Справочник команд этой системы, приложен один раз за прогон, к первому "
+                "вызову, похожему на сохранение работы. Он же стоит в начале твоего "
+                "брифа.\n\n" + reference
+            )
+
 allow_and_exit()
 PYEOF

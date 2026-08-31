@@ -13,6 +13,20 @@ import tempfile
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work-gate.sh")
 AGENT = "agent-testboundary"
 CARD = "TST-1"
+# A stand-in for bin/templates/executor-brief.md in the validite-app repository: this
+# test must not depend on that repository being checked out beside this one, so it writes
+# its own template carrying the same two headings the hook slices between.
+TEMPLATE_TEXT = """Справочник команд: этим ты работаешь.
+
+  Закрыть шаг:
+      bin/work-note {{CARD_ID}} <шаг> "<состояние>"
+  Закоммитить код шага:
+      bin/work-commit <шаг> "<итог>"
+  question.md кладётся в {{CARD_DIR}}, фаза сейчас {{PHASE}}.
+
+Постоянное поведение исполнителя:
+1. …
+"""
 PHASE = "TST-1.A"
 
 
@@ -44,6 +58,54 @@ def decide(hook_env, tool_name, tool_input):
         return "unparsable", r.stdout + r.stderr
     spec = out.get("hookSpecificOutput", {})
     return spec.get("permissionDecision", "?"), spec.get("permissionDecisionReason", "")
+
+
+
+def reference_cases(base_env, base):
+    """The command reference must reach the first save-shaped call of a run whose phase is
+    still open, exactly once, and must never turn an allow into a refusal."""
+    work_root, state, card_dir = build_tree(os.path.join(base, "open"))
+    # two steps, only the first closed → the phase is open, the boundary stays silent
+    with open(os.path.join(card_dir, "plan.md"), "w", encoding="utf-8") as f:
+        f.write("## Шаги\n\n### %s — фаза\n\n- [%s.1] один\n- [%s.2] два\n"
+                % (PHASE, PHASE, PHASE))
+    repo_bin = os.path.join(os.path.dirname(work_root), "bin", "templates")
+    os.makedirs(repo_bin)
+    with open(os.path.join(repo_bin, "executor-brief.md"), "w",
+              encoding="utf-8") as f:
+        f.write(TEMPLATE_TEXT)
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+
+    failures = 0
+    got, reason = decide(env, "Bash", {"command": 'bin/work-commit TST-1.A.1 "итог"'})
+    ok = got == "allow" and "bin/work-note" in reason and "bin/work-commit" in reason
+    print(("  ok   " if ok else "  FAIL ") + "первый вызов-сохранение получает справочник")
+    failures += 0 if ok else 1
+
+    got2, reason2 = decide(env, "Bash", {"command": 'bin/work-commit TST-1.A.2 "итог"'})
+    ok2 = got2 == "allow" and "bin/work-note" not in (reason2 or "")
+    print(("  ok   " if ok2 else "  FAIL ") + "второй вызов справочник не повторяет")
+    failures += 0 if ok2 else 1
+
+    work_root3, state3, card_dir3 = build_tree(os.path.join(base, "other"))
+    with open(os.path.join(card_dir3, "plan.md"), "w", encoding="utf-8") as f:
+        f.write("## Шаги\n\n### %s — фаза\n\n- [%s.1] один\n- [%s.2] два\n"
+                % (PHASE, PHASE, PHASE))
+    env3 = dict(base_env)
+    env3["WORK_GATE_WORK_ROOT"] = work_root3
+    env3["WORK_GATE_STATE_DIR"] = state3
+    got3, _ = decide(env3, "Bash", {"command": "go test ./..."})
+    ok3 = got3 == "allow"
+    print(("  ok   " if ok3 else "  FAIL ") + "обычный вызов не трогается")
+    failures += 0 if ok3 else 1
+
+    got4, _ = decide(env3, "Bash", {"command": 'bin/work-commit TST-1.A.1 "итог"'})
+    ok4 = got4 == "allow"
+    print(("  ok   " if ok4 else "  FAIL ") + "без шаблона вызов всё равно проходит")
+    failures += 0 if ok4 else 1
+    return failures
 
 
 def main():
@@ -104,7 +166,10 @@ def main():
         print("\nFAIL: в тексте отказа нет: " + ", ".join(missing))
         failures += 1
 
-    print("\n%d из %d случаев прошли" % (len(cases) - failures, len(cases)))
+    print("\nСправочник команд:")
+    failures += reference_cases(env, base)
+
+    print("\n%d случаев не прошли" % failures)
     return 1 if failures else 0
 
 
