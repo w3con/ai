@@ -876,19 +876,45 @@ def chains(command):
     closing HRN-6.C)."""
     return CHAINING_RE.search(QUOTED_SPAN_RE.sub("", command)) is not None
 
+# `-C <path>` and `-c <key>=<value>` before the subcommand: git's own two options that take
+# a value and change nothing about which subcommand runs. `-C` in particular is the only way
+# to name another working copy without a `cd`, and a `cd` is chaining and refused here — so
+# refusing `git -C <copy> add` while promising that `git add` gets through left an executor
+# standing in the shared checkout with no way at all to stage its own copy's work, which is
+# exactly the wall HRN-59's own executor hit some twenty times (2026-08-31).
+GIT_PRE_SUBCOMMAND_VALUE_OPTS = ("-C", "-c")
+
+def git_subcommand(command):
+    """The subcommand of a `git …` invocation, skipping the options that legitimately come
+    before it, or None when the command is not a git invocation at all."""
+    tokens = command.split()
+    if not tokens or tokens[0] != "git":
+        return None
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token in GIT_PRE_SUBCOMMAND_VALUE_OPTS:
+            i += 2
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        return token
+    return None
+
 def is_phase_boundary_save_call():
     """True only for a Bash call whose entire command is a single `git add` or `git commit`
     invocation — never a substring or resemblance match. A command that chains more than one
     statement is never exempt, even when one of its parts is itself a bare `git add` or
     `git commit`, since the exemption names one specific action, not a shell script that
-    happens to contain it somewhere."""
+    happens to contain it somewhere. `git -C <copy> add` counts as `git add`: the option
+    names which working copy is written and changes nothing about what the call does."""
     if tool_name != "Bash":
         return False
     command = command_of(tool_input)
     if chains(command):
         return False
-    m = re.match(r'^\s*git\s+(\S+)', command)
-    return m is not None and m.group(1) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
+    return git_subcommand(command) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
 
 # A command invoking one of the three commands that record and land a closed phase, by the
 # bare relative path or by any path ending in that same bin/<name> component — never by
@@ -1131,13 +1157,23 @@ if brief.get("role") == "executor" and card_dir is not None:
                     "Blocked by work-gate's PHASE BOUNDARY rule: every step of phase %s "
                     "— the phase this run's own caller-brief names — is already closed "
                     "in log.md, regardless of what any other phase in the plan looks "
-                    "like. A fresh executor takes the next phase, not this one. The "
-                    "only calls that still get through are a Read/Write/Edit of this "
-                    "card's own log.md, a Bash call that does nothing but `git add` or "
-                    "`git commit`, and a single, unchained Bash call running "
-                    "bin/work-note or bin/work-commit — saving work "
-                    "already done, never starting anything new: «допиши передачу и "
-                    "остановись»." % phase_id,
+                    "like. A fresh executor takes the next phase, not this one. Save "
+                    "what is already built and stop — «допиши передачу и остановись».\n"
+                    "These four calls, and nothing else, still get through. Each is a "
+                    "single command: no `cd` in front, no `&&`, no `;`, no `|` — every "
+                    "chained command is refused here, whatever it chains.\n"
+                    "  1. Commit this phase's own code (this command finds the card's own "
+                    "working copy itself, from the step name — you do not have to be "
+                    "standing in it, and there is no path to pass):\n"
+                    "         bin/work-commit %s.<N> \"<что сделал шаг>\"\n"
+                    "  2. Write the phase's own handoff entry:\n"
+                    "         bin/work-note %s --handoff %s \"<состояние, находки, что "
+                    "дальше>\"\n"
+                    "  3. A bare `git add` or `git commit`, including the `git -C <путь "
+                    "копии> …` form, when you need git directly rather than the two "
+                    "commands above.\n"
+                    "  4. A Read, Write or Edit of this card's own log.md, and of no "
+                    "other file." % (phase_id, phase_id, brief["card"], phase_id),
                     "work-gate.phase-boundary-own-phase-closed-later-untouched"
                 )
 
