@@ -1711,7 +1711,8 @@ def is_state_recording_escape_call():
     """The one way out from under every ceiling below: the calls by which a run that has
     been stopped records what it built and where it stopped, and nothing else.
 
-    Four shapes pass, and each of them had to be added for a reason found live (HRN-80).
+    Five shapes pass, and each of them had to be added for a reason found live (HRN-80, and
+    the fifth on HRN-82.A).
     A Read, Write or Edit of this card's own log.md, at either of its two real addresses
     (this_cards_log_paths(), HRN-73) — Read among them because the editor refuses to write a
     file this session has not read, exactly as this system already found closing HRN-34.B, so
@@ -1741,6 +1742,31 @@ def is_state_recording_escape_call():
         return True
     if kind == "note":
         return recording_call_names_this_card()
+    # A fifth shape, found live on HRN-82.A (2026-09-01) and of exactly the same class as the
+    # four above. A card whose own work lives outside this project — this hook and its own
+    # test suite live in the configuration repository, and that card's plan says so in its own
+    # steps — had no way at all to save that work under a ceiling: bin/work-commit refuses
+    # anywhere but the card's own working copy, bin/work-note writes only the journal, and a
+    # bare `git -C <репозиторий> commit`, which rule 6b already permits precisely because it
+    # targets a repository this gate does not judge, was refused here. That run rewrote the
+    # live hook across four steps, hit the hard context ceiling, and could commit none of it;
+    # the coordinator committed it by hand out of the working tree afterwards. Narrow on
+    # purpose: one unchained `git add`/`git commit` naming, through its own `-C`, a repository
+    # outside this project's own checkout. A git call inside the project still gets nothing
+    # from this — that work belongs to bin/work-commit, which already passes above.
+    command = command_of(tool_input)
+    if tool_name == "Bash" and command and not chains(command) and \
+            git_subcommand(command) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS:
+        target = git_dash_c_path(command)
+        shared_root = os.path.dirname(work_root) if work_root else None
+        if target and shared_root:
+            try:
+                rel = os.path.relpath(os.path.realpath(target),
+                                      os.path.realpath(shared_root))
+            except (OSError, ValueError):
+                return True
+            if rel.startswith(os.pardir):
+                return True
     return False
 
 def ceiling_escape_sentence():
@@ -1762,6 +1788,9 @@ def ceiling_escape_sentence():
         "         bin/work-note %s --handoff %s \"<состояние, находки, что дальше>\"\n"
         "  3. A Read, Write or Edit of this card's own log.md, and of no other file:\n"
         "         %s\n"
+        "  4. If this card's work reaches a repository outside this project, one `git add` "
+        "or `git commit` naming it through its own `-C`, so that work is saved too:\n"
+        "         git -C <путь к репозиторию> commit -m \"…\" -- <путь>\n"
         "Then stop." % (phase, card, phase, log_at)
     )
 
