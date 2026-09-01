@@ -30,7 +30,13 @@ TEMPLATE_TEXT = """Справочник команд: этим ты работа
 PHASE = "TST-1.A"
 
 
-def build_tree(base):
+def build_tree(base, phase_closed=False):
+    """HRN-63.B: the boundary no longer reads log.md's own headings at all — it reads one
+    fact, whether `<phase>.closed` sits in the card's own folder. `phase_closed=True` lays
+    that marker directly (no gate is actually run in this synthetic tree), giving the
+    boundary the same "this phase is done" state the old fixture used to fake by writing a
+    closing heading; `phase_closed=False` (the default) leaves the phase open, exactly as no
+    marker on disk always means."""
     work_root = os.path.join(base, "ai")
     card_dir = os.path.join(work_root, "harness", "epic", CARD + "_probe")
     os.makedirs(card_dir)
@@ -39,6 +45,9 @@ def build_tree(base):
                 % (PHASE, PHASE))
     with open(os.path.join(card_dir, "log.md"), "w", encoding="utf-8") as f:
         f.write("## %s.1 — шаг закрыт\n\nвывод\n" % PHASE)
+    if phase_closed:
+        with open(os.path.join(card_dir, PHASE + ".closed"), "w", encoding="utf-8"):
+            pass
     state = os.path.join(base, "state")
     briefs = os.path.join(state, "briefs")
     os.makedirs(briefs)
@@ -65,7 +74,7 @@ def reference_cases(base_env, base):
     """The command reference must reach the first save-shaped call of a run whose phase is
     still open, exactly once, and must never turn an allow into a refusal."""
     work_root, state, card_dir = build_tree(os.path.join(base, "open"))
-    # two steps, only the first closed → the phase is open, the boundary stays silent
+    # no <фаза>.closed marker on disk → the phase is open, the boundary stays silent
     with open(os.path.join(card_dir, "plan.md"), "w", encoding="utf-8") as f:
         f.write("## Шаги\n\n### %s — фаза\n\n- [%s.1] один\n- [%s.2] два\n"
                 % (PHASE, PHASE, PHASE))
@@ -110,7 +119,7 @@ def reference_cases(base_env, base):
 
 def main():
     base = tempfile.mkdtemp(prefix="gate-boundary-")
-    work_root, state, card_dir = build_tree(base)
+    work_root, state, card_dir = build_tree(base, phase_closed=True)
     env = dict(os.environ)
     env["WORK_GATE_WORK_ROOT"] = work_root
     env["WORK_GATE_STATE_DIR"] = state
