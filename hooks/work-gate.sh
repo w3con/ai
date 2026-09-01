@@ -1990,5 +1990,123 @@ if brief.get("role") == "executor" and tool_name == "Bash":
                 "брифа.\n\n" + reference
             )
 
+# --- 14. REPEATED SEARCH → THE MAP (owner's word, 2026-09-01) --------------------------
+# Measured on HRN-63.C: six consecutive greps of one 765-line file, and ten reads plus eight
+# edits of another. Searching one file over and over is how a run rediscovers, one match at
+# a time, what the card's own map.md already states outright — and that map was read once, at
+# the very start of the run, a hundred thousand tokens before the moment it was needed. So
+# the second search of one file hands the map back at the moment of need, and the third and
+# every later one is refused. No work is taken away, only the method: a whole-file Read of
+# that same path is never refused by this rule, and it zeroes the count, so an honest read
+# followed by a targeted search starts from nothing again. Executor only — a reading role's
+# whole job is searching, and it carries no map of its own to be handed.
+SEARCH_REPEAT_MAP_AT = 2      # this search is allowed, with the map attached to it
+SEARCH_REPEAT_DENY_AT = 3     # this search, and every later one, is refused
+
+SEARCH_TOOL_RE = re.compile(r'(^|[|;&]\s*)(\S*/)?(grep|egrep|fgrep|rg|ag|ack|awk|sed)\b')
+
+def search_count_path(aid, real_fp):
+    safe_agent = re.sub(r'[^A-Za-z0-9_-]', '_', str(aid))
+    safe_file = re.sub(r'[^A-Za-z0-9_-]', '_', real_fp)
+    return os.path.join(STATE_DIR, "search-counts", "agent-" + safe_agent,
+                        safe_file + ".txt")
+
+def searched_files(tname, ti):
+    """Every existing regular file this one call searches inside. A Grep call names its path
+    outright. A Bash call is read by taking every token of a grep/rg/sed/awk command line and
+    keeping the ones that turn out to be real files on disk — which drops flags, patterns and
+    directories without having to parse a shell command properly. A directory-wide search is
+    therefore never counted at all: this rule is about pecking at one known file."""
+    raw = []
+    if tname == "Grep":
+        p = ti.get("path")
+        if isinstance(p, str) and p:
+            raw.append(p)
+    elif tname == "Bash":
+        cmd = command_of(ti)
+        if SEARCH_TOOL_RE.search(cmd):
+            raw = re.findall(r'[^\s\'"|;&<>()]+', cmd)
+    out = []
+    for t in raw:
+        try:
+            rp = os.path.realpath(t)
+        except (OSError, ValueError):
+            continue
+        if os.path.isfile(rp) and rp not in out:
+            out.append(rp)
+    return out
+
+def map_material(real_fp):
+    """What the run is handed instead of another search: how long the file actually is, and
+    what the card's own map.md already says about it — the paragraphs naming that file when
+    there are any, the whole map otherwise. A card with no map still gets the line count and
+    the advice, so this never withholds the answer, only shortens it."""
+    try:
+        with open(real_fp, "r", encoding="utf-8", errors="replace") as f:
+            line_count = sum(1 for _ in f)
+    except OSError:
+        line_count = None
+    text = None
+    if card_dir:
+        try:
+            with open(os.path.join(card_dir, "map.md"), "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = None
+    excerpt = None
+    if text and text.strip():
+        base = os.path.basename(real_fp)
+        paragraphs = [p for p in re.split(r'\n\s*\n', text) if base in p]
+        excerpt = "\n\n".join(paragraphs).strip() if paragraphs else text.strip()
+        if len(excerpt) > 3000:
+            excerpt = excerpt[:3000] + "\n…"
+    return line_count, excerpt
+
+def search_advice(line_count, excerpt):
+    length = ("%d строк" % line_count) if line_count is not None else "неизвестной длины"
+    body = ("Read этого файла не ограничен ничем, читает его целиком (%s) и обнуляет этот "
+            "счёт, после чего поиск снова разрешён." % length)
+    if excerpt:
+        return body + "\n\nЧто про этот файл уже написано в map.md карточки:\n\n" + excerpt
+    return body + "\n\nmap.md карточки про этот файл ничего не говорит — тем более читай сам файл."
+
+if brief.get("role") == "executor":
+    # A whole-file Read — no offset, no limit — is the thing this rule wants to happen, so it
+    # wipes the count for that path rather than merely passing.
+    if tool_name == "Read" and tool_input.get("offset") is None and \
+            tool_input.get("limit") is None:
+        read_fp = file_path_of(tool_input)
+        if read_fp:
+            try:
+                stale = search_count_path(agent_id, os.path.realpath(read_fp))
+                if os.path.exists(stale):
+                    os.remove(stale)
+            except OSError:
+                pass
+    # Counted with the same two integer helpers rule 11 counts edits with, over their own
+    # directory. Every file this one call searches is counted before any of them is judged,
+    # so a command naming two files leaves neither count behind.
+    searched = []
+    for searched_fp in searched_files(tool_name, tool_input):
+        search_path = search_count_path(agent_id, searched_fp)
+        searched.append((read_file_edit_count(search_path) + 1, searched_fp))
+        write_file_edit_count(search_path, searched[-1][0])
+    for n, searched_fp in searched:
+        if n >= SEARCH_REPEAT_DENY_AT:
+            line_count, excerpt = map_material(searched_fp)
+            deny_and_exit(
+                "Blocked by work-gate's REPEATED SEARCH rule: поиск по %s в этом прогоне "
+                "уже %d-й, и он отказан. Работа не отнята, отнят способ. %s" %
+                (searched_fp, n, search_advice(line_count, excerpt)),
+                "work-gate.repeated-search"
+            )
+    for n, searched_fp in searched:
+        if n >= SEARCH_REPEAT_MAP_AT:
+            line_count, excerpt = map_material(searched_fp)
+            allow_and_exit(
+                "Ты ищешь в %s второй раз за прогон. Следующий поиск по этому файлу будет "
+                "отказан. %s" % (searched_fp, search_advice(line_count, excerpt))
+            )
+
 allow_and_exit()
 PYEOF

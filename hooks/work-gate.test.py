@@ -162,6 +162,62 @@ def ceiling_cases(base_env, base):
     return failures
 
 
+def search_cases(base_env, base):
+    """The REPEATED SEARCH rule (rule 14) counts searches of one named file: the second one
+    is allowed with the card's own map.md attached to it, the third and every later one is
+    refused, and a whole-file Read of that path wipes the count. A search of a directory is
+    never counted at all. Measured 2026-09-01 on HRN-63.C, six consecutive greps of one file.
+    """
+    work_root, state, card_dir = build_tree(os.path.join(base, "search"))
+    with open(os.path.join(card_dir, "map.md"), "w", encoding="utf-8") as f:
+        f.write("Карта источников.\n\nbin/work-who: closed_steps на строке 695, "
+                "first_open_step на 725.\n\nbin/work-note: отказы на 408 и 416.\n")
+    repo_bin = os.path.join(os.path.dirname(work_root), "bin")
+    os.makedirs(repo_bin, exist_ok=True)
+    target = os.path.join(repo_bin, "work-who")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write("\n".join("строка %d" % i for i in range(1, 41)) + "\n")
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+
+    failures = 0
+
+    def probe(title, tool, ti, wanted, must_carry=None, must_not_carry=None):
+        got, reason = decide(env, tool, ti)
+        reason = reason or ""
+        ok = got == wanted
+        if ok and must_carry:
+            ok = all(s in reason for s in must_carry)
+        if ok and must_not_carry:
+            ok = all(s not in reason for s in must_not_carry)
+        print(("  ok   " if ok else "  FAIL ") + title + "  → " + str(got))
+        if not ok:
+            print("        ожидалось " + wanted + "; текст: " + reason[:300])
+        return 0 if ok else 1
+
+    grep_call = ("Bash", {"command": 'grep -n "closed_steps" %s' % target})
+
+    failures += probe("первый поиск проходит молча", *grep_call, "allow",
+                      must_not_carry=["второй раз"])
+    failures += probe("второй поиск проходит и несёт map.md", *grep_call, "allow",
+                      must_carry=["второй раз", "closed_steps на строке 695", "40 строк"])
+    failures += probe("третий поиск отказан", *grep_call, "deny",
+                      must_carry=["Read этого файла не ограничен", "closed_steps на строке 695"])
+    failures += probe("Read целиком проходит", "Read", {"file_path": target}, "allow")
+    failures += probe("после Read счёт обнулён, поиск снова молчит", *grep_call, "allow",
+                      must_not_carry=["второй раз"])
+    failures += probe("инструмент Grep считается тем же счётом", "Grep",
+                      {"pattern": "closed_steps", "path": target}, "allow",
+                      must_carry=["второй раз"])
+    failures += probe("поиск по каталогу не считается", "Bash",
+                      {"command": 'grep -rn "closed_steps" %s' % repo_bin}, "allow",
+                      must_not_carry=["второй раз"])
+    failures += probe("вызов без поиска не считается", "Bash",
+                      {"command": "go test ./..."}, "allow", must_not_carry=["второй раз"])
+    return failures
+
+
 def main():
     base = tempfile.mkdtemp(prefix="gate-boundary-")
     work_root, state, card_dir = build_tree(base, phase_closed=True)
@@ -225,6 +281,9 @@ def main():
 
     print("\nПотолок вызовов без записи в журнал:")
     failures += ceiling_cases(env, base)
+
+    print("\nПовторный поиск по одному файлу:")
+    failures += search_cases(env, base)
 
     print("\n%d случаев не прошли" % failures)
     return 1 if failures else 0
