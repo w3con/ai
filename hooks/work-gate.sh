@@ -39,7 +39,7 @@
 #     with the same text either way — no sanction names the spawned card at all, or the one
 #     that does belongs to a card in one of those four states. The refusal names exactly one
 #     exit: bin/work-handover <ID> for a fresh phase, bin/work-resume <ID> for an interrupted
-#     one. A reading role's own spawn (critic, mapper, tracer, acceptor) is never judged by
+#     one. A reading role's own spawn (critic, tracer, acceptor) is never judged by
 #     this rule — only subagent_type "executor" is.
 #
 #  2b. ONE CONVERSATION RUNS ONE TASK (HRN-48.C, carried over from the retired
@@ -127,10 +127,10 @@
 #     that runs bin/work-agent-brief itself, since that is how the very first brief gets
 #     written at all.
 #
-#  4a. READING ROLE IS READ-ONLY: a subagent whose brief names one of the four reading roles
-#     — critic, mapper, tracer, acceptor — is refused every Bash call. The one call that
+#  4a. READING ROLE IS READ-ONLY: a subagent whose brief names one of the three reading roles
+#     — critic, tracer, acceptor — is refused every Bash call. The one call that
 #     would be legitimate, bin/work-agent-brief itself, never reaches this rule: rule 4 above
-#     allows and exits on it long before. When one of bin/work-critic, bin/work-map,
+#     allows and exits on it long before. When one of bin/work-critic,
 #     bin/work-trace or bin/work-accept raises its own reading agent, it hands
 #     `--allowedTools "Bash(bin/work-agent-brief *)" Read Grep Glob` and the reading really is
 #     read-only. When rules.md's own `agents-always-foreground` sends that same raise back to
@@ -929,7 +929,7 @@ if not agent_id:
     allow_and_exit(warn_reason)
 
 # --- 4. no brief, no launch (one exemption: writing the very first brief) -------------
-KNOWN_ROLES = {"critic", "mapper", "executor", "tracer", "acceptor"}
+KNOWN_ROLES = {"critic", "executor", "tracer", "acceptor"}
 
 def agent_brief_path(aid):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(aid))
@@ -997,17 +997,18 @@ if brief is None:
         "work-gate.no-brief-no-launch"
     )
 
-# --- 4a. READING ROLE IS READ-ONLY: the four reading roles get no Bash call at all -------
+# --- 4a. READING ROLE IS READ-ONLY: the three reading roles get no Bash call at all -------
 # The brief call itself never arrives here — rule 4's own is_brief_self_write branch allows
 # and exits on it above — so every Bash call that reaches this line is a second one, and a
 # reading agent has no second one. Enforced here rather than in the agent's own `tools:`
 # line, which cannot hold a scoped Bash specifier: see rule 4a's own paragraph in the header.
-READING_ROLES = ("critic", "mapper", "tracer", "acceptor")
+READING_ROLES = ("critic", "tracer", "acceptor")
 
 # The Grep and Glob tools do not exist in this client build: a subagent that calls either is
 # told "No such tool available", with the error itself naming grep and find via Bash as the
 # replacement. Refusing every Bash call therefore left a reading agent no way to search at
-# all — measured on HRN-22's own mapper, which probed Bash with `true` and `echo test`, then
+# all — measured on HRN-22's own reading agent for the role since removed by HRN-84, which
+# probed Bash with `true` and `echo test`, then
 # read one three-thousand-line file eleven times, then reported a file as present because
 # Read of a directory path ending in ".A" answered "binary .a file". So search is allowed
 # back, as a closed list of programs that only ever read, while everything that runs a check
