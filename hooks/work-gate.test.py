@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Synthetic check of work-gate.sh's PHASE BOUNDARY rule (rule 5), against a throwaway
-state directory and a throwaway work root — nothing real is touched.
+"""Synthetic check of work-gate.sh's own rules, against a throwaway state directory and a
+throwaway work root — nothing real is touched. HRN-82.A: the PHASE BOUNDARY rule (old rule 5)
+this file used to check first and foremost is gone from the hook, and every case built on top
+of a closed-phase fixture went with it; what remains checks the rules the hook still carries —
+the command reference, the log-write ceiling, repeated search, chained recording calls, the
+context/soft-context ceilings, sanction matching and scope.
 
 Each case: a payload as the hook receives it, and the decision expected of it.
 """
@@ -30,13 +34,12 @@ TEMPLATE_TEXT = """Справочник команд: этим ты работа
 PHASE = "TST-1.A"
 
 
-def build_tree(base, phase_closed=False):
-    """HRN-63.B: the boundary no longer reads log.md's own headings at all — it reads one
-    fact, whether `<phase>.closed` sits in the card's own folder. `phase_closed=True` lays
-    that marker directly (no gate is actually run in this synthetic tree), giving the
-    boundary the same "this phase is done" state the old fixture used to fake by writing a
-    closing heading; `phase_closed=False` (the default) leaves the phase open, exactly as no
-    marker on disk always means."""
+def build_tree(base):
+    """A throwaway card folder: plan.md declaring one phase with one step, log.md holding
+    that step's own closed heading, and the session's own agent brief. HRN-82.A: there is no
+    `<phase>.closed` marker to lay here any more — the hook read that marker only for the
+    PHASE BOUNDARY rule, removed along with the phase boundary itself, and no fixture in this
+    file builds one."""
     work_root = os.path.join(base, "ai")
     card_dir = os.path.join(work_root, "harness", "epic", CARD + "_probe")
     os.makedirs(card_dir)
@@ -45,9 +48,6 @@ def build_tree(base, phase_closed=False):
                 % (PHASE, PHASE))
     with open(os.path.join(card_dir, "log.md"), "w", encoding="utf-8") as f:
         f.write("## %s.1 — шаг закрыт\n\nвывод\n" % PHASE)
-    if phase_closed:
-        with open(os.path.join(card_dir, PHASE + ".closed"), "w", encoding="utf-8"):
-            pass
     state = os.path.join(base, "state")
     briefs = os.path.join(state, "briefs")
     os.makedirs(briefs)
@@ -66,7 +66,16 @@ def decide(hook_env, tool_name, tool_input):
     except Exception:
         return "unparsable", r.stdout + r.stderr
     spec = out.get("hookSpecificOutput", {})
-    return spec.get("permissionDecision", "?"), spec.get("permissionDecisionReason", "")
+    # HRN-82.A.3: an "allow" decision can carry text of its own now — the command reference,
+    # the repeated-search map, the soft context-ceiling warning — and none of it ever reaches
+    # permissionDecisionReason, which the Claude Code hooks reference shows only "when you
+    # deny or ask". allow_and_exit(reason) writes that text into
+    # hookSpecificOutput.additionalContext instead, so a caller reading only
+    # permissionDecisionReason saw every one of these allow-with-text calls as carrying no
+    # text at all. permissionDecisionReason is checked first, since a deny never sets
+    # additionalContext and this keeps a deny's own reason exactly as it always read.
+    reason = spec.get("permissionDecisionReason") or spec.get("additionalContext") or ""
+    return spec.get("permissionDecision", "?"), reason
 
 
 
@@ -221,11 +230,10 @@ def search_cases(base_env, base):
 def chain_cases(base_env, base):
     """The CHAINED RECORDING CALL rule (rule 15): a real bin/work-note or bin/work-commit
     invocation sitting inside a chain is refused aloud, because every rule that reads those
-    commands counts a chained one as no call at all — the phase's gate never runs, its
-    marker never appears, the ceiling never resets, and the command itself works. Measured
-    2026-09-01 on HRN-63.C: one `cd <копия> && bin/work-note … --handoff` left a finished
-    phase open under a passing gate. The phase here is open, so nothing but this rule could
-    refuse any of these calls.
+    commands counts a chained one as no call at all — the log-write ceiling never resets and
+    the command itself works. Measured 2026-09-01 on HRN-63.C: one `cd <копия> && bin/work-note
+    … --handoff` spent the run's whole ceiling this way. The phase here is open, so nothing
+    but this rule could refuse any of these calls.
     """
     work_root, state, card_dir = build_tree(os.path.join(base, "chain"))
     repo_root = os.path.dirname(work_root)
@@ -274,14 +282,30 @@ def chain_cases(base_env, base):
     return failures
 
 
+def _transcript_line(context):
+    return json.dumps({
+        "type": "assistant",
+        "message": {"usage": {"input_tokens": 246,
+                               "cache_creation_input_tokens": 10_000,
+                               "cache_read_input_tokens": context - 10_246,
+                               "output_tokens": 500},
+                     "content": [{"type": "text", "text": "…"}]},
+    }) + "\n"
+
+
 def context_ceiling_cases(base_env, base):
-    """The CONTEXT SIZE ceiling (rule 8) and the escape it leaves open. Until HRN-73/HRN-80
-    that escape was a Write/Edit of this card's own log.md and nothing else, and no road
-    reached it: bin/work-note goes through Bash and was refused, the editor refuses to write
-    a file the session has not read, the read itself was refused by this same ceiling, and
-    the address the rule compared against stopped holding the file when HRN-61 moved the
-    journal into the card's own working copy. Measured live on HRN-19.A, 2026-09-01: four
-    steps of five closed and not one of them recorded.
+    """The CONTEXT SIZE ceiling (rule 8), its soft threshold (HRN-82.A.3), and the escape the
+    hard ceiling leaves open. Until HRN-73/HRN-80 that escape was a Write/Edit of this card's
+    own log.md and nothing else, and no road reached it: bin/work-note goes through Bash and
+    was refused, the editor refuses to write a file the session has not read, the read itself
+    was refused by this same ceiling, and the address the rule compared against stopped
+    holding the file when HRN-61 moved the journal into the card's own working copy. Measured
+    live on HRN-19.A, 2026-09-01: four steps of five closed and not one of them recorded.
+
+    HRN-82.A.3 gave the hard ceiling a soft one below it, 250,000 against 300,000: between the
+    two every call still allows, but the JSON carries a warning in
+    hookSpecificOutput.additionalContext instead of ever refusing — the replacement for the
+    phase boundary's own way of letting a run stop itself of its own will.
 
     The phase here is open and the log-write ceiling untouched, so nothing but rule 8 can
     refuse any of these calls.
@@ -295,18 +319,18 @@ def context_ceiling_cases(base_env, base):
     with open(copy_log, "w", encoding="utf-8") as f:
         f.write("## %s.1 — шаг закрыт\n\nвывод\n" % PHASE)
 
-    # A transcript whose last turn holds more than the 300,000-token ceiling.
+    # A transcript whose last turn holds more than the 300,000-token hard ceiling.
     transcript = os.path.join(base, "context-transcript.jsonl")
     with open(transcript, "w", encoding="utf-8") as f:
         for context in (120_000, 385_246):
-            f.write(json.dumps({
-                "type": "assistant",
-                "message": {"usage": {"input_tokens": 246,
-                                       "cache_creation_input_tokens": 10_000,
-                                       "cache_read_input_tokens": context - 10_246,
-                                       "output_tokens": 500},
-                             "content": [{"type": "text", "text": "…"}]},
-            }) + "\n")
+            f.write(_transcript_line(context))
+
+    # A second transcript whose last turn sits between the 250,000 soft ceiling and the
+    # 300,000 hard one — every call here still allows.
+    soft_transcript = os.path.join(base, "context-soft-transcript.jsonl")
+    with open(soft_transcript, "w", encoding="utf-8") as f:
+        for context in (120_000, 275_000):
+            f.write(_transcript_line(context))
 
     env = dict(base_env)
     env["WORK_GATE_WORK_ROOT"] = work_root
@@ -317,9 +341,9 @@ def context_ceiling_cases(base_env, base):
     failures = 0
     denial = ""
 
-    def probe(title, tool, ti, wanted, must_carry=None):
+    def probe(title, tool, ti, wanted, must_carry=None, env_override=None):
         nonlocal denial
-        got, reason = decide(env, tool, ti)
+        got, reason = decide(env_override or env, tool, ti)
         reason = reason or ""
         if got == "deny":
             denial = reason
@@ -330,6 +354,13 @@ def context_ceiling_cases(base_env, base):
         if not ok:
             print("        ожидалось " + wanted + "; текст: " + reason[:400])
         return 0 if ok else 1
+
+    soft_env = dict(env)
+    soft_env["WORK_GATE_AGENT_TRANSCRIPT"] = soft_transcript
+    failures += probe("между мягким и жёстким потолком — allow с предупреждением",
+                      "Bash", {"command": "go test ./..."}, "allow",
+                      must_carry=["250000", "275000", "soft ceiling"],
+                      env_override=soft_env)
 
     failures += probe("обычный вызов упирается в потолок контекста", "Bash",
                       {"command": "go test ./..."}, "deny",
@@ -496,10 +527,7 @@ def scope_cases(base_env, base):
 
 def main():
     base = tempfile.mkdtemp(prefix="gate-boundary-")
-    work_root, state, card_dir = build_tree(base, phase_closed=True)
     env = dict(os.environ)
-    env["WORK_GATE_WORK_ROOT"] = work_root
-    env["WORK_GATE_STATE_DIR"] = state
     env.pop("CLAUDE_GATE_BYPASS", None)
     env.pop("CLAUDE_HARNESS_BYPASS", None)
     # Every case below exercises a RULE, not the scope question rule 1b answers, and the
@@ -508,54 +536,7 @@ def main():
     # scope_cases() below is what actually tests rule 1b.
     env["WORK_GATE_SCOPE"] = "on"
 
-    log_md = os.path.join(card_dir, "log.md")
-    cases = [
-        ("git -C <копия> add — раньше отказ, теперь пропуск",
-         "Bash", {"command": "git -C /tmp/copy add .githooks/pre-commit"}, "allow"),
-        ("git -C <копия> commit",
-         "Bash", {"command": "git -C /tmp/copy commit -m x"}, "allow"),
-        ("голый git add",
-         "Bash", {"command": "git add foo"}, "allow"),
-        ("bin/work-commit без пути",
-         "Bash", {"command": 'bin/work-commit TST-1.A.1 "итог"'}, "allow"),
-        ("bin/work-note --handoff",
-         "Bash", {"command": 'bin/work-note TST-1 --handoff TST-1.A "состояние"'}, "allow"),
-        ("Write в log.md карточки",
-         "Write", {"file_path": log_md, "content": "x"}, "allow"),
-        ("git status — по-прежнему отказ",
-         "Bash", {"command": "git status --short"}, "deny"),
-        ("git -C <копия> status — тоже отказ",
-         "Bash", {"command": "git -C /tmp/copy status --short"}, "deny"),
-        ("git -C <копия> push — отказ",
-         "Bash", {"command": "git -C /tmp/copy push"}, "deny"),
-        ("cd && bin/work-commit — цепочка, отказ",
-         "Bash", {"command": 'cd /tmp/copy && bin/work-commit TST-1.A.1 "итог"'}, "deny"),
-        ("git add && git commit — цепочка, отказ",
-         "Bash", {"command": "git add foo && git commit -m x"}, "deny"),
-        ("Read чужого файла — отказ",
-         "Read", {"file_path": os.path.join(card_dir, "plan.md")}, "deny"),
-    ]
-
     failures = 0
-    reason_seen = ""
-    for title, tool, ti, expected in cases:
-        got, reason = decide(env, tool, ti)
-        ok = (got == expected)
-        if expected == "deny" and got == "deny":
-            reason_seen = reason
-        print(("  ok   " if ok else "  FAIL ") + title + "  → " + str(got))
-        if not ok:
-            failures += 1
-            print("        ожидалось " + expected + "; текст: " + reason[:200])
-
-    print("\nТекст отказа, который увидит исполнитель:\n")
-    print(reason_seen)
-
-    required = ["bin/work-commit", "bin/work-note", "--handoff", "git -C"]
-    missing = [s for s in required if s not in reason_seen]
-    if missing:
-        print("\nFAIL: в тексте отказа нет: " + ", ".join(missing))
-        failures += 1
 
     print("\nСправочник команд:")
     failures += reference_cases(env, base)
