@@ -274,6 +274,108 @@ def chain_cases(base_env, base):
     return failures
 
 
+def context_ceiling_cases(base_env, base):
+    """The CONTEXT SIZE ceiling (rule 8) and the escape it leaves open. Until HRN-73/HRN-80
+    that escape was a Write/Edit of this card's own log.md and nothing else, and no road
+    reached it: bin/work-note goes through Bash and was refused, the editor refuses to write
+    a file the session has not read, the read itself was refused by this same ceiling, and
+    the address the rule compared against stopped holding the file when HRN-61 moved the
+    journal into the card's own working copy. Measured live on HRN-19.A, 2026-09-01: four
+    steps of five closed and not one of them recorded.
+
+    The phase here is open and the log-write ceiling untouched, so nothing but rule 8 can
+    refuse any of these calls.
+    """
+    work_root, state, card_dir = build_tree(os.path.join(base, "context"))
+    # The card's own working copy: the journal's real address since HRN-61.
+    copy_root = os.path.join(base, "context-copy")
+    copy_card_dir = os.path.join(copy_root, "ai", "harness", "epic", CARD + "_probe")
+    os.makedirs(copy_card_dir)
+    copy_log = os.path.join(copy_card_dir, "log.md")
+    with open(copy_log, "w", encoding="utf-8") as f:
+        f.write("## %s.1 — шаг закрыт\n\nвывод\n" % PHASE)
+
+    # A transcript whose last turn holds more than the 300,000-token ceiling.
+    transcript = os.path.join(base, "context-transcript.jsonl")
+    with open(transcript, "w", encoding="utf-8") as f:
+        for context in (120_000, 385_246):
+            f.write(json.dumps({
+                "type": "assistant",
+                "message": {"usage": {"input_tokens": 246,
+                                       "cache_creation_input_tokens": 10_000,
+                                       "cache_read_input_tokens": context - 10_246,
+                                       "output_tokens": 500},
+                             "content": [{"type": "text", "text": "…"}]},
+            }) + "\n")
+
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+    env["WORK_GATE_CARD_WORKTREE_ROOT"] = copy_root
+    env["WORK_GATE_AGENT_TRANSCRIPT"] = transcript
+
+    failures = 0
+    denial = ""
+
+    def probe(title, tool, ti, wanted, must_carry=None):
+        nonlocal denial
+        got, reason = decide(env, tool, ti)
+        reason = reason or ""
+        if got == "deny":
+            denial = reason
+        ok = got == wanted
+        if ok and must_carry:
+            ok = all(s in reason for s in must_carry)
+        print(("  ok   " if ok else "  FAIL ") + title + "  → " + str(got))
+        if not ok:
+            print("        ожидалось " + wanted + "; текст: " + reason[:400])
+        return 0 if ok else 1
+
+    failures += probe("обычный вызов упирается в потолок контекста", "Bash",
+                      {"command": "go test ./..."}, "deny",
+                      must_carry=["CONTEXT SIZE", "385246"])
+    failures += probe("bin/work-note своей карточки проходит", "Bash",
+                      {"command": 'bin/work-note TST-1 --handoff TST-1.A "состояние"'},
+                      "allow")
+    failures += probe("bin/work-note с текстом проверки на входе проходит", "Bash",
+                      {"command": 'bin/work-note TST-1 TST-1.A.1 "состояние" <<\'EOF\'\n'
+                                   'вывод проверки\nEOF'}, "allow")
+    failures += probe("bin/work-note чужой карточки отказан", "Bash",
+                      {"command": 'bin/work-note TST-9 --handoff TST-9.A "состояние"'},
+                      "deny")
+    failures += probe("bin/work-commit проходит", "Bash",
+                      {"command": 'bin/work-commit TST-1.A.1 "итог"'}, "allow")
+    failures += probe("цепочка с bin/work-note отказана", "Bash",
+                      {"command": 'cd /tmp/x && bin/work-note TST-1 TST-1.A.1 "с"'}, "deny")
+    failures += probe("Read журнала в рабочей копии проходит", "Read",
+                      {"file_path": copy_log}, "allow")
+    failures += probe("Write журнала в рабочей копии проходит", "Write",
+                      {"file_path": copy_log, "content": "x"}, "allow")
+    failures += probe("Write журнала в общем каталоге тоже проходит", "Write",
+                      {"file_path": os.path.join(card_dir, "log.md"), "content": "x"},
+                      "allow")
+    failures += probe("Read чужого файла отказан", "Read",
+                      {"file_path": os.path.join(card_dir, "plan.md")}, "deny")
+    failures += probe("Write чужого файла отказан", "Write",
+                      {"file_path": os.path.join(copy_card_dir, "map.md"), "content": "x"},
+                      "deny")
+
+    required = ["bin/work-note TST-1 --handoff TST-1.A", "bin/work-commit TST-1.A.<N>",
+                copy_log]
+    missing = [s for s in required if s not in denial]
+    ok = not missing
+    print(("  ok   " if ok else "  FAIL ") +
+          "отказ называет обе команды и настоящий адрес журнала")
+    if not ok:
+        print("        нет в тексте: " + ", ".join(missing))
+        print("        текст: " + denial)
+        failures += 1
+
+    print("\n  Текст отказа по потолку контекста:\n")
+    print(denial)
+    return failures
+
+
 def sanction_cases(base_env, base):
     """An executor spawn is judged against every sanction this conversation wrote, newest
     first, and a card that has already reached a terminal state never counts as the match.
@@ -403,6 +505,9 @@ def main():
 
     print("\nВызов записи, собранный цепочкой:")
     failures += chain_cases(env, base)
+
+    print("\nПотолок размера контекста и выход из-под него:")
+    failures += context_ceiling_cases(env, base)
 
     print("\nРазрешение на подъём исполнителя:")
     failures += sanction_cases(env, base)

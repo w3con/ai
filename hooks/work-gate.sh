@@ -251,9 +251,13 @@
 #     this run's own transcript, resolved from the call's own agent_id — see "WHICH
 #     TRANSCRIPT RULES 8-10 JUDGE" below — what that one generation was actually given to
 #     read, not a sum across the run) is compared
-#     against CONTEXT_SIZE_CEILING (300,000 tokens). Past it, every call is refused except a
-#     Write/Edit of this card's own log.md, with the words «запиши состояние в лог и
-#     остановись» the plan itself quotes. A transcript that cannot be read, or carries no
+#     against CONTEXT_SIZE_CEILING (300,000 tokens). Past it, every call is refused except
+#     the calls that record where the run stopped — is_state_recording_escape_call(), shared
+#     with rules 9 and 10 — with the words «запиши состояние в лог и остановись» the plan
+#     itself quotes. That escape is a Read/Write/Edit of this card's own log.md at either of
+#     its two addresses, a bin/work-note naming this card, or a bin/work-commit; until
+#     HRN-73/HRN-80 it was a Write/Edit of one address alone, which no road could reach —
+#     see the function's own comment. A transcript that cannot be read, or carries no
 #     assistant record with a usage field at all, is not a state this rule can judge, so the
 #     call is skipped rather than denied — the same fail-open choice rule 5 already makes for
 #     an unreadable plan.md.
@@ -370,6 +374,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -1301,6 +1306,51 @@ if work_root and card_dir is None:
         "work-gate.brief-names-no-card"
     )
 
+# --- shared by rule 5 and by rules 8-10: WHERE THIS CARD'S OWN log.md ACTUALLY LIVES ----
+# Both addresses count, and until HRN-73/HRN-80 only the first one did. The card's folder
+# lives in the shared checkout and holds every other file the card carries, so
+# <card_dir>/log.md is a real address and stays one. But since HRN-61 the journal itself is
+# written and committed in the card's own linked working copy, on that copy's own branch,
+# and reaches the shared checkout only inside the acceptance's own fold — so the file an
+# executor is actually told to write sits at the SAME relative path under its working copy's
+# root, and comparing a write against the shared checkout's address alone refused the very
+# call every ceiling below leaves open as its one way out.
+_log_paths_cache = []
+
+def this_cards_log_paths():
+    """Every address this run's own card's log.md legitimately has, as real paths: the file
+    inside the card's own folder in the shared checkout, and the same relative path inside
+    the card's own linked working copy when one exists. Empty when card_dir could not be
+    resolved at all — the caller then matches nothing, which is the same fail-open posture
+    every rule scoped to a card already takes for an unresolvable card_dir. The working copy
+    is found by find_card_worktree_root(), the one lookup every other rule in this file
+    already uses for it, and the whole answer is computed once per call of this hook: it
+    runs `git worktree list` as a subprocess, and every caller below sits on a path that is
+    reached only when a ceiling has already fired or a phase is already closed."""
+    if _log_paths_cache:
+        return _log_paths_cache[0]
+    paths = []
+    if card_dir is not None:
+        shared = os.path.realpath(os.path.join(card_dir, "log.md"))
+        paths.append(shared)
+        shared_root = os.path.dirname(work_root) if work_root else None
+        own_root = find_card_worktree_root(brief["card"])
+        if shared_root and own_root:
+            try:
+                rel = os.path.relpath(shared, os.path.realpath(shared_root))
+            except ValueError:
+                rel = None
+            if rel and not rel.startswith(os.pardir):
+                paths.append(os.path.realpath(os.path.join(own_root, rel)))
+    _log_paths_cache.append(paths)
+    return paths
+
+def names_this_cards_log(fp):
+    """True when the path this call names is this card's own log.md, at either address."""
+    if fp is None:
+        return False
+    return os.path.realpath(fp) in this_cards_log_paths()
+
 # Rule 15 CHAINED RECORDING CALL. A Bash call carrying a real invocation of bin/work-note,
 # bin/work-commit or bin/work-log inside a chain — `cd <копия> && bin/work-note …`, and every
 # other shape with a `&&`, `;`, `|` or a bare newline in front of the script name — is
@@ -1368,8 +1418,9 @@ if brief.get("role") == "executor" and card_dir is not None:
         # own file tracking by every bin/work-note call — so with Read still refused at the
         # boundary, Edit could never satisfy its own precondition and the boundary's one
         # designated escape (a Write/Edit of this file) became unreachable via Edit.
-        return (tool_name in ("Read", "Write", "Edit") and fp is not None and
-                os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md")))
+        # HRN-73: both of the journal's own addresses count, not the shared checkout's
+        # alone — see this_cards_log_paths() above.
+        return tool_name in ("Read", "Write", "Edit") and names_this_cards_log(fp)
 
     phase_id = brief.get("phase")
     if not phase_id:
@@ -1781,10 +1832,83 @@ if brief.get("role") == "executor" and card_dir is not None:
 # narrower scopes, repeated here as its own top-level helper rather than factored out of
 # that already-built code, since this phase's own brief is to add HRN-2.C's five steps and
 # nothing beyond them. -------------------------------------------------------------------
-def is_this_cards_log_write_call():
-    fp = file_path_of(tool_input)
-    return (tool_name in ("Write", "Edit") and fp is not None and card_dir is not None and
-            os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md")))
+def recording_call_names_this_card():
+    """True when a bin/work-note invocation names this run's own card. That command takes
+    the card's identifier as its first argument and resolves the journal from it, so a call
+    naming another card writes another card's journal — the one thing this escape must not
+    let through. Every token of the command outside its heredoc body is scanned, rather than
+    the first positional alone, because `--root <путь>` and any later option may legitimately
+    stand in front of the identifier and a caller refused for the order of its own arguments
+    is a caller that cannot record its state at all."""
+    command = command_of(tool_input)
+    head = command.rstrip("\n").split("\n")[0]
+    heredoc_m = re.search(r'<<-?\s*([\'"]?)(\w+)\1\s*$', head)
+    if heredoc_m:
+        head = head[:heredoc_m.start()]
+    try:
+        tokens = shlex.split(head)
+    except ValueError:
+        tokens = head.split()
+    want = str(brief.get("card") or "").upper()
+    return bool(want) and any(t.upper() == want for t in tokens[1:])
+
+def is_state_recording_escape_call():
+    """The one way out from under every ceiling below: the calls by which a run that has
+    been stopped records what it built and where it stopped, and nothing else.
+
+    Four shapes pass, and each of them had to be added for a reason found live (HRN-80).
+    A Read, Write or Edit of this card's own log.md, at either of its two real addresses
+    (this_cards_log_paths(), HRN-73) — Read among them because the editor refuses to write a
+    file this session has not read, exactly as the phase boundary already found closing
+    HRN-34.B, so without it the Write/Edit escape cannot be reached at all. A single
+    invocation of bin/work-note naming this run's own card — the command this system
+    actually requires the journal be written with, which goes through Bash and was therefore
+    refused by every ceiling while the file it writes was the only thing they let through.
+    And a single invocation of bin/work-commit, on the same ground the phase boundary already
+    exempts it (HRN-6.C): `bin/work-note --handoff` refuses outright while the card's own
+    working copy carries uncommitted changes, so a ceiling that passes the handoff but
+    refuses the commit passes nothing — it leaves the run's own code stranded and its handoff
+    unwritable. bin/work-commit is not checked against the card's name because it takes none:
+    it refuses outright unless it is called from inside the card's own working copy, which is
+    a stronger scoping than reading a name off the command line.
+
+    Before this, the sentence every ceiling printed named a Write/Edit of log.md as the only
+    call still getting through, and that call could not be made by any road at all: the
+    command was refused for being Bash, the direct write was refused by the editor for want
+    of a read, the read was refused by the ceiling, and the address the rule compared against
+    had not held the file since HRN-61. The run that found this closed four steps of five and
+    recorded none of them (HRN-19.A, 2026-09-01); its state was rebuilt by hand out of the
+    agent's own report."""
+    if tool_name in ("Read", "Write", "Edit"):
+        return names_this_cards_log(file_path_of(tool_input))
+    kind = matched_log_call_kind()
+    if kind == "commit":
+        return True
+    if kind == "note":
+        return recording_call_names_this_card()
+    return False
+
+def ceiling_escape_sentence():
+    """The closing paragraph every ceiling below shares: the exact calls that still get
+    through, written as commands the agent can run rather than as a category it has to
+    recognise. The order is the order they have to be made in — a handoff refuses a dirty
+    working copy, so the commit comes first whenever there is uncommitted code."""
+    card = brief.get("card") or "<ID>"
+    phase = brief.get("phase") or "<фаза>"
+    paths = this_cards_log_paths()
+    log_at = paths[-1] if paths else "log.md в папке карточки"
+    return (
+        "These calls, and nothing else, still get through. Each is a single command: no "
+        "`cd` in front, no `&&`, no `;`, no `|`.\n"
+        "  1. Commit what is already built, if anything in the working copy is still "
+        "uncommitted — the handoff below refuses a dirty copy, so this comes first:\n"
+        "         bin/work-commit %s.<N> \"<что сделал шаг>\"\n"
+        "  2. Write the handoff, which is what a fresh executor picks the work up from:\n"
+        "         bin/work-note %s --handoff %s \"<состояние, находки, что дальше>\"\n"
+        "  3. A Read, Write or Edit of this card's own log.md, and of no other file:\n"
+        "         %s\n"
+        "Then stop." % (phase, card, phase, log_at)
+    )
 
 # --- shared by rules 8-10: one walk of this run's own transcript ----------------------
 def transcript_line_records(path):
@@ -1878,7 +2002,15 @@ AGENT_TRANSCRIPT_GLOBS = [
 ]
 
 def agent_transcript_path(aid):
-    """The newest transcript file on disk for one agent id, or None when there is none."""
+    """The newest transcript file on disk for one agent id, or None when there is none.
+    WORK_GATE_AGENT_TRANSCRIPT overrides this outright, the same test-only escape every
+    other lookup in this file that reaches outside itself already carries
+    (WORK_GATE_WORK_ROOT, WORK_GATE_CARD_WORKTREE_ROOT, WORK_GATE_STATE_DIR): the three
+    ceilings below read a real agent's own transcript out of two fixed directories, and
+    without a way to name a synthetic one no fixture can make any of them fire at all."""
+    override = os.environ.get("WORK_GATE_AGENT_TRANSCRIPT")
+    if override:
+        return override
     if not aid or not re.fullmatch(r'[A-Za-z0-9_-]+', str(aid)):
         return None
     for pattern in AGENT_TRANSCRIPT_GLOBS:
@@ -1902,14 +2034,13 @@ CONTEXT_SIZE_CEILING = 300_000
 
 if run_stats is not None and run_stats["last_context"] is not None and \
         run_stats["last_context"] > CONTEXT_SIZE_CEILING:
-    if is_this_cards_log_write_call():
+    if is_state_recording_escape_call():
         allow_and_exit()
     deny_and_exit(
         "Blocked by work-gate's CONTEXT SIZE rule: this agent's own most recent turn held "
         "%d tokens of context, past the %d ceiling. «Запиши состояние в лог и остановись.» "
-        "A fresh executor picks the card up from there with an empty context. The only "
-        "call that still gets through is a Write/Edit of this card's own log.md." %
-        (run_stats["last_context"], CONTEXT_SIZE_CEILING),
+        "A fresh executor picks the card up from there with an empty context.\n%s" %
+        (run_stats["last_context"], CONTEXT_SIZE_CEILING, ceiling_escape_sentence()),
         "work-gate.context-size"
     )
 
@@ -1919,15 +2050,15 @@ SPEND_CEILING = 90_000_000
 
 if brief.get("role") == "executor" and run_stats is not None and \
         run_stats["spend"] > SPEND_CEILING:
-    if is_this_cards_log_write_call():
+    if is_state_recording_escape_call():
         allow_and_exit()
     deny_and_exit(
         "Blocked by work-gate's SPEND CEILING rule: this executor's own run has spent %d "
         "tokens (cache-read plus output, summed from its own transcript), past the %d "
         "ceiling counted for this run alone, never accumulated across the whole card — a "
         "fresh executor's own transcript starts this same count at zero. «Запиши "
-        "состояние в лог и остановись.» The only call that still gets through is a "
-        "Write/Edit of this card's own log.md." % (run_stats["spend"], SPEND_CEILING),
+        "состояние в лог и остановись.»\n%s" %
+        (run_stats["spend"], SPEND_CEILING, ceiling_escape_sentence()),
         "work-gate.spend-ceiling"
     )
 
@@ -1949,28 +2080,27 @@ def read_pace_threshold():
 if brief.get("role") == "executor":
     pace_threshold = read_pace_threshold()
     if pace_threshold is None:
-        if is_this_cards_log_write_call():
+        if is_state_recording_escape_call():
             allow_and_exit()
         deny_and_exit(
             "Blocked by work-gate's PACE rule: no number was found at %s — the pace "
             "threshold this rule judges every call against must live there as a bare "
             "integer, and its absence refuses every call for this executor rather than "
-            "silently skipping the check. The only call that still gets through is a "
-            "Write/Edit of this card's own log.md." % pace_threshold_file(),
+            "silently skipping the check.\n%s" %
+            (pace_threshold_file(), ceiling_escape_sentence()),
             "work-gate.pace-threshold-missing"
         )
     elif run_stats is not None and run_stats["calls"] > PACE_CALL_ALLOWANCE:
         pace = run_stats["spend"] / run_stats["calls"]
         if pace > pace_threshold:
-            if is_this_cards_log_write_call():
+            if is_state_recording_escape_call():
                 allow_and_exit()
             deny_and_exit(
                 "Blocked by work-gate's PACE rule: this run has spent %.0f tokens per "
                 "tool call (%d tokens over %d calls), past the %d threshold read from %s. "
-                "«Запиши состояние в лог и остановись.» The only call that still gets "
-                "through is a Write/Edit of this card's own log.md." %
+                "«Запиши состояние в лог и остановись.»\n%s" %
                 (pace, run_stats["spend"], run_stats["calls"], pace_threshold,
-                 pace_threshold_file()),
+                 pace_threshold_file(), ceiling_escape_sentence()),
                 "work-gate.pace-ceiling"
             )
 
