@@ -791,13 +791,21 @@ if not agent_id and tool_name in ("Task", "Agent") and \
     # HRN-52.A.1: this conversation may have handed over more than one card — walk every
     # sanction it ever wrote and take the first whose own card name shows up in this spawn's
     # own prompt/description, exactly the same substring test the single-sanction form used.
+    # Newest sanction first, and a card that has already reached a terminal state is skipped
+    # rather than being taken as the match: read in file-name order, an older, finished card
+    # masked the live one whenever the executor's own brief merely mentioned it, and the
+    # spawn was refused for having no sanction at all. Measured 2026-09-01 — a HRN-68 spawn
+    # refused because its brief named HRN-63, accepted minutes earlier, whose own sanction
+    # file sorts first. A sanction whose card cannot be read at all still counts as live,
+    # exactly as sanction_card_is_terminal's own None already means to every caller.
     matched_sanction = None
-    for candidate in read_sanctions(session_id):
+    for candidate in sorted(read_sanctions(session_id),
+                            key=lambda c: c.get("time") or 0, reverse=True):
         card = candidate.get("card")
-        if card and card in prompt_text:
+        if card and card in prompt_text and not sanction_card_is_terminal(card):
             matched_sanction = candidate
             break
-    if matched_sanction is None or sanction_card_is_terminal(matched_sanction.get("card")):
+    if matched_sanction is None:
         deny_and_exit(DENY_NO_SANCTION, "work-gate.no-sanction-executor-spawn")
     matched_card = matched_sanction.get("card")
     matched_estimate = matched_sanction.get("estimate")

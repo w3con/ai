@@ -218,6 +218,66 @@ def search_cases(base_env, base):
     return failures
 
 
+def sanction_cases(base_env, base):
+    """An executor spawn is judged against every sanction this conversation wrote, newest
+    first, and a card that has already reached a terminal state never counts as the match.
+    Measured 2026-09-01: a spawn for a live card was refused outright because its brief
+    mentioned an already-accepted card whose sanction file happens to sort first by name.
+    """
+    root = os.path.join(base, "sanctions")
+    work_root = os.path.join(root, "ai")
+    epic = os.path.join(work_root, "harness", "epic")
+    os.makedirs(epic)
+    for card_id, done in (("TST-1", True), ("TST-2", False)):
+        card_dir = os.path.join(epic, card_id + "_probe")
+        os.makedirs(card_dir)
+        if done:
+            with open(os.path.join(card_dir, "done.md"), "w", encoding="utf-8") as f:
+                f.write("принято\n")
+    session = "s-sanction"
+    state = os.path.join(root, "state")
+    sdir = os.path.join(state, "sanctions", session)
+    os.makedirs(sdir)
+    for card_id, when in (("TST-1", 100.0), ("TST-2", 200.0)):
+        with open(os.path.join(sdir, card_id + ".json"), "w", encoding="utf-8") as f:
+            json.dump({"card": card_id, "phase": card_id + ".A", "time": when,
+                       "estimate": 1, "short": True}, f)
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+
+    def spawn(prompt):
+        payload = {"tool_name": "Agent",
+                   "tool_input": {"subagent_type": "executor", "prompt": prompt,
+                                   "description": ""},
+                   "session_id": session}
+        r = subprocess.run(["bash", HOOK], input=json.dumps(payload),
+                           capture_output=True, text=True, env=env)
+        try:
+            spec = json.loads(r.stdout).get("hookSpecificOutput", {})
+        except Exception:
+            return "unparsable", r.stdout + r.stderr
+        return spec.get("permissionDecision", "?"), spec.get("permissionDecisionReason", "")
+
+    failures = 0
+    cases = [
+        ("задание живой карточки, упоминающее законченную, проходит",
+         "Работай карточку TST-2. Её текст правит то, что закрыла TST-1.", "allow"),
+        ("задание, называющее только законченную карточку, отказано",
+         "Работай карточку TST-1.", "deny"),
+        ("задание, не называющее ни одной карточки, отказано",
+         "Просто поработай.", "deny"),
+    ]
+    for title, prompt, wanted in cases:
+        got, reason = spawn(prompt)
+        ok = got == wanted
+        print(("  ok   " if ok else "  FAIL ") + title + "  → " + str(got))
+        if not ok:
+            print("        ожидалось " + wanted + "; текст: " + (reason or "")[:200])
+            failures += 1
+    return failures
+
+
 def main():
     base = tempfile.mkdtemp(prefix="gate-boundary-")
     work_root, state, card_dir = build_tree(base, phase_closed=True)
@@ -284,6 +344,9 @@ def main():
 
     print("\nПовторный поиск по одному файлу:")
     failures += search_cases(env, base)
+
+    print("\nРазрешение на подъём исполнителя:")
+    failures += sanction_cases(env, base)
 
     print("\n%d случаев не прошли" % failures)
     return 1 if failures else 0
