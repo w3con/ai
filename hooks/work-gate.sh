@@ -223,12 +223,19 @@
 #  7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B, narrowed 2026-09-01): applies only
 #     to role "executor", once card_dir is known. Twenty calls in a row without a Write/Edit
 #     of this card's own log.md refuse the next call — "Двадцать вызовов без записи в
-#     log.md". Two kinds of call still get through, and only one of them resets the count.
+#     log.md". That file is recognised at either of its two addresses, the shared checkout's
+#     and the card's own working copy's, through names_this_cards_log() (2026-09-01): before
+#     that only the shared checkout's counted, and since HRN-61 moved an executor's journal
+#     into the working copy, this rule's own advertised escape matched nothing.
+#     Three kinds of call still get through, and only one of them resets the count.
 #     A Write/Edit of log.md itself, or a single, unchained Bash call running bin/work-note
 #     WITH A STEP NAME, resets the count to zero: that call records a closed step, so the
 #     run has actually moved. A bin/work-note --handoff call passes the ceiling too — a run
 #     that has hit it must always be able to record its own state — but resets nothing,
-#     because a handoff records that the run is stopping, not that work was done.
+#     because a handoff records that the run is stopping, not that work was done. A Read of
+#     that same log.md passes too and resets nothing (2026-09-01): Write and Edit both refuse
+#     client-side on a file the session has not read, so with Read refused here the escape
+#     above could never satisfy its own precondition.
 #     A Bash call running bin/work-commit passes on the same terms, and for the same reason
 #     (HRN-76, 2026-09-01): bin/work-note --handoff refuses outright on a working copy
 #     carrying uncommitted changes, naming bin/work-commit as the one command to run first,
@@ -510,6 +517,50 @@ def deny_and_exit(reason, rule):
 
 # --- 1. bypass -----------------------------------------------------------------------
 if os.environ.get("CLAUDE_GATE_BYPASS") == "1":
+    allow_and_exit()
+
+# --- 1b. scope: only the repository that carries the work-management system ------------
+# This gate enforces the card system of the validite-app repository, as this file's own
+# header says: bin/work-handover, bin/work-resume, and the card folders under
+# ai/harness/<epic>/ and ai/timeline/<epic>/. Every other repository — the knowledge base,
+# the marketing site, this configuration itself — plans its work differently and must not be
+# judged by these rules. Before this rule existed the gate fired everywhere, so a read-only
+# research agent raised in the knowledge base was refused every tool it had, Read included,
+# and told to run a script that does not exist outside the application's own checkout.
+#
+# The test is structural rather than a path or a remote address, so it holds on any machine
+# and in any checkout, including a linked worktree: the repository's own ai/ directory holds
+# both card kinds as real directories of its own. A symlinked ai/harness — which is how the
+# knowledge base mounts its shared tooling submodule — is deliberately not a match.
+#
+# Failure to resolve a repository at all (no git, or cwd outside a working tree) leaves the
+# gate off. That is the opposite of this file's fail-closed stance on an unreadable payload,
+# and deliberately so: failing closed on a scope question would refuse every tool in every
+# project that this gate was never meant to govern, which is the very failure being fixed
+# here. WORK_GATE_SCOPE=on|off forces the answer, for the test suite and for debugging.
+def work_management_repo():
+    override = os.environ.get("WORK_GATE_SCOPE")
+    if override in ("on", "off"):
+        return override == "on"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    root = result.stdout.strip()
+    if not root:
+        return False
+    for kind in ("harness", "timeline"):
+        d = os.path.join(root, "ai", kind)
+        if not os.path.isdir(d) or os.path.islink(d):
+            return False
+    return True
+
+if not work_management_repo():
     allow_and_exit()
 
 # --- parse stdin (fail closed) --------------------------------------------------------
@@ -1789,9 +1840,28 @@ def write_log_call_count(path, n):
 
 if brief.get("role") == "executor" and card_dir is not None:
     fp = file_path_of(tool_input)
+    # 2026-09-01: this rule used to compare fp against the shared checkout's own address
+    # alone, os.path.join(card_dir, "log.md"). Since HRN-61 an executor's log.md lives in the
+    # card's own linked working copy and nowhere else while that copy exists, so that
+    # comparison never matched for a real executor and the escape this ceiling's own refusal
+    # advertises — "A Write/Edit of log.md ... resets this count" — was unreachable: the only
+    # working reset left was a real bin/work-note call. Measured live on HRN-82, whose phase A
+    # cannot make that call before its own first edit lands, and which therefore deadlocked
+    # twice. Both addresses count now, through names_this_cards_log() — the same lookup rules
+    # 5 and 8-11 have gone through since HRN-73 — guarded by a basename test so the worktree
+    # subprocess behind it runs only on a call that actually names a file called log.md.
+    def names_this_cards_log_cheaply(p):
+        return (p is not None and os.path.basename(p) == "log.md"
+                and names_this_cards_log(p))
     is_this_cards_log_write_now = (
-        tool_name in ("Write", "Edit") and fp is not None and
-        os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md"))
+        tool_name in ("Write", "Edit") and names_this_cards_log_cheaply(fp)
+    )
+    # A Read of that same file passes without resetting anything. Write and Edit both refuse
+    # client-side on a file this session has not read ("File has not been read yet"), so with
+    # Read refused here the ceiling's own designated escape could not satisfy its own
+    # precondition — the second half of the same deadlock.
+    is_this_cards_log_read_now = (
+        tool_name == "Read" and names_this_cards_log_cheaply(fp)
     )
     log_command = command_of(tool_input)
     is_work_log_call = tool_name == "Bash" and (
@@ -1809,7 +1879,7 @@ if brief.get("role") == "executor" and card_dir is not None:
     count_path = log_call_count_path(agent_id)
     if is_this_cards_log_write_now or (is_work_log_call and not is_handoff_call):
         write_log_call_count(count_path, 0)
-    elif is_handoff_call or is_work_commit_call:
+    elif is_handoff_call or is_work_commit_call or is_this_cards_log_read_now:
         pass
     else:
         n = read_log_call_count(count_path) + 1
