@@ -436,6 +436,64 @@ def sanction_cases(base_env, base):
     return failures
 
 
+def scope_cases(base_env, base):
+    """Rule 1b: the gate governs only the repository that carries the work-management
+    system — an ai/ directory holding both card kinds as real directories of its own."""
+    print("\nОбласть действия (правило 1b):")
+    failures = 0
+    payload = json.dumps({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x"},
+                          "agent_id": "probe", "session_id": "s-scope"})
+
+    def decide_in(repo, env_extra=None):
+        env = dict(base_env)
+        env.pop("WORK_GATE_SCOPE", None)
+        env.update(env_extra or {})
+        r = subprocess.run(["bash", HOOK], input=payload, capture_output=True,
+                           text=True, env=env, cwd=repo)
+        try:
+            out = json.loads(r.stdout)["hookSpecificOutput"]
+        except Exception:
+            return "allow"
+        return out.get("permissionDecision", "allow")
+
+    def make_repo(name, kinds, symlink=False):
+        repo = os.path.join(base, name)
+        os.makedirs(os.path.join(repo, "ai"), exist_ok=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True)
+        for kind in kinds:
+            d = os.path.join(repo, "ai", kind)
+            if symlink:
+                os.makedirs(os.path.join(repo, "ai", "_real_" + kind), exist_ok=True)
+                if not os.path.islink(d):
+                    os.symlink("_real_" + kind, d)
+            else:
+                os.makedirs(d, exist_ok=True)
+        return repo
+
+    checks = [
+        ("репозиторий с обеими папками карточек судится",
+         make_repo("scope-app", ("harness", "timeline")), None, "deny"),
+        ("репозиторий без папок карточек не судится",
+         make_repo("scope-plain", ()), None, "allow"),
+        ("репозиторий только с harness не судится",
+         make_repo("scope-half", ("harness",)), None, "allow"),
+        ("симлинк вместо настоящей папки не считается",
+         make_repo("scope-link", ("harness", "timeline"), symlink=True), None, "allow"),
+        ("WORK_GATE_SCOPE=off выключает даже в нужном репозитории",
+         make_repo("scope-app2", ("harness", "timeline")), {"WORK_GATE_SCOPE": "off"}, "allow"),
+        ("WORK_GATE_SCOPE=on включает в постороннем репозитории",
+         make_repo("scope-plain2", ()), {"WORK_GATE_SCOPE": "on"}, "deny"),
+    ]
+    for title, repo, extra, expected in checks:
+        got = decide_in(repo, extra)
+        ok = got == expected
+        failures += 0 if ok else 1
+        print(("  ok   " if ok else "  FAIL ") + title + "  → " + got)
+        if not ok:
+            print("        ожидалось " + expected)
+    return failures
+
+
 def main():
     base = tempfile.mkdtemp(prefix="gate-boundary-")
     work_root, state, card_dir = build_tree(base, phase_closed=True)
@@ -444,6 +502,11 @@ def main():
     env["WORK_GATE_STATE_DIR"] = state
     env.pop("CLAUDE_GATE_BYPASS", None)
     env.pop("CLAUDE_HARNESS_BYPASS", None)
+    # Every case below exercises a RULE, not the scope question rule 1b answers, and the
+    # fixture trees these cases build are not the application's own checkout, so the scope
+    # rule would switch the gate off before any rule under test ever ran. Forced on here;
+    # scope_cases() below is what actually tests rule 1b.
+    env["WORK_GATE_SCOPE"] = "on"
 
     log_md = os.path.join(card_dir, "log.md")
     cases = [
@@ -511,6 +574,7 @@ def main():
 
     print("\nРазрешение на подъём исполнителя:")
     failures += sanction_cases(env, base)
+    failures += scope_cases(env, base)
 
     print("\n%d случаев не прошли" % failures)
     return 1 if failures else 0
