@@ -974,9 +974,16 @@ if brief.get("role") in READING_ROLES and tool_name == "Bash":
     deny_and_exit(
         "Blocked by work-gate's READING ROLE IS READ-ONLY rule: role \"%s\" reads and never "
         "runs anything. The one Bash call this role is allowed, bin/work-agent-brief, has "
-        "already happened — every later one is refused, this one included: %s. Read the "
-        "sources with Read, Glob and Grep and answer the question you were raised for; you "
-        "never run a check yourself, and you never see a check's output. Whatever raised "
+        "already happened, so the Bash tool is finished for the rest of your life — every "
+        "later call is refused, this one included: %s. Refused with it: rewriting this same "
+        "command in another shape, and a probe such as `echo` or `true` to find out whether "
+        "Bash still works. It does not, and it will not.\n"
+        "Use the reading tools instead, substituting them for the shell: `grep` is the Grep "
+        "tool, `ls` and `find` are the Glob tool, `cat`, `head` and `wc -l` are the Read "
+        "tool. Grep a file for the name you need and then Read only the line range the match "
+        "points at — never read a large file end to end to search it, and never read one "
+        "file more than twice.\n"
+        "You never run a check yourself and you never see a check's output. Whatever raised "
         "you runs every check with its own hand, after reading your answer." %
         (brief.get("role"), command_of(tool_input)),
         "work-gate.reading-role-read-only"
