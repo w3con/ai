@@ -218,6 +218,62 @@ def search_cases(base_env, base):
     return failures
 
 
+def chain_cases(base_env, base):
+    """The CHAINED RECORDING CALL rule (rule 15): a real bin/work-note or bin/work-commit
+    invocation sitting inside a chain is refused aloud, because every rule that reads those
+    commands counts a chained one as no call at all — the phase's gate never runs, its
+    marker never appears, the ceiling never resets, and the command itself works. Measured
+    2026-09-01 on HRN-63.C: one `cd <копия> && bin/work-note … --handoff` left a finished
+    phase open under a passing gate. The phase here is open, so nothing but this rule could
+    refuse any of these calls.
+    """
+    work_root, state, card_dir = build_tree(os.path.join(base, "chain"))
+    repo_root = os.path.dirname(work_root)
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+
+    failures = 0
+
+    def probe(title, command, wanted, must_carry=None):
+        got, reason = decide(env, "Bash", {"command": command})
+        reason = reason or ""
+        ok = got == wanted
+        if ok and must_carry:
+            ok = all(s in reason for s in must_carry)
+        print(("  ok   " if ok else "  FAIL ") + title + "  → " + str(got))
+        if not ok:
+            print("        ожидалось " + wanted + "; текст: " + reason[:300])
+        return 0 if ok else 1
+
+    abs_note = os.path.join(repo_root, "bin", "work-note")
+    failures += probe(
+        "cd && bin/work-note — отказ, называющий абсолютный путь",
+        'cd /tmp/copy && bin/work-note TST-1 TST-1.A.1 "состояние"', "deny",
+        must_carry=["CHAINED RECORDING CALL", abs_note])
+    failures += probe(
+        "тот же вызов абсолютным путём проходит",
+        '%s TST-1 TST-1.A.1 "состояние"' % abs_note, "allow")
+    failures += probe(
+        "цепочка с heredoc — отказ",
+        'cd /tmp/copy && bin/work-note TST-1 TST-1.A.1 "состояние" <<\'EOF\'\nвывод\nEOF',
+        "deny", must_carry=["CHAINED RECORDING CALL"])
+    failures += probe(
+        "heredoc без цепочки проходит",
+        'bin/work-note TST-1 TST-1.A.1 "состояние" <<\'EOF\'\nвывод\nEOF', "allow")
+    failures += probe(
+        "cd && bin/work-commit — отказ",
+        'cd /tmp/copy && bin/work-commit TST-1.A.1 "итог"', "deny",
+        must_carry=["CHAINED RECORDING CALL"])
+    failures += probe(
+        "`&&` внутри кавычек цепочкой не считается",
+        'bin/work-note TST-1 TST-1.A.1 "сделал одно && второе"', "allow")
+    failures += probe(
+        "упоминание имени команды не в начале звена не считается вызовом",
+        "ls && echo bin/work-note", "allow")
+    return failures
+
+
 def sanction_cases(base_env, base):
     """An executor spawn is judged against every sanction this conversation wrote, newest
     first, and a card that has already reached a terminal state never counts as the match.
@@ -344,6 +400,9 @@ def main():
 
     print("\nПовторный поиск по одному файлу:")
     failures += search_cases(env, base)
+
+    print("\nВызов записи, собранный цепочкой:")
+    failures += chain_cases(env, base)
 
     print("\nРазрешение на подъём исполнителя:")
     failures += sanction_cases(env, base)

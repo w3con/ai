@@ -1247,6 +1247,63 @@ if work_root and card_dir is None:
         "work-gate.brief-names-no-card"
     )
 
+# Rule 15 CHAINED RECORDING CALL. A Bash call carrying a real invocation of bin/work-note,
+# bin/work-commit or bin/work-log inside a chain — `cd <копия> && bin/work-note …`, and every
+# other shape with a `&&`, `;`, `|` or a bare newline in front of the script name — is
+# refused here instead of being let through. matched_log_call_kind() above, the one parser
+# every rule of this gate that reads those three commands goes through, judges a chain as no
+# invocation at all: the phase's own gate never runs, the phase's own marker never appears,
+# and the log-write ceiling never resets — while the command itself runs perfectly and writes
+# its entry, so the run continues believing it crossed a boundary it never crossed. Measured
+# live 2026-09-01 on HRN-63, twice in one run: one `cd <копия> && bin/work-note … --handoff`
+# left a finished phase open under a gate that passed, and a second spent the run's whole
+# ceiling. The chain is not legalised instead, because the way out of it already exists and
+# is deliberate — the script may be named by its own absolute path, which is the only reason
+# an absolute path is matched at all.
+def chained_recording_call():
+    """The script name — "note", "commit" or "log" — this Bash call really invokes inside a
+    chain, or None. Judged against the same text matched_log_call_kind() judges: the first
+    line up to its own heredoc marker when there is one, the whole command otherwise, with
+    every quoted span blanked out first, so a `;` or `|` inside a handoff's own prose is
+    never read as shell syntax."""
+    if tool_name != "Bash":
+        return None
+    if matched_log_call_kind() is not None:
+        return None
+    command = command_of(tool_input)
+    first_line = command.rstrip("\n").split("\n")[0]
+    heredoc_m = re.search(r'<<-?\s*([\'"]?)(\w+)\1\s*$', first_line)
+    head = first_line[:heredoc_m.start()] if heredoc_m else command
+    bare = QUOTED_SPAN_RE.sub("", head)
+    if not CHAINING_RE.search(bare):
+        return None
+    for segment in re.split(r'&&|\|\||[;|\n]', bare):
+        m = PHASE_BOUNDARY_LOG_CALL_RE.match(segment)
+        if m:
+            return m.group(2)
+    return None
+
+if brief.get("role") == "executor":
+    chained_kind = chained_recording_call()
+    if chained_kind:
+        deny_and_exit(
+            "Blocked by work-gate's CHAINED RECORDING CALL rule: this call invokes "
+            "bin/work-%s inside a chain, and a chained invocation counts as none at all. "
+            "Left to run, it would write its entry and return zero while this gate saw no "
+            "call at all: the phase's own gate would not run, the phase's own %s.closed "
+            "marker would not appear, and the ceiling on calls made without writing to the "
+            "log would not reset. That silence cost one run its phase and another its whole "
+            "ceiling, so the call is stopped here rather than left to half-work quietly.\n"
+            "Run it as one command: no `cd` in front, and no `&&`, `;`, `|` or line break "
+            "anywhere outside a quoted argument. You do not have to be standing in the "
+            "card's own working copy and there is no path to pass — name the script by its "
+            "own absolute path and it finds that copy itself:\n"
+            "      %s/bin/work-%s …" %
+            (chained_kind, brief.get("phase") or "<фаза>",
+             os.path.dirname(work_root) if work_root else "<общий каталог>", chained_kind),
+            "work-gate.chained-recording-call"
+        )
+
 if brief.get("role") == "executor" and card_dir is not None:
     fp = file_path_of(tool_input)
 
