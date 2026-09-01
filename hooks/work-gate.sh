@@ -1817,13 +1817,19 @@ if brief.get("role") == "executor" and card_dir is not None:
         if n >= LOG_CALL_CEILING:
             deny_and_exit(
                 "Blocked by work-gate's LOG CEILING rule: %d calls have passed since this "
-                "executor last closed a step in this card's own log.md. Two calls still get "
-                "through. A Write/Edit of log.md, or a Bash call running bin/work-note with "
-                "a step name, records a closed step and resets this count to zero — write "
-                "one and go straight on with the work. A bin/work-note --handoff call also "
-                "gets through but resets nothing: it says the run is stopping, not that work "
-                "was done, so after writing one, end the run. «Закрой шаг записью в лог и "
-                "работай дальше — или запиши передачу и остановись.»" % n,
+                "executor last wrote to this card's own log.md. This ceiling does not end "
+                "the run and is not a reason to stop: it refuses one call and asks for a "
+                "line in the journal, nothing more. A Write/Edit of log.md, or a Bash call "
+                "running bin/work-note with a step name, resets this count to zero and lets "
+                "the work go straight on. The step named there does not have to be finished "
+                "— write the step you are on and the state it is actually in, in one line, "
+                "and carry on with the same step. A bin/work-note --handoff call also gets "
+                "through but resets nothing: it says the run is stopping, not that work was "
+                "done, so write one only when you really are ending the run, and never as a "
+                "way out from under this ceiling. «Потолок прогон не кончает. Запиши строкой "
+                "состояние того шага, на котором стоишь — доделывать его для этого не нужно "
+                "— и работай дальше. Передачу пиши только тогда, когда прогон правда "
+                "кончается.»" % n,
                 "work-gate.log-ceiling"
             )
 
