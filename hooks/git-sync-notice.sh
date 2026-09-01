@@ -36,6 +36,22 @@
 # Its result becomes visible only through the on-disk refs it updates, which the reporting
 # step above always reads fresh on its own next run — in a LATER session, never this one.
 #
+# The fast-forward (2026-09-01): reporting the drift told the machine it was behind and
+# left it behind. This step closes that for the configuration checkout alone. Before
+# reporting, for each repository named in GIT_SYNC_NOTICE_PULL_REPOS, this hook fast-
+# forwards the working tree onto the remote-tracking ref ALREADY on disk — `git merge
+# --ff-only @{upstream}`, never `git pull`, so it stays as offline and as instant as the
+# reporting step and the rule above ("it never fetches inline") holds unbroken; the refs it
+# moves onto are whatever an earlier session's own background fetch brought down. It moves
+# only a repository that has an upstream, has a completely clean working tree, is behind,
+# and is not itself ahead — anything else is left exactly as it is, in silence. One line is
+# printed when the tree actually moved. This is worth doing only where it needs no further
+# step to take effect: ~/.claude/{CLAUDE.md,hooks,agents,skills,commands} are symlinks into
+# the configuration checkout, so a fast-forward there IS the deployment. The one piece that
+# is not a symlink, ~/.claude/settings.json, is rendered by bootstrap.sh — and a pulled
+# change to its template makes hooks/harness-stamp-gate.sh refuse every call until that
+# script is run, so nothing here needs to chase it.
+#
 # GIT_SYNC_NOTICE_REPOS            space-separated list of repository paths to check;
 #                                  default: "$HOME/Dev/ai $HOME/Dev/app". Overridable so
 #                                  the test suite never touches those two real checkouts.
@@ -47,6 +63,13 @@
 #                                  repository; default: 14400 (four hours). Overridable so
 #                                  the test suite can prove the interval without waiting
 #                                  four hours.
+# GIT_SYNC_NOTICE_PULL_REPOS       space-separated list of repository paths this hook may
+#                                  fast-forward, a subset of the repositories it watches;
+#                                  default: "$HOME/Dev/ai", the configuration checkout,
+#                                  because that is the one whose contents ~/.claude reaches
+#                                  by symlink and where a fast-forward therefore needs no
+#                                  further step. Set it to the empty string to turn the
+#                                  fast-forward off entirely.
 
 set -u
 
@@ -63,6 +86,7 @@ fi
 REPOS="${GIT_SYNC_NOTICE_REPOS:-$HOME/Dev/ai${_app_repo:+ $_app_repo}}"
 STATE_DIR="${GIT_SYNC_NOTICE_STATE_DIR:-$HOME/.claude}"
 FETCH_INTERVAL="${GIT_SYNC_NOTICE_FETCH_INTERVAL:-14400}"
+PULL_REPOS="${GIT_SYNC_NOTICE_PULL_REPOS-$HOME/Dev/ai}"
 
 # The SessionStart payload on stdin carries nothing this hook needs; read and discard it
 # so Claude Code never sees a broken pipe.
@@ -97,6 +121,45 @@ report_repo() {
   if [ "$ahead" != "0" ] || [ "$behind" != "0" ]; then
     echo "git-sync-notice: $repo is $ahead commit(s) ahead and $behind commit(s) behind $upstream."
   fi
+}
+
+may_pull() {
+  local repo="$1" candidate
+  for candidate in $PULL_REPOS; do
+    [ "$candidate" = "$repo" ] && return 0
+  done
+  return 1
+}
+
+maybe_pull() {
+  local repo="$1"
+
+  may_pull "$repo" || return 0
+  [ -e "$repo/.git" ] || return 0
+  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  git -C "$repo" symbolic-ref -q HEAD >/dev/null 2>&1 || return 0
+
+  local upstream
+  upstream="$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"
+  [ -n "$upstream" ] || return 0
+
+  # Any uncommitted change at all, tracked or untracked — leave the tree alone. Somebody is
+  # working in it, and a fast-forward is never worth surprising them.
+  [ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ] || return 0
+
+  local counts ahead behind
+  counts="$(git -C "$repo" rev-list --left-right --count "HEAD...@{upstream}" 2>/dev/null)" || return 0
+  ahead="$(printf '%s' "$counts" | awk '{print $1}')"
+  behind="$(printf '%s' "$counts" | awk '{print $2}')"
+  [ -n "$ahead" ] && [ -n "$behind" ] || return 0
+
+  # Nothing to move onto, or a history that has diverged — `--ff-only` would refuse the
+  # second case anyway; refusing it here keeps the silence deliberate rather than incidental.
+  [ "$behind" != "0" ] || return 0
+  [ "$ahead" = "0" ] || return 0
+
+  git -C "$repo" merge --ff-only --quiet "@{upstream}" >/dev/null 2>&1 || return 0
+  echo "git-sync-notice: $repo fast-forwarded $behind commit(s) onto $upstream — ~/.claude reaches this checkout by symlink, so the new rules, hooks, agents and skills are already live."
 }
 
 # The per-repository state-file name: every character that is not a letter, digit,
@@ -146,6 +209,12 @@ except Exception:
   # it from this shell's job table so no later `wait` or shell exit touches it.
   ( nohup git -C "$repo" fetch --quiet >/dev/null 2>&1 & disown ) >/dev/null 2>&1
 }
+
+# The fast-forward runs before the reporting, so the drift reported below is what remains
+# after it rather than what it has just resolved.
+for repo in $REPOS; do
+  maybe_pull "$repo"
+done
 
 for repo in $REPOS; do
   report_repo "$repo"

@@ -294,6 +294,59 @@ try:
           after_recorded is not None and before - 5 <= after_recorded <= after + 5,
           f"recorded={after_recorded!r}, window=({before - 5}, {after + 5})")
 
+    # --- fast-forward: a repository named in GIT_SYNC_NOTICE_PULL_REPOS, behind by two
+    # commits already on disk, with a clean tree, is moved onto its upstream — and the move
+    # is what makes the reporting below silent about it ---
+    scen = os.path.join(root, "ff-clean")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=2, tag="-ff-clean")
+    run_git(clone, "fetch", "--quiet")
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_PULL_REPOS": clone})
+    head = run_git(clone, "rev-parse", "HEAD")
+    upstream_head = run_git(clone, "rev-parse", "@{upstream}")
+    check("fast-forward, clean tree: exit code is 0", code == 0, f"got {code}")
+    check("fast-forward, clean tree: HEAD now equals the upstream ref",
+          head == upstream_head, f"head={head!r}, upstream={upstream_head!r}")
+    check("fast-forward, clean tree: says so, naming the count",
+          ("fast-forwarded 2 commit(s)" in out and clone in out), f"stdout={out!r}")
+    check("fast-forward, clean tree: reports no drift afterwards",
+          "commit(s) behind" not in out, f"stdout={out!r}")
+
+    # --- fast-forward refused: the same situation with one uncommitted file present. The
+    # tree is left where it was and the drift is reported instead ---
+    scen = os.path.join(root, "ff-dirty")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=2, tag="-ff-dirty")
+    run_git(clone, "fetch", "--quiet")
+    before_head = run_git(clone, "rev-parse", "HEAD")
+    with open(os.path.join(clone, "uncommitted.txt"), "w", encoding="utf-8") as f:
+        f.write("work in progress\n")
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_PULL_REPOS": clone})
+    after_head = run_git(clone, "rev-parse", "HEAD")
+    check("fast-forward, dirty tree: exit code is 0", code == 0, f"got {code}")
+    check("fast-forward, dirty tree: HEAD is untouched",
+          after_head == before_head, f"before={before_head!r}, after={after_head!r}")
+    check("fast-forward, dirty tree: nothing claims a fast-forward",
+          "fast-forwarded" not in out, f"stdout={out!r}")
+    check("fast-forward, dirty tree: the drift is reported instead",
+          "2 commit(s) behind" in out, f"stdout={out!r}")
+
+    # --- a repository NOT named in the pull list is never moved, however far behind ---
+    scen = os.path.join(root, "ff-not-listed")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=2, tag="-ff-not-listed")
+    run_git(clone, "fetch", "--quiet")
+    before_head = run_git(clone, "rev-parse", "HEAD")
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_PULL_REPOS": ""})
+    after_head = run_git(clone, "rev-parse", "HEAD")
+    check("fast-forward, not in the pull list: HEAD is untouched",
+          after_head == before_head, f"before={before_head!r}, after={after_head!r}")
+    check("fast-forward, not in the pull list: the drift is reported instead",
+          "2 commit(s) behind" in out, f"stdout={out!r}")
+
     shutil.rmtree(root, ignore_errors=True)
 
 except Exception:
