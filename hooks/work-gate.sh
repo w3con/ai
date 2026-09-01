@@ -229,6 +229,13 @@
 #     run has actually moved. A bin/work-note --handoff call passes the ceiling too — a run
 #     that has hit it must always be able to record its own state — but resets nothing,
 #     because a handoff records that the run is stopping, not that work was done.
+#     A Bash call running bin/work-commit passes on the same terms, and for the same reason
+#     (HRN-76, 2026-09-01): bin/work-note --handoff refuses outright on a working copy
+#     carrying uncommitted changes, naming bin/work-commit as the one command to run first,
+#     so with that command refused by this ceiling a run that hit the ceiling with dirty
+#     code could neither commit nor record a handoff and lost its whole phase — measured
+#     that day on HRN-76, whose first executor was cut off exactly this way. It resets
+#     nothing either: landing code is not closing a step.
 #     Before this narrowing --handoff reset the count like any other bin/work-note call, so
 #     an executor that hit the ceiling bought itself twenty more calls with a call that
 #     built nothing. Measured 2026-09-01 on HRN-63.C: six consecutive --handoff calls did
@@ -1624,10 +1631,15 @@ if brief.get("role") == "executor" and card_dir is not None:
     # stopping, not that a step closed. Only a step-naming bin/work-note call — or a direct
     # Write/Edit of log.md — says the run actually moved, and only that resets the count.
     is_handoff_call = is_work_log_call and "--handoff" in (log_command or "")
+    # HRN-76: bin/work-commit passes on the same terms, resetting nothing. Without this a
+    # run that hit the ceiling with uncommitted code was stuck for good: --handoff refuses
+    # on a dirty working copy and names bin/work-commit as the way out, and this ceiling
+    # refused that command in turn.
+    is_work_commit_call = tool_name == "Bash" and bash_names(log_command or "", "work-commit")
     count_path = log_call_count_path(agent_id)
     if is_this_cards_log_write_now or (is_work_log_call and not is_handoff_call):
         write_log_call_count(count_path, 0)
-    elif is_handoff_call:
+    elif is_handoff_call or is_work_commit_call:
         pass
     else:
         n = read_log_call_count(count_path) + 1
