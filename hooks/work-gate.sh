@@ -970,19 +970,66 @@ if brief is None:
 # line, which cannot hold a scoped Bash specifier: see rule 4a's own paragraph in the header.
 READING_ROLES = ("critic", "mapper", "tracer", "acceptor")
 
+# The Grep and Glob tools do not exist in this client build: a subagent that calls either is
+# told "No such tool available", with the error itself naming grep and find via Bash as the
+# replacement. Refusing every Bash call therefore left a reading agent no way to search at
+# all — measured on HRN-22's own mapper, which probed Bash with `true` and `echo test`, then
+# read one three-thousand-line file eleven times, then reported a file as present because
+# Read of a directory path ending in ".A" answered "binary .a file". So search is allowed
+# back, as a closed list of programs that only ever read, while everything that runs a check
+# or changes anything stays refused — an acceptor still cannot run the checks it is told it
+# never runs.
+READ_ONLY_PROGRAMS = frozenset((
+    "grep", "egrep", "fgrep", "rg", "find", "ls", "cat", "head", "tail", "wc", "nl",
+    "sort", "uniq", "cut", "tr", "basename", "dirname", "realpath", "stat", "file",
+    "echo", "true", "pwd", "test", "diff", "comm", "md5", "shasum", "date", "sed",
+))
+# Written forms that turn a reading program into a writing one, or that reach a program this
+# list never vetted. Matched on the raw command before it is split, so no quoting trick in a
+# later segment can smuggle one past the per-segment program check below.
+WRITING_FORMS = re.compile(
+    r'(>>?|`|\$\(|\bsed\b[^|;&]*\s-[a-zA-Z]*i|\bxargs\b|\btee\b|\bfind\b[^|;&]*'
+    r'-(exec|execdir|ok|okdir|delete|fprint|fls))'
+)
+
+def is_read_only_command(command):
+    """True when every program the command runs is in READ_ONLY_PROGRAMS and the command
+    carries no form that writes. Segments are split on the shell's own separators, and each
+    segment's own first bare word is the program it runs; a segment whose program cannot be
+    read as a bare word fails closed."""
+    if not command.strip() or WRITING_FORMS.search(command):
+        return False
+    for segment in re.split(r'\|\||&&|[|;\n]', command):
+        segment = segment.strip()
+        if not segment:
+            continue
+        m = re.match(r'([A-Za-z0-9_./-]+)', segment)
+        if not m:
+            return False
+        program = os.path.basename(m.group(1))
+        if program not in READ_ONLY_PROGRAMS:
+            return False
+    return True
+
+if (brief.get("role") in READING_ROLES and tool_name == "Bash"
+        and is_read_only_command(command_of(tool_input))):
+    allow_and_exit("work-gate.reading-role-search-allowed")
+
 if brief.get("role") in READING_ROLES and tool_name == "Bash":
     deny_and_exit(
         "Blocked by work-gate's READING ROLE IS READ-ONLY rule: role \"%s\" reads and never "
         "runs anything. The one Bash call this role is allowed, bin/work-agent-brief, has "
-        "already happened, so the Bash tool is finished for the rest of your life — every "
-        "later call is refused, this one included: %s. Refused with it: rewriting this same "
-        "command in another shape, and a probe such as `echo` or `true` to find out whether "
-        "Bash still works. It does not, and it will not.\n"
-        "Use the reading tools instead, substituting them for the shell: `grep` is the Grep "
-        "tool, `ls` and `find` are the Glob tool, `cat`, `head` and `wc -l` are the Read "
-        "tool. Grep a file for the name you need and then Read only the line range the match "
-        "points at — never read a large file end to end to search it, and never read one "
-        "file more than twice.\n"
+        "already happened. What is refused is this command, because it can run something "
+        "or change something: %s\n"
+        "Searching is allowed and is how you are meant to work. These programs pass, alone "
+        "or piped into one another: grep, rg, find, ls, cat, head, tail, wc, nl, sort, "
+        "uniq, cut, tr, sed, diff, basename, dirname, realpath, stat, file, echo, pwd, "
+        "test. Redirection, command substitution, xargs, tee, sed -i and find -exec are "
+        "refused, and so is every program not on that list. Note that the Grep and Glob "
+        "tools do not exist here: grep and find through this Bash tool are their "
+        "replacement, not a workaround.\n"
+        "Search a file for the name you need, then Read only the line range the match "
+        "points at. Never read a large file end to end to search it.\n"
         "You never run a check yourself and you never see a check's output. Whatever raised "
         "you runs every check with its own hand, after reading your answer." %
         (brief.get("role"), command_of(tool_input)),
