@@ -5,13 +5,13 @@
 # break by accident, because the tool call itself is refused.
 #
 # This file currently builds phases HRN-2.A (the fitness guard and caller identity),
-# HRN-2.B (one-file-one-author and the log-write ceiling), HRN-2.D/F (the phase boundary,
-# judged against the run's own named phase), HRN-2.C (the context/spend/pace ceilings, read
-# from the run's own transcript, plus the file-edit brake), and HRN-63.B, which replaced the
-# phase boundary's own log.md-header counting (HRN-2.E's, in turn, own rewrite of that
-# counting to a step's permanent name) with running the phase's own gate-<фаза>.sh, found in
-# the card's own linked working copy, on every bin/work-note call, and reading the boundary
-# off the <фаза>.closed marker that gate leaves rather than off log.md at all.
+# HRN-2.B (one-file-one-author and the log-write ceiling), and HRN-2.C (the context/spend/
+# pace ceilings, read from the run's own transcript, plus the file-edit brake). The phase
+# boundary — HRN-2.D/F's own stop, judged against the run's own named phase, and HRN-63.B's
+# own replacement of its log.md-header counting with running the phase's own gate-<фаза>.sh
+# on every bin/work-note call and reading the <фаза>.closed marker that gate left — was
+# removed by HRN-82.A: a run now stops itself, on its own transcript's own numbers, at the
+# context ceiling rule 8 below describes, never on a marker this hook laid itself.
 #
 # WHAT THIS FILE DOES, IN THE ORDER IT DOES IT
 #
@@ -94,7 +94,9 @@
 #     three hooks/plan-gate.sh once allowlisted) bumps a second, separate running total, same
 #     key, against a ceiling of 28. Crossing either ceiling changes nothing about the call's
 #     own outcome — it still allows — and only adds the count to that allow's own
-#     permissionDecisionReason, so a long coordinator session can see its own pace without a
+#     hookSpecificOutput.additionalContext (HRN-82.A.3: moved off permissionDecisionReason,
+#     which the Claude Code hooks reference names as shown only "when you deny or ask" and
+#     never on an allow), so a long coordinator session can see its own pace without a
 #     refusal ever breaking the single-conversation pipeline rule 65 of this project's own
 #     CLAUDE.md requires.
 #
@@ -139,37 +141,6 @@
 #     where it holds for both paths, and an acceptor that runs the very checks it is told it
 #     never runs is refused instead of believed.
 #
-#  5. PHASE BOUNDARY (HRN-2.D, rewritten by HRN-2.F): applies only to a subagent whose brief
-#     names role "executor" — every other role is never judged by this rule at all. HRN-2.D's
-#     own reading — "the current phase is the first phase in plan.md's own order that still
-#     has an open step" — silently required every phase of the whole plan to close before the
-#     boundary ever fired, so an executor that finished its own phase walked straight into
-#     the next one (found live, on this very card, by HRN-2.B's own executor). HRN-2.F
-#     replaces that scan: the boundary is judged only against the ONE phase this run's own
-#     caller-brief names (bin/work-agent-brief's own --phase), never against the plan as a
-#     whole.
-#       - No phase named in the brief at all: refused, every call except a Write/Edit of the
-#         card's own log.md — the same shape as "no caller-brief file", because an unnamed
-#         phase would leave this rule nothing to judge and the run would never be stopped
-#         (owner's own correction, 2026-08-28: «неназванная фаза не освобождает от границы,
-#         а запрещает работу»).
-#       - Phase named: read plan.md's own "## Шаги" section, split into phases by its
-#         "### <ID>.<letter> — …" subheadings (a plan not split into phases at all is one
-#         implicit phase named by the bare card id); each phase's steps are its own "- "
-#         bullet lines, in order, numbered 1..N. Read log.md's own headings of the shape
-#         "## <ID>.<letter>, шаг <N>" or "…, шаг <N>–<M>" (en dash), the convention HRN-2.A's
-#         own executor established — the numbers named there are that phase's closed steps.
-#         A phase that does not appear in plan.md at all is not a state this rule can judge,
-#         so the call is skipped rather than denied. Once every one of the named phase's own
-#         steps is closed, the boundary is reached for THAT phase — every further call is
-#         refused except a Write/Edit of the card's own log.md, with the words «допиши
-#         передачу и остановись», regardless of what any other phase in the plan looks like
-#         (closed, open, or never started at all). While the named phase still has an open
-#         step, every call passes with no inspection at all.
-#     A card whose plan.md cannot be read is not yet in a state this rule can judge, so it is
-#     skipped rather than denied — the same fail-open choice bin/work-agent-brief's own
-#     malformed-command case already makes in rule 4 above.
-#
 #  6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" (ai/harness/system/project.md,
 #     "Правка чужого файла") — applies only to a Write/Edit whose target actually sits inside
 #     the run's own card folder. An executor may not write description.md, attention.md or
@@ -185,7 +156,7 @@
 #     by whichever command owns it, in the shared checkout, by rules.md's own rule 51 — this
 #     rule is never about those, question.md included). The target's own realpath is compared
 #     against two other paths: the shared checkout's own root (os.path.dirname of the work
-#     root rule 5 already resolves) and this card's own linked working copy, found the same
+#     root find_work_root() resolves) and this card's own linked working copy, found the same
 #     way bin/work-session cuts one and bin/work-commit already finds one by name — the `git
 #     worktree list --porcelain` entry whose own branch is refs/heads/work/<card id,
 #     lowercased> (rules.md rule 53). A target inside the shared checkout but NOT inside that
@@ -251,23 +222,28 @@
 #     goes on to refuse itself still resets — narrowing the reset to the step-naming form
 #     is what keeps that harmless, since closing a step is the thing the run is for.
 #
-#  8. CONTEXT SIZE CEILING (HRN-2.C): applies to every subagent call carrying a brief, any
-#     role — "агента", not "исполнителя", is the word project.md's own paragraph uses. The
-#     size of the context the agent's own most recent turn actually held (input_tokens +
-#     cache_creation_input_tokens + cache_read_input_tokens of the LAST assistant record in
-#     this run's own transcript, resolved from the call's own agent_id — see "WHICH
-#     TRANSCRIPT RULES 8-10 JUDGE" below — what that one generation was actually given to
-#     read, not a sum across the run) is compared
-#     against CONTEXT_SIZE_CEILING (300,000 tokens). Past it, every call is refused except
-#     the calls that record where the run stopped — is_state_recording_escape_call(), shared
-#     with rules 9 and 10 — with the words «запиши состояние в лог и остановись» the plan
-#     itself quotes. That escape is a Read/Write/Edit of this card's own log.md at either of
-#     its two addresses, a bin/work-note naming this card, or a bin/work-commit; until
-#     HRN-73/HRN-80 it was a Write/Edit of one address alone, which no road could reach —
-#     see the function's own comment. A transcript that cannot be read, or carries no
-#     assistant record with a usage field at all, is not a state this rule can judge, so the
-#     call is skipped rather than denied — the same fail-open choice rule 5 already makes for
-#     an unreadable plan.md.
+#  8. CONTEXT SIZE CEILING (HRN-2.C, given a soft threshold by HRN-82.A.3): applies to every
+#     subagent call carrying a brief, any role — "агента", not "исполнителя", is the word
+#     project.md's own paragraph uses. The size of the context the agent's own most recent
+#     turn actually held (input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+#     of the LAST assistant record in this run's own transcript, resolved from the call's own
+#     agent_id — see "WHICH TRANSCRIPT RULES 8-10 JUDGE" below — what that one generation was
+#     actually given to read, not a sum across the run) is compared against two thresholds.
+#     Past CONTEXT_SIZE_CEILING (300,000 tokens, unmoved since HRN-2.C), every call is refused
+#     except the calls that record where the run stopped — is_state_recording_escape_call(),
+#     shared with rules 9 and 10 — with the words «запиши состояние в лог и остановись» the
+#     plan itself quotes. That escape is a Read/Write/Edit of this card's own log.md at either
+#     of its two addresses, a bin/work-note naming this card, or a bin/work-commit; until
+#     HRN-73/HRN-80 it was a Write/Edit of one address alone, which no road could reach — see
+#     the function's own comment. Between CONTEXT_SOFT_CEILING (250,000 tokens, HRN-82.A.3 —
+#     this replaces the phase boundary as the one way a run learns it should stop of its own
+#     will) and the hard ceiling, every call still allows, but carries a warning in
+#     hookSpecificOutput.additionalContext naming the current size and asking for a closed
+#     step and a handoff — never in permissionDecisionReason, which the Claude Code hooks
+#     reference names as reaching the model only "when you deny or ask". A transcript that
+#     cannot be read, or carries no assistant record with a usage field at all, is not a state
+#     this rule can judge, so the call is skipped rather than denied — the same fail-open
+#     choice every rule in this file already makes for an unreadable input of its own.
 #
 #  9. SPEND CEILING (HRN-2.C): applies only to role "executor" — project.md's own wording
 #     names it explicitly ("Потолок по расходу считается на прогон исполнителя"), unlike
@@ -329,8 +305,8 @@
 #     отказами счёт не сбрасывает").
 #
 # Rule 6a keeps no state of its own either — it re-reads `git worktree list --porcelain`
-# fresh on every call, exactly like rule 5's own resolution of the work root. Rule 6b keeps
-# no state of its own for the same reason.
+# fresh on every call, exactly like every other rule's own resolution of the work root. Rule
+# 6b keeps no state of its own for the same reason.
 #
 # STATE. Everything this hook remembers between calls lives under WORK_GATE_STATE_DIR
 # (default "${TMPDIR:-/tmp}/claude-work-gate", the convention hooks/card-touch-gate.sh
@@ -344,14 +320,13 @@
 # / briefs/session-<session_id>.json (rule 4), log-call-counts/agent-<agent_id>.txt (rule 7),
 # file-edit-counts/agent-<agent_id>/<sanitized-path>.txt (rule 11) and
 # consecutive-refusals/agent-<agent_id>.txt (rule 12: the last rule that denied this agent,
-# and how many times in a row). Rule 5 keeps no state of its own — it re-reads plan.md and
-# log.md fresh on every call, and rules 8-10 keep no state of their own either — each
-# re-reads this run's own transcript fresh on every call.
+# and how many times in a row). Rules 8-10 keep no state of their own either — each re-reads
+# this run's own transcript fresh on every call.
 #
 # TEST OVERRIDES, read only by bin/work-refusals, never present in a real deployed session:
 #   WORK_GATE_STATE_DIR            overrides the whole state tree above.
-#   WORK_GATE_WORK_ROOT            overrides the work root rule 5 resolves a card id
-#                                   against (the directory holding the "harness" and
+#   WORK_GATE_WORK_ROOT            overrides the work root find_work_root() resolves a card
+#                                   id against (the directory holding the "harness" and
 #                                   "timeline" kind folders, normally found via `git
 #                                   worktree list --porcelain`'s own first entry — the
 #                                   shared checkout's path, since a card's folder always
@@ -404,8 +379,14 @@ def deny_json(reason):
             '"permissionDecisionReason":' + json.dumps(reason) + '}}')
 
 def allow_and_exit(reason=None):
-    # HRN-48.D: an "allow" decision can still carry a permissionDecisionReason — used by rule
-    # 3a's two coordinator-count rubrics to warn without ever refusing. reason=None (every
+    # HRN-48.D, moved off permissionDecisionReason by HRN-82.A.3: an "allow" decision can
+    # still carry text for the calling agent to read — used by rule 3a's two coordinator-count
+    # rubrics and by rule 8's own soft context ceiling to warn without ever refusing. It goes
+    # into hookSpecificOutput.additionalContext, not permissionDecisionReason: the Claude Code
+    # hooks reference is explicit that the reason field "is shown to Claude when you deny or
+    # ask, and shown to the user when you ask" — never on an allow, so a warning left in that
+    # field never reached anyone. additionalContext, by the same reference, "adds context
+    # Claude sees when evaluating the prompt or tool call" on an allow. reason=None (every
     # call site before HRN-48.D) reproduces the exact ALLOW_JSON string this function always
     # printed, so no other allow point in this file changes shape.
     if reason:
@@ -413,7 +394,7 @@ def allow_and_exit(reason=None):
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "permissionDecisionReason": reason,
+                "additionalContext": reason,
             }
         }))
     else:
@@ -606,7 +587,7 @@ def bash_names(command, script_basename):
 # than imported, the same way this repository's other git-plumbing helpers each carry their
 # own copy (bin/session-start's own repo_root()/primary_worktree_path() comments name the
 # same convention). Moved above rule 2b (HRN-51), which is the first rule below that needs
-# to resolve a card's own folder — rule 5 further down still uses these same four names.
+# to resolve a card's own folder.
 CARD_KINDS = ("harness", "timeline")
 
 def find_work_root():
@@ -617,8 +598,8 @@ def find_work_root():
     list --porcelain`'s first entry, readable from inside any linked worktree too — not
     from whatever repository copy this call's own cwd happens to sit in. Returns None when
     that cannot be resolved (cwd is not inside a git working tree at all, or git itself is
-    unavailable), in which case the phase-boundary rule and rule 2b's own card-closure check
-    are both skipped rather than denied."""
+    unavailable), in which case rule 2b's own card-closure check, and every later rule that
+    needs card_dir, are skipped rather than denied."""
     override = os.environ.get("WORK_GATE_WORK_ROOT")
     if override:
         return override
@@ -657,8 +638,6 @@ def find_card_dir(work_root, card_id):
                     return card_dir
     return None
 
-# Moved up from next to rule 6a (HRN-70) by HRN-63.B.1, which now needs this to find a
-# phase's own gate script before rule 5 runs; rule 6a still uses the same function unchanged.
 def find_card_worktree_root(card_id):
     """The path of card_id's own linked working copy, resolved the same way bin/work-session
     cuts one and bin/work-commit already finds it by name (rules.md rule 53): the entry in
@@ -667,7 +646,7 @@ def find_card_worktree_root(card_id):
     other git-plumbing lookup in this file already carries. None when no such branch is found
     at all — an ordinary case for a role other than executor, and for an executor whose
     brief names a card this session never actually ran bin/work-session for; the caller then
-    skips this rule, since it has nothing to judge a boundary against."""
+    skips this rule, since it has nothing to judge a boundary against. Used by rule 6a below."""
     override = os.environ.get("WORK_GATE_CARD_WORKTREE_ROOT")
     if override:
         return override
@@ -999,11 +978,10 @@ def read_brief(aid, sid):
             continue
         role, card = b.get("role"), b.get("card")
         if role and card:
-            # "phase" (HRN-2.F): the plan phase this run is working, named only by whoever
-            # launched it — bin/work-agent-brief's own --phase — and never derivable from the
-            # card's own files. None when the brief carries no such key at all (an older
-            # brief, or any role other than executor, which the phase boundary rule below
-            # never requires it from).
+            # "phase" (HRN-2.F, kept on disk after HRN-82.A even though no rule in this file
+            # judges it any more — HRN-82.C.2 is the step that removes --phase from the brief
+            # itself): the plan phase this run names, purely informational now, still used
+            # only to word a refusal message.
             return {"role": role, "card": card, "phase": b.get("phase")}
     return None
 
@@ -1092,29 +1070,9 @@ if brief.get("role") in READING_ROLES and tool_name == "Bash":
         "work-gate.reading-role-read-only"
     )
 
-# --- 5. PHASE BOUNDARY: an executor whose current phase has no open steps left is refused
-# every call except a Write/Edit of its own card's log.md, and a Bash call that does nothing
-# but `git add` or `git commit` (HRN-2.D, extended by HRN-21.A) -----------------------
-
-# HRN-21.A: the boundary exists to stop an executor from STARTING new work once its own
-# phase is closed, not to stop it from SAVING work already done — writing the log entry that
-# closes the phase is worthless if the very next call, the commit that lands it, is refused.
-# This list is closed and literal, per this card's own plan ("Решения, принятые при
-# написании плана", "Защёлка ничего не толкует и ничего не угадывает"): no rule here
-# recognises a call by resemblance to a save. `git merge`, `git push` and `git rebase` are
-# refused at the boundary exactly as before, because the executor may not run them at all,
-# boundary or not — they are not in this list and never will be. A harmless `git status`, or
-# any command not in this list, is refused exactly like any other call.
-#
-# HRN-21.C.3: the same closed list also exempts a Bash call running bin/work-note, one more
-# entry added the same deliberate way — the boundary must not strand an executor holding the
-# one command this system requires it to close its own last step with. That call gets its
-# own recognising function, is_phase_boundary_log_call() below, rather than joining this
-# git-only one: a real bin/work-note invocation always carries a heredoc body (its own
-# stdin — the check's own verbatim output), which legitimately spans many lines, so the bare
-# "no newline anywhere" test below cannot apply to it.
-PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS = ("add", "commit")
-
+# --- shared shell-command parsing, used by rule 6b, by rule 13's looks_like_save_call(), and
+# by matched_log_call_kind() just below (HRN-82.A.1: this used to sit inside the phase
+# boundary's own section, rule 5, removed here — every name below still has a live reader). --
 # Every quoted span of a shell command — single-quoted, or double-quoted with backslash
 # escapes honoured. Blanking these out before looking for chaining is what keeps an
 # argument's own contents from being read as shell syntax.
@@ -1125,15 +1083,15 @@ def chains(command):
     """True when the command runs more than one statement. Judged against the command with
     every quoted span blanked out, because a `;`, `|`, `&&` or newline inside an argument is
     ordinary prose — a handoff entry's own text carries all four — and reading it as shell
-    syntax refused exactly the calls this boundary is supposed to let through (found live
-    closing HRN-6.C)."""
+    syntax would refuse calls that are legitimate single invocations (found live closing
+    HRN-6.C)."""
     return CHAINING_RE.search(QUOTED_SPAN_RE.sub("", command)) is not None
 
 # `-C <path>` and `-c <key>=<value>` before the subcommand: git's own two options that take
 # a value and change nothing about which subcommand runs. `-C` in particular is the only way
-# to name another working copy without a `cd`, and a `cd` is chaining and refused here — so
-# refusing `git -C <copy> add` while promising that `git add` gets through left an executor
-# standing in the shared checkout with no way at all to stage its own copy's work, which is
+# to name another working copy without a `cd`, and a `cd` is chaining and refused by rule 6b
+# below — so refusing `git -C <copy> add` while promising that `git add` gets through left an
+# executor standing in the shared checkout with no way at all to stage its own copy's work,
 # exactly the wall HRN-59's own executor hit some twenty times (2026-08-31).
 GIT_PRE_SUBCOMMAND_VALUE_OPTS = ("-C", "-c")
 
@@ -1155,44 +1113,34 @@ def git_subcommand(command):
         return token
     return None
 
-def is_phase_boundary_save_call():
-    """True only for a Bash call whose entire command is a single `git add` or `git commit`
-    invocation — never a substring or resemblance match. A command that chains more than one
-    statement is never exempt, even when one of its parts is itself a bare `git add` or
-    `git commit`, since the exemption names one specific action, not a shell script that
-    happens to contain it somewhere. `git -C <copy> add` counts as `git add`: the option
-    names which working copy is written and changes nothing about what the call does."""
-    if tool_name != "Bash":
-        return False
-    command = command_of(tool_input)
-    if chains(command):
-        return False
-    return git_subcommand(command) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
+# HRN-82.A: this constant used to name the two git subcommands the phase boundary's own save
+# exemption recognised (rule 5, removed). Its only live reader now is rule 13's own
+# looks_like_save_call() below, which reuses it to recognise a plain `git add`/`git commit`
+# as one of the shapes an executor saves finished work with — the name is kept unchanged so
+# that reader needs no edit of its own.
+PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS = ("add", "commit")
 
-# A command invoking one of the three commands that record and land a closed phase, by the
-# bare relative path or by any path ending in that same bin/<name> component — never by
-# basename alone, so that a path such as ~/elsewhere/work-note is not exempt while
+# A command invoking one of the three commands that record a run's own state, by the bare
+# relative path or by any path ending in that same bin/<name> component — never by basename
+# alone, so that a path such as ~/elsewhere/work-note is not exempt while
 # /abs/path/to/bin/work-note is.
 PHASE_BOUNDARY_LOG_CALL_RE = re.compile(r'^\s*(\S*/)?bin/work-(log|note|commit)\b')
 
 def matched_log_call_kind():
     """Which of bin/work-note / bin/work-commit / bin/work-log this Bash call actually
-    invokes — "note", "commit" or "log" — matched the same rigorous, heredoc-aware,
-    chain-aware way is_phase_boundary_log_call() always has; None when the call is not a
-    single, genuine invocation of any of the three. The one shared parser behind two
-    different callers: is_phase_boundary_log_call() below (any of the three, unchanged
-    behaviour) and is_work_note_invocation() (HRN-63.B.1's own trigger for a phase's own
-    gate — "note" only, never "commit" or "log").
+    invokes — "note", "commit" or "log" — None when the call is not a single, genuine
+    invocation of any of the three. Read by is_state_recording_escape_call() (rules 8-11's
+    own shared escape) and by chained_recording_call() (rule 15) below — the phase boundary
+    that used to be this function's third reader is gone (HRN-82.A).
 
     A real invocation always carries a heredoc body (bin/work-note's own stdin, the check's
     own verbatim output) — legitimately spanning many lines and containing any character at
-    all, including `&&`/`;`/`|` — so the plain "no newline anywhere" test
-    is_phase_boundary_save_call() applies to git cannot apply here. Chaining is instead
-    judged only against the text OUTSIDE the heredoc body: the first line, up to its own
-    heredoc marker, carries none of `&&`/`;`/`|` and starts with one of the three script
-    names; and when a heredoc marker is present, the command's own last line is exactly that
-    marker and nothing follows it. A command naming no heredoc marker at all still may not
-    chain, exactly like git add/commit.
+    all, including `&&`/`;`/`|` — so the plain "no newline anywhere" test chains() applies to
+    a bare git call cannot apply here. Chaining is instead judged only against the text
+    OUTSIDE the heredoc body: the first line, up to its own heredoc marker, carries none of
+    `&&`/`;`/`|` and starts with one of the three script names; and when a heredoc marker is
+    present, the command's own last line is exactly that marker and nothing follows it. A
+    command naming no heredoc marker at all still may not chain, exactly like git add/commit.
 
     The command may name the script by an absolute path as well as by the bare relative one
     (found live closing HRN-6.B): an executor works in its own linked working copy while
@@ -1223,112 +1171,6 @@ def matched_log_call_kind():
     m = PHASE_BOUNDARY_LOG_CALL_RE.match(command)
     return m.group(2) if m else None
 
-def is_phase_boundary_log_call():
-    """True only for a Bash call that is a single invocation of bin/work-note or
-    bin/work-commit — exempted at the boundary for the same reason git add/commit already
-    are (HRN-21.A.1), added by HRN-21.C.3: writing the log entry that closes a phase is
-    worthless if the very next call, the one command this system requires to record it, is
-    itself refused.
-
-    `bin/work-commit` is exempt alongside `bin/work-note`, for the same reason and found the
-    same way (closing HRN-6.C): it is what this system puts in place of the bare `git
-    add`/`git commit` already exempt here, and an executor that cannot call it at the
-    boundary cannot land the work whose closure it has just recorded — as happened, one
-    phase after the absolute-path defect above, leaving a finished phase's code stranded
-    uncommitted in its own working copy."""
-    return matched_log_call_kind() in ("note", "commit")
-
-def is_work_note_invocation():
-    """True only for a Bash call that is a single, genuine invocation of bin/work-note —
-    matched_log_call_kind() narrowed to that one script (HRN-63.B.1): the trigger for
-    running the run's own named phase's gate-<фаза>.sh, never fired by bin/work-commit or
-    bin/work-log, which record or land a phase but never close one on their own."""
-    return matched_log_call_kind() == "note"
-
-# CARD_KINDS, find_work_root(), epic_dirs(), find_card_dir() and find_card_worktree_root()
-# moved up next to rule 2b (HRN-51 / HRN-63.B.1), which now need them to resolve a card's
-# own folder, and its own working copy, before rule 5 below runs; rule 5 still uses the
-# same names, unchanged.
-
-# HRN-63.B: the phase boundary no longer counts closed-step headings in log.md at all — it
-# reads one fact, whether <phase_id>.closed already sits in the card's own folder in the
-# shared checkout, laid only by that phase's own gate-<phase_id>.sh returning zero
-# (run_phase_gate_if_due() below). parse_plan_phases(), short_card_total_steps(),
-# closed_steps_for_phase() and total_steps_for_phase() — the whole log.md-header-counting
-# machinery HRN-2.E and HRN-54.B.3 built — are gone with them; plan.md and description.md
-# are no longer read by this rule at all.
-PHASE_GATE_RUNNING_ENV = "WORK_GATE_PHASE_GATE_RUNNING"
-PHASE_GATE_TIMEOUT = 900  # seconds — generous for a real check, bounded against a hang
-
-def phase_closed_marker_path(card_dir, phase_id):
-    return os.path.join(card_dir, phase_id + ".closed")
-
-def phase_closed(card_dir, phase_id):
-    return os.path.isfile(phase_closed_marker_path(card_dir, phase_id))
-
-def run_phase_gate_if_due(card_dir, phase_id):
-    """HRN-63.B.1/B.2: on a genuine bin/work-note invocation (is_work_note_invocation()
-    above), while phase_id is not yet closed, run that phase's own gate-<phase_id>.sh — the
-    one copy that lives in the card's own linked working copy (find_card_worktree_root()
-    above), with that working copy as the script's own working directory — and, on a zero
-    return, lay and commit the boundary marker <phase_id>.closed in the card's folder in the
-    shared checkout, the same way bin/work_journal.py's own record_breakage() commits a
-    single file directly by path, except that a brand-new marker is untracked the first time
-    and needs its own `git add` first — a bare `git commit -- <path>` refuses an untracked
-    path outright, proved live writing this same step. Never raises and never denies on its
-    own account: every failure to resolve, run or commit falls through silently, leaving the
-    phase open exactly as it was.
-
-    Guarded by PHASE_GATE_RUNNING_ENV against recursing into itself: a phase's own gate
-    script may itself drive this very hook through synthetic bin/work-note calls of its own
-    (gate-HRN-63.B.sh does exactly this, on this very card), and since
-    find_card_worktree_root() always resolves to the one real working copy a card's branch
-    actually has, whatever state directory the outer run used, that nested run would
-    otherwise ask this same function to run the very gate that is already running, without
-    ever returning. Set once, in the environment the gate script's own subprocess (and every
-    `sh work-gate.sh` call it makes in turn) inherits, so at most one nested real run
-    happens and stops there."""
-    if not is_work_note_invocation():
-        return
-    if phase_closed(card_dir, phase_id):
-        return
-    if os.environ.get(PHASE_GATE_RUNNING_ENV) == "1":
-        return
-    own_root = find_card_worktree_root(brief["card"])
-    if not own_root:
-        return
-    working_copy_card_dir = find_card_dir(os.path.join(own_root, "ai"), brief["card"])
-    if not working_copy_card_dir:
-        return
-    gate_path = os.path.join(working_copy_card_dir, "gate-" + phase_id + ".sh")
-    if not (os.path.isfile(gate_path) and os.access(gate_path, os.X_OK)):
-        return
-    try:
-        env = dict(os.environ)
-        env[PHASE_GATE_RUNNING_ENV] = "1"
-        result = subprocess.run([gate_path], cwd=own_root, env=env,
-                                 capture_output=True, timeout=PHASE_GATE_TIMEOUT)
-    except Exception:
-        return
-    if result.returncode != 0:
-        return
-    marker = phase_closed_marker_path(card_dir, phase_id)
-    try:
-        with open(marker, "w", encoding="utf-8"):
-            pass
-        add = subprocess.run(["git", "add", "--", marker], cwd=card_dir,
-                              capture_output=True, timeout=30)
-        if add.returncode != 0:
-            return
-        subprocess.run(
-            ["git", "commit", "--no-verify", "-m",
-             "chore(%s): mark phase %s closed by its own gate" % (brief["card"], phase_id),
-             "--", marker],
-            cwd=card_dir, capture_output=True, timeout=30,
-        )
-    except Exception:
-        pass
-
 work_root = find_work_root()
 card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
 
@@ -1337,13 +1179,12 @@ card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
 # case it was written for — git unavailable, so work_root itself is None and nothing about
 # this repository can be resolved at all. It is wrong for the other case: work_root resolved
 # fine and the brief simply names something that is not a card. Every rule scoped to a card —
-# the phase boundary, the run of that phase's own gate, the file-authorship rule — then
-# vanishes silently, and the run continues with no boundary over it while every party
-# believes there is one. Measured live 2026-09-01 on HRN-63: an executor re-ran
-# bin/work-agent-brief with its own card folder's absolute path in place of the identifier,
-# and worked the rest of its run ungoverned, laying no phase marker and never once being
-# stopped. bin/work-agent-brief now refuses that value at the source; this refuses whatever
-# still reaches here by another road.
+# the file-authorship rule, the working-copy boundary, the log-write ceiling — then vanishes
+# silently, and the run continues with no boundary over it while every party believes there
+# is one. Measured live 2026-09-01 on HRN-63: an executor re-ran bin/work-agent-brief with
+# its own card folder's absolute path in place of the identifier, and worked the rest of its
+# run ungoverned, never once being stopped. bin/work-agent-brief now refuses that value at
+# the source; this refuses whatever still reaches here by another road.
 if work_root and card_dir is None:
     deny_and_exit(
         "Blocked by work-gate: this run's own caller-brief names %r as its card, and no "
@@ -1357,7 +1198,7 @@ if work_root and card_dir is None:
         "work-gate.brief-names-no-card"
     )
 
-# --- shared by rule 5 and by rules 8-10: WHERE THIS CARD'S OWN log.md ACTUALLY LIVES ----
+# --- shared by rules 7 and 8-11: WHERE THIS CARD'S OWN log.md ACTUALLY LIVES ------------
 # Both addresses count, and until HRN-73/HRN-80 only the first one did. The card's folder
 # lives in the shared checkout and holds every other file the card carries, so
 # <card_dir>/log.md is a real address and stays one. But since HRN-61 the journal itself is
@@ -1377,7 +1218,7 @@ def this_cards_log_paths():
     is found by find_card_worktree_root(), the one lookup every other rule in this file
     already uses for it, and the whole answer is computed once per call of this hook: it
     runs `git worktree list` as a subprocess, and every caller below sits on a path that is
-    reached only when a ceiling has already fired or a phase is already closed."""
+    reached only when a ceiling has already fired."""
     if _log_paths_cache:
         return _log_paths_cache[0]
     paths = []
@@ -1407,14 +1248,14 @@ def names_this_cards_log(fp):
 # other shape with a `&&`, `;`, `|` or a bare newline in front of the script name — is
 # refused here instead of being let through. matched_log_call_kind() above, the one parser
 # every rule of this gate that reads those three commands goes through, judges a chain as no
-# invocation at all: the phase's own gate never runs, the phase's own marker never appears,
-# and the log-write ceiling never resets — while the command itself runs perfectly and writes
-# its entry, so the run continues believing it crossed a boundary it never crossed. Measured
-# live 2026-09-01 on HRN-63, twice in one run: one `cd <копия> && bin/work-note … --handoff`
-# left a finished phase open under a gate that passed, and a second spent the run's whole
-# ceiling. The chain is not legalised instead, because the way out of it already exists and
-# is deliberate — the script may be named by its own absolute path, which is the only reason
-# an absolute path is matched at all.
+# invocation at all: the log-write ceiling never resets — while the command itself runs
+# perfectly and writes its entry, so the run continues believing it reset a ceiling it never
+# reset. Measured live 2026-09-01 on HRN-63: a `cd <копия> && bin/work-note … --handoff`
+# spent the run's whole ceiling this way. The chain is not legalised instead, because the
+# way out of it already exists and is deliberate — the script may be named by its own
+# absolute path, which is the only reason an absolute path is matched at all. HRN-82.A.2:
+# this rule used to name two further reasons here, that the phase's own gate would not run
+# and its own marker would not appear — both gone with the phase boundary itself.
 def chained_recording_call():
     """The script name — "note", "commit" or "log" — this Bash call really invokes inside a
     chain, or None. Judged against the same text matched_log_call_kind() judges: the first
@@ -1445,79 +1286,18 @@ if brief.get("role") == "executor":
             "Blocked by work-gate's CHAINED RECORDING CALL rule: this call invokes "
             "bin/work-%s inside a chain, and a chained invocation counts as none at all. "
             "Left to run, it would write its entry and return zero while this gate saw no "
-            "call at all: the phase's own gate would not run, the phase's own %s.closed "
-            "marker would not appear, and the ceiling on calls made without writing to the "
-            "log would not reset. That silence cost one run its phase and another its whole "
-            "ceiling, so the call is stopped here rather than left to half-work quietly.\n"
+            "call at all: the ceiling on calls made without writing to the log would not "
+            "reset. That silence cost one run its whole ceiling, so the call is stopped "
+            "here rather than left to half-work quietly.\n"
             "Run it as one command: no `cd` in front, and no `&&`, `;`, `|` or line break "
             "anywhere outside a quoted argument. You do not have to be standing in the "
             "card's own working copy and there is no path to pass — name the script by its "
             "own absolute path and it finds that copy itself:\n"
             "      %s/bin/work-%s …" %
-            (chained_kind, brief.get("phase") or "<фаза>",
+            (chained_kind,
              os.path.dirname(work_root) if work_root else "<общий каталог>", chained_kind),
             "work-gate.chained-recording-call"
         )
-
-if brief.get("role") == "executor" and card_dir is not None:
-    fp = file_path_of(tool_input)
-
-    def is_this_cards_log_write():
-        # "Read" is exempted alongside "Write"/"Edit" (found live closing HRN-34.B): the
-        # Edit tool's own client-side staleness check refuses to edit a file that changed
-        # on disk since this session last read it, and log.md is dirtied outside Claude's
-        # own file tracking by every bin/work-note call — so with Read still refused at the
-        # boundary, Edit could never satisfy its own precondition and the boundary's one
-        # designated escape (a Write/Edit of this file) became unreachable via Edit.
-        # HRN-73: both of the journal's own addresses count, not the shared checkout's
-        # alone — see this_cards_log_paths() above.
-        return tool_name in ("Read", "Write", "Edit") and names_this_cards_log(fp)
-
-    phase_id = brief.get("phase")
-    if not phase_id:
-        if is_this_cards_log_write():
-            allow_and_exit()
-        deny_and_exit(
-            "Blocked by work-gate's PHASE BOUNDARY rule: this executor's caller-brief "
-            "names no phase — an unnamed phase does not exempt a run from the boundary, it "
-            "blocks it, exactly like a subagent that carries no caller-brief file at all "
-            "(rule 4). Re-launch with bin/work-agent-brief --role executor --card %s "
-            "--phase <ID>, naming the phase this run is actually working. The only call "
-            "that still gets through is a Write/Edit of this card's own log.md: «допиши "
-            "передачу и остановись»." % brief["card"],
-            "work-gate.phase-boundary-blocks-unnamed-phase"
-        )
-    else:
-        run_phase_gate_if_due(card_dir, phase_id)
-        if phase_closed(card_dir, phase_id):
-            if is_this_cards_log_write() or is_phase_boundary_save_call() or \
-                    is_phase_boundary_log_call():
-                allow_and_exit()
-            deny_and_exit(
-                "Blocked by work-gate's PHASE BOUNDARY rule: phase %s — the phase this "
-                "run's own caller-brief names — is already closed: its own gate-%s.sh has "
-                "already returned zero, and %s.closed sits in this card's own folder, "
-                "regardless of what any other phase in the plan looks like. A fresh "
-                "executor takes the next phase, not this one. Save what is already built "
-                "and stop — «допиши передачу и остановись».\n"
-                "These four calls, and nothing else, still get through. Each is a "
-                "single command: no `cd` in front, no `&&`, no `;`, no `|` — every "
-                "chained command is refused here, whatever it chains.\n"
-                "  1. Commit this phase's own code (this command finds the card's own "
-                "working copy itself, from the step name — you do not have to be "
-                "standing in it, and there is no path to pass):\n"
-                "         bin/work-commit %s.<N> \"<что сделал шаг>\"\n"
-                "  2. Write the phase's own handoff entry:\n"
-                "         bin/work-note %s --handoff %s \"<состояние, находки, что "
-                "дальше>\"\n"
-                "  3. A bare `git add` or `git commit`, including the `git -C <путь "
-                "копии> …` form, when you need git directly rather than the two "
-                "commands above.\n"
-                "  4. A Read, Write or Edit of this card's own log.md, and of no "
-                "other file." % (phase_id, phase_id, phase_id, phase_id, brief["card"],
-                                  phase_id),
-                "work-gate.phase-boundary-own-phase-closed-later-untouched"
-            )
 
 # --- 6. FILE AUTHORSHIP (HRN-2.B): "one file, one author" ------------------------------
 # ai/harness/system/project.md, "Правка чужого файла": the executor may not write
@@ -1527,7 +1307,7 @@ if brief.get("role") == "executor" and card_dir is not None:
 # executor records a proposed change there and keeps working, rather than touching the plan
 # itself. The acceptor may not write log.md — that file is the executor's own. Only a call
 # that targets a file actually inside THIS card's own folder is judged; card_dir is None
-# (skip, fail open) exactly when rule 5 above already treats it as unresolvable.
+# (skip, fail open) exactly when it could not be resolved at all.
 EXECUTOR_LOCKED_FILES = ("description.md", "attention.md", "done.md")
 
 if tool_name in ("Write", "Edit") and card_dir is not None:
@@ -1808,8 +1588,7 @@ if brief.get("role") == "executor" and tool_name == "Bash":
 # — rule 3 above already exited for any call carrying none, so every call that reaches this
 # point is a real subagent's own. The count lives in its own state file, one per agent_id,
 # keyed the same way the brief files already are; a call denied by an earlier rule (no-brief,
-# phase boundary, file authorship) never reaches here and so neither increments
-# nor resets it.
+# file authorship) never reaches here and so neither increments nor resets it.
 #
 # HRN-21.B: the system requires the executor to write log.md only through `bin/work-note`,
 # never by hand (ai/harness/system/project.md, "log.md — пишет исполнитель"), and that
@@ -1848,7 +1627,7 @@ if brief.get("role") == "executor" and card_dir is not None:
     # working reset left was a real bin/work-note call. Measured live on HRN-82, whose phase A
     # cannot make that call before its own first edit lands, and which therefore deadlocked
     # twice. Both addresses count now, through names_this_cards_log() — the same lookup rules
-    # 5 and 8-11 have gone through since HRN-73 — guarded by a basename test so the worktree
+    # 8-11 have gone through since HRN-73 — guarded by a basename test so the worktree
     # subprocess behind it runs only on a call that actually names a file called log.md.
     def names_this_cards_log_cheaply(p):
         return (p is not None and os.path.basename(p) == "log.md"
@@ -1904,10 +1683,10 @@ if brief.get("role") == "executor" and card_dir is not None:
             )
 
 # --- shared by rules 8-11 below: "is this call a Write/Edit of THIS run's own card's
-# log.md" — the same test rules 5 and 7 above each already define locally for their own
-# narrower scopes, repeated here as its own top-level helper rather than factored out of
-# that already-built code, since this phase's own brief is to add HRN-2.C's five steps and
-# nothing beyond them. -------------------------------------------------------------------
+# log.md" — the same test rule 7 above already defines locally for its own narrower scope,
+# repeated here as its own top-level helper rather than factored out of that already-built
+# code, since this phase's own brief is to add HRN-2.C's five steps and nothing beyond
+# them. -------------------------------------------------------------------
 def recording_call_names_this_card():
     """True when a bin/work-note invocation names this run's own card. That command takes
     the card's identifier as its first argument and resolves the journal from it, so a call
@@ -1935,18 +1714,18 @@ def is_state_recording_escape_call():
     Four shapes pass, and each of them had to be added for a reason found live (HRN-80).
     A Read, Write or Edit of this card's own log.md, at either of its two real addresses
     (this_cards_log_paths(), HRN-73) — Read among them because the editor refuses to write a
-    file this session has not read, exactly as the phase boundary already found closing
-    HRN-34.B, so without it the Write/Edit escape cannot be reached at all. A single
-    invocation of bin/work-note naming this run's own card — the command this system
-    actually requires the journal be written with, which goes through Bash and was therefore
-    refused by every ceiling while the file it writes was the only thing they let through.
-    And a single invocation of bin/work-commit, on the same ground the phase boundary already
-    exempts it (HRN-6.C): `bin/work-note --handoff` refuses outright while the card's own
-    working copy carries uncommitted changes, so a ceiling that passes the handoff but
-    refuses the commit passes nothing — it leaves the run's own code stranded and its handoff
-    unwritable. bin/work-commit is not checked against the card's name because it takes none:
-    it refuses outright unless it is called from inside the card's own working copy, which is
-    a stronger scoping than reading a name off the command line.
+    file this session has not read, exactly as this system already found closing HRN-34.B, so
+    without it the Write/Edit escape cannot be reached at all. A single invocation of
+    bin/work-note naming this run's own card — the command this system actually requires the
+    journal be written with, which goes through Bash and was therefore refused by every
+    ceiling while the file it writes was the only thing they let through. And a single
+    invocation of bin/work-commit, on the same ground rule 15's own chained-recording-call
+    exemption already gives it (HRN-6.C): `bin/work-note --handoff` refuses outright while
+    the card's own working copy carries uncommitted changes, so a ceiling that passes the
+    handoff but refuses the commit passes nothing — it leaves the run's own code stranded and
+    its handoff unwritable. bin/work-commit is not checked against the card's name because it
+    takes none: it refuses outright unless it is called from inside the card's own working
+    copy, which is a stronger scoping than reading a name off the command line.
 
     Before this, the sentence every ceiling printed named a Write/Edit of log.md as the only
     call still getting through, and that call could not be made by any road at all: the
@@ -2105,20 +1884,37 @@ else:
     transcript_path = data.get("transcript_path")
 run_stats = run_transcript_stats(transcript_path)
 
-# --- 8. CONTEXT SIZE CEILING (HRN-2.C): every role -------------------------------------
+# --- 8. CONTEXT SIZE CEILING (HRN-2.C, given a soft threshold by HRN-82.A.3): every role ----
 CONTEXT_SIZE_CEILING = 300_000
+CONTEXT_SOFT_CEILING = 250_000
 
-if run_stats is not None and run_stats["last_context"] is not None and \
-        run_stats["last_context"] > CONTEXT_SIZE_CEILING:
-    if is_state_recording_escape_call():
-        allow_and_exit()
-    deny_and_exit(
-        "Blocked by work-gate's CONTEXT SIZE rule: this agent's own most recent turn held "
-        "%d tokens of context, past the %d ceiling. «Запиши состояние в лог и остановись.» "
-        "A fresh executor picks the card up from there with an empty context.\n%s" %
-        (run_stats["last_context"], CONTEXT_SIZE_CEILING, ceiling_escape_sentence()),
-        "work-gate.context-size"
-    )
+if run_stats is not None and run_stats["last_context"] is not None:
+    last_context = run_stats["last_context"]
+    if last_context > CONTEXT_SIZE_CEILING:
+        if is_state_recording_escape_call():
+            allow_and_exit()
+        deny_and_exit(
+            "Blocked by work-gate's CONTEXT SIZE rule: this agent's own most recent turn held "
+            "%d tokens of context, past the %d ceiling. «Запиши состояние в лог и остановись.» "
+            "A fresh executor picks the card up from there with an empty context.\n%s" %
+            (last_context, CONTEXT_SIZE_CEILING, ceiling_escape_sentence()),
+            "work-gate.context-size"
+        )
+    elif last_context > CONTEXT_SOFT_CEILING:
+        # HRN-82.A.3: this is the replacement for the phase boundary's own way of letting a
+        # run stop itself, in the one place a warning on an "allow" decision actually reaches
+        # the model — hookSpecificOutput.additionalContext, never permissionDecisionReason.
+        # Never refuses: this branch only ever adds text to an allow.
+        allow_and_exit(
+            "work-gate's CONTEXT SIZE rule: this agent's own most recent turn held %d tokens "
+            "of context, past the %d soft ceiling and %d short of the %d hard one, where "
+            "every call is refused except the ones that record where the run stopped. Close "
+            "the step you are on, write it to log.md with bin/work-note, and — if the run is "
+            "actually ending — write a handoff too, rather than waiting to be cut off. «Допиши "
+            "передачу и остановись», but of your own will, while there is still room to." %
+            (last_context, CONTEXT_SOFT_CEILING, CONTEXT_SIZE_CEILING - last_context,
+             CONTEXT_SIZE_CEILING)
+        )
 
 # --- 9. SPEND CEILING (HRN-2.C): role "executor" only, counted on this run's own
 # transcript alone, never accumulated across the card ------------------------------------
@@ -2280,7 +2076,7 @@ def reference_marker_path(aid):
 
 def looks_like_save_call(command):
     """True for the shapes an executor saves finished work with — the two commands of this
-    system, and the two bare git subcommands the phase boundary already exempts."""
+    system, and the two bare git subcommands PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS names."""
     if re.search(r'(^|\s)(\S*/)?bin/work-(note|commit)\b', command):
         return True
     return git_subcommand(command) in PHASE_BOUNDARY_SAVE_GIT_SUBCOMMANDS
