@@ -220,13 +220,22 @@
 #     inside it that happens to read "git status" or "$ git commit -m x" as PROSE is never
 #     mistaken for a real invocation.
 #
-#  7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): applies only to role "executor",
-#     once card_dir is known. Twenty calls in a row without a Write/Edit of this card's own
-#     log.md refuse the next call — "Двадцать вызовов без записи в log.md" — with every call
-#     that still gets through named: a Write/Edit of log.md itself, or a single, unchained
-#     Bash call running bin/work-note, either of which resets the count to zero, since
-#     bin/work-note IS that write, only spelled through a command rather than through the
-#     tool directly.
+#  7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B, narrowed 2026-09-01): applies only
+#     to role "executor", once card_dir is known. Twenty calls in a row without a Write/Edit
+#     of this card's own log.md refuse the next call — "Двадцать вызовов без записи в
+#     log.md". Two kinds of call still get through, and only one of them resets the count.
+#     A Write/Edit of log.md itself, or a single, unchained Bash call running bin/work-note
+#     WITH A STEP NAME, resets the count to zero: that call records a closed step, so the
+#     run has actually moved. A bin/work-note --handoff call passes the ceiling too — a run
+#     that has hit it must always be able to record its own state — but resets nothing,
+#     because a handoff records that the run is stopping, not that work was done.
+#     Before this narrowing --handoff reset the count like any other bin/work-note call, so
+#     an executor that hit the ceiling bought itself twenty more calls with a call that
+#     built nothing. Measured 2026-09-01 on HRN-63.C: six consecutive --handoff calls did
+#     exactly that, the first of them saying "investigation phase, no code changed yet" in
+#     its own text. The reset is decided before the command runs, so a bin/work-note that
+#     goes on to refuse itself still resets — narrowing the reset to the step-naming form
+#     is what keeps that harmless, since closing a step is the thing the run is for.
 #
 #  8. CONTEXT SIZE CEILING (HRN-2.C): applies to every subagent call carrying a brief, any
 #     role — "агента", not "исполнителя", is the word project.md's own paragraph uses. The
@@ -1607,24 +1616,32 @@ if brief.get("role") == "executor" and card_dir is not None:
         tool_name in ("Write", "Edit") and fp is not None and
         os.path.realpath(fp) == os.path.realpath(os.path.join(card_dir, "log.md"))
     )
+    log_command = command_of(tool_input)
     is_work_log_call = tool_name == "Bash" and (
-        bash_names(command_of(tool_input), "work-log") or
-        bash_names(command_of(tool_input), "work-note"))
+        bash_names(log_command, "work-log") or
+        bash_names(log_command, "work-note"))
+    # A --handoff call passes this ceiling but resets nothing: it records that the run is
+    # stopping, not that a step closed. Only a step-naming bin/work-note call — or a direct
+    # Write/Edit of log.md — says the run actually moved, and only that resets the count.
+    is_handoff_call = is_work_log_call and "--handoff" in (log_command or "")
     count_path = log_call_count_path(agent_id)
-    if is_this_cards_log_write_now or is_work_log_call:
+    if is_this_cards_log_write_now or (is_work_log_call and not is_handoff_call):
         write_log_call_count(count_path, 0)
+    elif is_handoff_call:
+        pass
     else:
         n = read_log_call_count(count_path) + 1
         write_log_call_count(count_path, n)
         if n >= LOG_CALL_CEILING:
             deny_and_exit(
                 "Blocked by work-gate's LOG CEILING rule: %d calls have passed since this "
-                "executor last wrote to this card's own log.md — record state there now. "
-                "The only call that still gets through is a Write/Edit of log.md, or a Bash "
-                "call running bin/work-note, which resets this count "
-                "to zero. This ceiling does not end the run: it exists so that a run cut "
-                "short stays resumable, so write the state and go straight on with the work. "
-                "«Запиши состояние в лог и работай дальше.»" % n,
+                "executor last closed a step in this card's own log.md. Two calls still get "
+                "through. A Write/Edit of log.md, or a Bash call running bin/work-note with "
+                "a step name, records a closed step and resets this count to zero — write "
+                "one and go straight on with the work. A bin/work-note --handoff call also "
+                "gets through but resets nothing: it says the run is stopping, not that work "
+                "was done, so after writing one, end the run. «Закрой шаг записью в лог и "
+                "работай дальше — или запиши передачу и остановись.»" % n,
                 "work-gate.log-ceiling"
             )
 

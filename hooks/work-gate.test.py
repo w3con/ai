@@ -117,6 +117,51 @@ def reference_cases(base_env, base):
     return failures
 
 
+def ceiling_cases(base_env, base):
+    """The LOG-WRITE CEILING (rule 7) resets only on a call that records a closed step.
+    A --handoff call passes the ceiling — a run that has hit it must always be able to
+    record its own state — but resets nothing, so the very next ordinary call is refused
+    again. Before this was narrowed, --handoff reset the count like any other work-note
+    call, and an executor bought itself twenty fresh calls with a call that built nothing
+    (measured 2026-09-01 on HRN-63.C, six consecutive --handoff calls).
+    """
+    work_root, state, card_dir = build_tree(os.path.join(base, "ceiling"))
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+
+    ordinary = ("Bash", {"command": "go test ./..."})
+    handoff = ("Bash", {"command": 'bin/work-note TST-1 --handoff TST-1.A "состояние"'})
+    step_note = ("Bash", {"command": 'bin/work-note TST-1 TST-1.A.1 "состояние"'})
+
+    failures = 0
+
+    def expect(title, tool, ti, wanted):
+        got, reason = decide(env, tool, ti)
+        ok = got == wanted
+        print(("  ok   " if ok else "  FAIL ") + title + "  → " + str(got))
+        if not ok:
+            print("        ожидалось " + wanted + "; текст: " + (reason or "")[:200])
+        return 0 if ok else 1
+
+    # 19 ordinary calls stay under the ceiling of 20; the 20th is the one refused.
+    under = 0
+    for _ in range(19):
+        got, _ = decide(env, *ordinary)
+        if got != "allow":
+            under += 1
+    ok = under == 0
+    print(("  ok   " if ok else "  FAIL ") + "19 обычных вызовов проходят  → allow")
+    failures += 0 if ok else 1
+
+    failures += expect("20-й обычный вызов упирается в потолок", *ordinary, "deny")
+    failures += expect("--handoff проходит потолок", *handoff, "allow")
+    failures += expect("после --handoff обычный вызов снова отказан", *ordinary, "deny")
+    failures += expect("запись с именем шага проходит", *step_note, "allow")
+    failures += expect("после записи шага обычный вызов проходит", *ordinary, "allow")
+    return failures
+
+
 def main():
     base = tempfile.mkdtemp(prefix="gate-boundary-")
     work_root, state, card_dir = build_tree(base, phase_closed=True)
@@ -177,6 +222,9 @@ def main():
 
     print("\nСправочник команд:")
     failures += reference_cases(env, base)
+
+    print("\nПотолок вызовов без записи в журнал:")
+    failures += ceiling_cases(env, base)
 
     print("\n%d случаев не прошли" % failures)
     return 1 if failures else 0
