@@ -125,6 +125,20 @@
 #     that runs bin/work-agent-brief itself, since that is how the very first brief gets
 #     written at all.
 #
+#  4a. READING ROLE IS READ-ONLY: a subagent whose brief names one of the four reading roles
+#     — critic, mapper, tracer, acceptor — is refused every Bash call. The one call that
+#     would be legitimate, bin/work-agent-brief itself, never reaches this rule: rule 4 above
+#     allows and exits on it long before. When one of bin/work-critic, bin/work-map,
+#     bin/work-trace or bin/work-accept raises its own reading agent, it hands
+#     `--allowedTools "Bash(bin/work-agent-brief *)" Read Grep Glob` and the reading really is
+#     read-only. When rules.md's own `agents-always-foreground` sends that same raise back to
+#     the live session instead, the session raises the agent definition agents/work-reader.md,
+#     whose `tools:` line cannot express that scope: a parenthesised specifier there grants the
+#     whole Bash tool rather than the one command it names, and dropping Bash altogether would
+#     strand the agent before its own mandatory first call. So the scope is enforced here,
+#     where it holds for both paths, and an acceptor that runs the very checks it is told it
+#     never runs is refused instead of believed.
+#
 #  5. PHASE BOUNDARY (HRN-2.D, rewritten by HRN-2.F): applies only to a subagent whose brief
 #     names role "executor" — every other role is never judged by this rule at all. HRN-2.D's
 #     own reading — "the current phase is the first phase in plan.md's own order that still
@@ -923,6 +937,25 @@ if brief is None:
         "is valid JSON naming a role and a card). «Нет файла — нет запуска.»" %
         (agent_brief_path(agent_id), session_brief_path(session_id)),
         "work-gate.no-brief-no-launch"
+    )
+
+# --- 4a. READING ROLE IS READ-ONLY: the four reading roles get no Bash call at all -------
+# The brief call itself never arrives here — rule 4's own is_brief_self_write branch allows
+# and exits on it above — so every Bash call that reaches this line is a second one, and a
+# reading agent has no second one. Enforced here rather than in the agent's own `tools:`
+# line, which cannot hold a scoped Bash specifier: see rule 4a's own paragraph in the header.
+READING_ROLES = ("critic", "mapper", "tracer", "acceptor")
+
+if brief.get("role") in READING_ROLES and tool_name == "Bash":
+    deny_and_exit(
+        "Blocked by work-gate's READING ROLE IS READ-ONLY rule: role \"%s\" reads and never "
+        "runs anything. The one Bash call this role is allowed, bin/work-agent-brief, has "
+        "already happened — every later one is refused, this one included: %s. Read the "
+        "sources with Read, Glob and Grep and answer the question you were raised for; you "
+        "never run a check yourself, and you never see a check's output. Whatever raised "
+        "you runs every check with its own hand, after reading your answer." %
+        (brief.get("role"), command_of(tool_input)),
+        "work-gate.reading-role-read-only"
     )
 
 # --- 5. PHASE BOUNDARY: an executor whose current phase has no open steps left is refused
