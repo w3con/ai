@@ -1018,6 +1018,12 @@ READ_ONLY_PROGRAMS = frozenset((
     "grep", "egrep", "fgrep", "rg", "find", "ls", "cat", "head", "tail", "wc", "nl",
     "sort", "uniq", "cut", "tr", "basename", "dirname", "realpath", "stat", "file",
     "echo", "true", "pwd", "test", "diff", "comm", "md5", "shasum", "date", "sed",
+    # bin/websearch reads the web and writes nothing outside its own cache under
+    # ~/.cache. Absent from this list, a reading agent asked to look something up had
+    # no way to run the provider chain at all, and fell back to the built-in WebSearch
+    # tool, which costs many times more — measured 2026-09-06, on the research agent
+    # raised for VWR-5.
+    "websearch",
 ))
 # Written forms that turn a reading program into a writing one, or that reach a program this
 # list never vetted. Matched on the raw command before it is split, so no quoting trick in a
@@ -1059,7 +1065,8 @@ if brief.get("role") in READING_ROLES and tool_name == "Bash":
         "Searching is allowed and is how you are meant to work. These programs pass, alone "
         "or piped into one another: grep, rg, find, ls, cat, head, tail, wc, nl, sort, "
         "uniq, cut, tr, sed, diff, basename, dirname, realpath, stat, file, echo, pwd, "
-        "test. Redirection, command substitution, xargs, tee, sed -i and find -exec are "
+        "test, and ~/Dev/ai/bin/websearch — which is how you search the web, never the "
+        "built-in WebSearch tool. Redirection, command substitution, xargs, tee, sed -i and find -exec are "
         "refused, and so is every program not on that list. Note that the Grep and Glob "
         "tools do not exist here: grep and find through this Bash tool are their "
         "replacement, not a workaround.\n"

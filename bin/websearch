@@ -77,6 +77,15 @@ HTTP_TIMEOUT_SECONDS = 10
 CACHE_DIR = Path.home() / ".cache" / "websearch"
 CACHE_TTL_SECONDS = 15 * 60
 
+# The one file hooks/websearch-gate.sh reads. Written only when every
+# provider in the chain has failed, it is the sole thing that lets the
+# built-in WebSearch tool run at all: the gate refuses that tool unless this
+# file exists, was written less than EXHAUSTED_TTL_SECONDS ago, and names
+# the same query the tool is about to run. Written on every exhausted run,
+# whatever --no-cache says, because it is not a cache of results.
+EXHAUSTED_PATH = CACHE_DIR / "exhausted.json"
+EXHAUSTED_TTL_SECONDS = 15 * 60
+
 # Minimum seconds between two requests to the same provider. DuckDuckGo's
 # number is the floor of a range: a random 0-1s jitter is added to it on
 # every wait, both to avoid a perfectly-periodic request pattern (which
@@ -99,6 +108,38 @@ RETRY_BACKOFF_BASE_SECONDS = 0.5
 
 def log(message):
     print(message, file=sys.stderr)
+
+
+def normalize_query(query):
+    return " ".join(query.lower().split())
+
+
+def write_exhausted(query, failures):
+    """Record that the whole provider chain failed for this query. This file is
+    the only thing that lets the built-in WebSearch tool run: hooks/websearch-gate.sh
+    refuses that tool unless this file is fresh and names the same query."""
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(EXHAUSTED_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                {"query": normalize_query(query), "at": time.time(), "failures": failures},
+                f, ensure_ascii=False,
+            )
+    except OSError as e:
+        log(f"websearch: could not write {EXHAUSTED_PATH}: {e}")
+
+
+def announce(failures):
+    """Name every provider that did not work, on a run that succeeded anyway as
+    much as on one that did not. A provider failing silently costs a little on
+    every later call, and nobody ever finds out why."""
+    if not failures:
+        return
+    log("")
+    log("ВНИМАНИЕ: часть цепочки поиска не сработала —")
+    for line in failures:
+        log("  " + line)
+    log("")
 
 
 def load_dotenv(candidates):
@@ -501,6 +542,9 @@ def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     query = " ".join(args.query)
     dotenv = load_dotenv(ENV_CANDIDATES)
+    # One line per provider that did not answer, in chain order. Printed by
+    # announce() at the end of every run, successful or not.
+    failures = []
 
     for provider in PROVIDERS:
         name = provider["name"]
@@ -511,6 +555,7 @@ def main(argv=None):
             api_key = get_key(key_env, dotenv)
             if not api_key:
                 log(f"{name}: skipped, no {key_env} in .env or environment")
+                failures.append(f"{name}: ключа {key_env} нет ни в .env, ни в окружении")
                 continue
 
         # Cache is checked before throttling, deliberately: a cache hit
@@ -523,6 +568,7 @@ def main(argv=None):
             if cached_payload is not None:
                 cached_payload = dict(cached_payload)
                 cached_payload["cached"] = True
+                announce(failures)
                 emit(cached_payload, args)
                 return 0
 
@@ -532,6 +578,7 @@ def main(argv=None):
             results = provider["func"](query, args.count, api_key)
         except Exception as e:
             log(f"{name}: unexpected error: {e}")
+            failures.append(f"{name}: сорвался с ошибкой — {e}")
             continue
 
         if results is None:
@@ -539,10 +586,12 @@ def main(argv=None):
             # the specific cause — HTTP error, network error, retries
             # exhausted, bad JSON. Logging "zero results" on top of that
             # would be a second message for the one same failure.
+            failures.append(f"{name}: не ответил (причина названа выше в этом же выводе)")
             continue
 
         if not results:
             log(f"{name}: zero results")
+            failures.append(f"{name}: ответил, но не нашёл ничего")
             continue
 
         result = {
@@ -553,10 +602,16 @@ def main(argv=None):
         }
         if not args.no_cache:
             _save_cache(cache_key, result)
+        announce(failures)
         emit(result, args)
         return 0
 
     log("websearch: all providers exhausted with no results")
+    failures.append("вся цепочка исчерпана — ни один провайдер не дал результата")
+    announce(failures)
+    write_exhausted(query, failures)
+    log("websearch: встроенный поиск теперь разрешён на этот же запрос в течение "
+        f"{EXHAUSTED_TTL_SECONDS // 60} минут — скажи об этом владельцу в ответе.")
     return 3
 
 

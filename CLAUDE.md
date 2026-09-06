@@ -84,7 +84,11 @@ Skills live under `skills/`, one folder per skill, with their reference table in
 
 ## Web search tool
 
-`bin/websearch` in this repository is a search script, called directly or through the `web-search` skill whenever Alex says "погугли" or "search the web". It tries providers in order — Tavily, then Brave, then DuckDuckGo — caches each answer for fifteen minutes so a repeated query never re-hits the network, and reports what happened through its exit code: `0` success, `2` bad arguments, `3` every provider failed (the caller then falls back to the built-in `WebSearch` tool).
+**Every search, whoever runs it, goes through `bin/websearch` first, and a provider that fails is named out loud rather than skipped in silence.** This holds for a search you run yourself and for one any subagent you raise runs — an executor, a critic, a research reader, all of them.
+
+`bin/websearch` in this repository is that script, called directly or through the `web-search` skill whenever Alex says "погугли" or "search the web". It tries providers in order — Tavily, then Brave, then DuckDuckGo — caches each answer for fifteen minutes so a repeated query never re-hits the network, and reports what happened through its exit code: `0` success, `2` bad arguments, `3` every provider failed. When any provider in the chain did not answer, it prints to stderr a block headed `ВНИМАНИЕ` naming each one and why. **Repeat that block's lines to Alex in your own answer, in one sentence.** A provider that fails silently costs a little on every later call and nobody ever finds out why.
+
+The built-in `WebSearch` tool is the last resort and costs many times what the chain costs. `hooks/websearch-gate.py` enforces that rather than merely stating it: it refuses the built-in tool unless `bin/websearch` has just exited `3` on the very same query, which is the only thing that writes `~/.cache/websearch/exhausted.json`. Its refusal names the exact command to run instead, and the allowance it gives after an exhausted chain tells the caller to report the failure. `CLAUDE_WEBSEARCH_BYPASS=1` is the deliberate escape. `hooks/work-gate.sh` carries `websearch` on its read-only allowlist, so a critic, a tracer or an acceptor can run the chain too — before 2026-09-06 it could not, and a research reader raised for a Validité card fell back to the built-in search for want of any other way to look something up.
 
 ## Memory — other projects' rules only, not a source for this one
 
