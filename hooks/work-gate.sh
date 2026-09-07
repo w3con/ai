@@ -929,7 +929,15 @@ if not agent_id:
     allow_and_exit(warn_reason)
 
 # --- 4. no brief, no launch (one exemption: writing the very first brief) -------------
-KNOWN_ROLES = {"critic", "executor", "tracer", "acceptor"}
+KNOWN_ROLES = {"critic", "executor", "tracer", "acceptor", "reader"}
+# "reader" is the one role that names no card: a read-only agent raised to gather or to look
+# something up belongs to no card at all, and before it existed such an agent was refused
+# every tool call it made, this hook's own read-only allowlist included, because rule 4 below
+# runs before that allowlist is ever reached — measured 2026-09-07 on a market-research agent
+# that could not run bin/websearch, could not Read a file, and could not reach the documented
+# CLAUDE_GATE_BYPASS escape either, since that variable is read from the session's own
+# environment and never from the command line a blocked agent is trying to run.
+CARDLESS_ROLES = {"reader"}
 
 def agent_brief_path(aid):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(aid))
@@ -953,9 +961,11 @@ if is_brief_self_write:
     m_role = re.search(r'--role[= ]+(\S+)', command)
     m_card = re.search(r'--card[= ]+(\S+)', command)
     m_phase = re.search(r'--phase[= ]+(\S+)', command)
-    if m_role and m_card and m_role.group(1) in KNOWN_ROLES and agent_id:
+    role_named = m_role.group(1) if m_role else None
+    card_given = bool(m_card) or (role_named in CARDLESS_ROLES)
+    if m_role and card_given and role_named in KNOWN_ROLES and agent_id:
         os.makedirs(BRIEFS_DIR, exist_ok=True)
-        brief_obj = {"role": m_role.group(1), "card": m_card.group(1)}
+        brief_obj = {"role": role_named, "card": m_card.group(1) if m_card else ""}
         if m_phase:
             brief_obj["phase"] = m_phase.group(1)
         try:
@@ -977,7 +987,7 @@ def read_brief(aid, sid):
         if not isinstance(b, dict):
             continue
         role, card = b.get("role"), b.get("card")
-        if role and card:
+        if role and (card or role in CARDLESS_ROLES):
             # "phase" (HRN-2.F, kept on disk after HRN-82.A even though no rule in this file
             # judges it any more — HRN-82.C.2 is the step that removes --phase from the brief
             # itself): the plan phase this run names, purely informational now, still used
@@ -1002,7 +1012,7 @@ if brief is None:
 # and exits on it above — so every Bash call that reaches this line is a second one, and a
 # reading agent has no second one. Enforced here rather than in the agent's own `tools:`
 # line, which cannot hold a scoped Bash specifier: see rule 4a's own paragraph in the header.
-READING_ROLES = ("critic", "tracer", "acceptor")
+READING_ROLES = ("critic", "tracer", "acceptor", "reader")
 
 # The Grep and Glob tools do not exist in this client build: a subagent that calls either is
 # told "No such tool available", with the error itself naming grep and find via Bash as the
@@ -1077,6 +1087,14 @@ if brief.get("role") in READING_ROLES and tool_name == "Bash":
         (brief.get("role"), command_of(tool_input)),
         "work-gate.reading-role-read-only"
     )
+
+# --- 4b. THE CARDLESS READING ROLE STOPS HERE: every rule below this line is scoped to a
+# card — its folder, its log, its sanction, its working copy — and a "reader" names none, so
+# each of them would either resolve nothing or refuse a legitimate call. Its Bash calls have
+# already been judged by rule 4a above, on exactly the same read-only allowlist every other
+# reading role gets; what passes here is everything else it does, Read above all.
+if brief.get("role") in CARDLESS_ROLES:
+    allow_and_exit("work-gate.cardless-reading-role")
 
 # --- shared shell-command parsing, used by rule 6b, by rule 13's looks_like_save_call(), and
 # by matched_log_call_kind() just below (HRN-82.A.1: this used to sit inside the phase
