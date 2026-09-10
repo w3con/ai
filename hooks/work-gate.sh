@@ -323,7 +323,7 @@
 # and how many times in a row). Rules 8-10 keep no state of their own either — each re-reads
 # this run's own transcript fresh on every call.
 #
-# TEST OVERRIDES, read only by bin/work-refusals, never present in a real deployed session:
+# TEST OVERRIDES, never present in a real deployed session:
 #   WORK_GATE_STATE_DIR            overrides the whole state tree above.
 #   WORK_GATE_WORK_ROOT            overrides the work root find_work_root() resolves a card
 #                                   id against (the directory holding the "harness" and
@@ -366,8 +366,8 @@ import sys
 # real repository path directly. Without resolving through the directory symlink here, the
 # self-edit exemption below (which compares this value against the file_path an Edit/Write
 # call names, always the real repository path) would never match a live invocation, only
-# bin/work-refusals's own synthetic cases, which run bash directly against the real path
-# and so never exercised the symlink at all (found and fixed in HRN-2.D).
+# a synthetic case running bash directly against the real path, which never exercises the
+# symlink at all (found and fixed in HRN-2.D).
 self_path  = os.path.realpath(sys.argv[1])
 stdin_data = sys.argv[2]
 
