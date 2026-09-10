@@ -590,7 +590,7 @@ def bash_names(command, script_basename):
 # to resolve a card's own folder.
 CARD_KINDS = ("harness", "timeline")
 
-def find_work_root():
+def find_work_root(card_id=None):
     """The directory holding the "harness" and "timeline" kind folders. A card's own folder
     always lives in the shared checkout, never inside a linked worktree's own copy
     (ai/harness/system/project.md, "Папка карточки всегда живёт в общем каталоге, а не в
@@ -599,10 +599,21 @@ def find_work_root():
     from whatever repository copy this call's own cwd happens to sit in. Returns None when
     that cannot be resolved (cwd is not inside a git working tree at all, or git itself is
     unavailable), in which case rule 2b's own card-closure check, and every later rule that
-    needs card_dir, are skipped rather than denied."""
+    needs card_dir, are skipped rather than denied.
+
+    PRC-1.D.1: when `card_id` is given and this session wrote a sanction for it carrying its
+    own "work_root" field (bin/work-handover/bin/work-resume, PRC-1.C.3), that field wins
+    over the git-plumbing resolution below — the one case that resolution gets wrong, a card
+    whose folder lives in a different repository than the one this call's own cwd sits in
+    (Pilier's own coordinator, sitting in `blockchain`, judging a card whose folder is in the
+    private `cloud`). WORK_GATE_WORK_ROOT still wins over both, exactly as before."""
     override = os.environ.get("WORK_GATE_WORK_ROOT")
     if override:
         return override
+    if card_id:
+        sanction = matching_sanction(card_id)
+        if sanction and sanction.get("work_root"):
+            return sanction["work_root"]
     try:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -646,10 +657,20 @@ def find_card_worktree_root(card_id):
     other git-plumbing lookup in this file already carries. None when no such branch is found
     at all — an ordinary case for a role other than executor, and for an executor whose
     brief names a card this session never actually ran bin/work-session for; the caller then
-    skips this rule, since it has nothing to judge a boundary against. Used by rule 6a below."""
+    skips this rule, since it has nothing to judge a boundary against. Used by rule 6a below.
+
+    PRC-1.D.2: when this session wrote a sanction for card_id carrying its own
+    "worktree_path" field (PRC-1.C.3), that field wins over the git-plumbing resolution
+    below, the same order find_work_root() above now follows — a card whose working copy was
+    cut from a repository this call's own cwd is not even inside has no branch for
+    `git worktree list` here to find at all. WORK_GATE_CARD_WORKTREE_ROOT still wins over
+    both, exactly as before."""
     override = os.environ.get("WORK_GATE_CARD_WORKTREE_ROOT")
     if override:
         return override
+    sanction = matching_sanction(card_id)
+    if sanction and sanction.get("worktree_path"):
+        return sanction["worktree_path"]
     try:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -698,6 +719,26 @@ def read_sanctions(sid):
             result.append(obj)
     return result
 
+def matching_sanction(card_id):
+    """PRC-1.D: the newest sanction this session ever wrote for card_id — read via
+    read_sanctions(session_id), sorted the same "time" field ordering rule 2's own spawn
+    match already uses — or None when this session carries no session_id at all, no sanction
+    names this exact card, or the read itself fails for any reason. find_work_root() and
+    find_card_worktree_root() call this to read the two corners bin/work-handover and
+    bin/work-resume record on a sanction (PRC-1.C.3, "work_root" and "worktree_path") for a
+    card whose folder and whose working copy live in two different repositories, neither of
+    which this call's own cwd need actually sit in."""
+    if not card_id:
+        return None
+    try:
+        candidates = [s for s in read_sanctions(session_id) if s.get("card") == card_id]
+    except Exception:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c.get("time") or 0, reverse=True)
+    return candidates[0]
+
 TERMINAL_STATE_FILES = ("done.md", "cancelled.md", "rejected.md", "question.md")
 
 def sanction_card_is_terminal(card_id):
@@ -709,7 +750,7 @@ def sanction_card_is_terminal(card_id):
     raises) — read as "not terminal" by the caller, since a bug here must never manufacture
     a denial out of a card name rule 2 already found sanctioned and matched in the prompt."""
     try:
-        root = find_work_root()
+        root = find_work_root(card_id)
         if root is None:
             return None
         card_dir = find_card_dir(root, card_id)
@@ -759,7 +800,7 @@ def owned_card_is_closed(card_id):
     which second_task_deny_reason below must treat as a permission, never as grounds to
     deny, exactly like every other reading error this rule already tolerates."""
     try:
-        root = find_work_root()
+        root = find_work_root(card_id)
         if root is None:
             return None
         card_dir = find_card_dir(root, card_id)
@@ -1197,7 +1238,7 @@ def matched_log_call_kind():
     m = PHASE_BOUNDARY_LOG_CALL_RE.match(command)
     return m.group(2) if m else None
 
-work_root = find_work_root()
+work_root = find_work_root(brief.get("card"))
 card_dir = find_card_dir(work_root, brief["card"]) if work_root else None
 
 # A brief naming a card whose folder cannot be found is refused rather than let through.
