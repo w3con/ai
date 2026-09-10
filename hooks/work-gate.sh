@@ -500,6 +500,15 @@ def deny_and_exit(reason, rule):
 if os.environ.get("CLAUDE_GATE_BYPASS") == "1":
     allow_and_exit()
 
+# Moved above the scope check (PRC-1.D.5): these three depend only on environment
+# variables, never on the payload, so computing them here costs the scope check nothing and
+# lets its own PRC-1.D.5 sanction-reading step use SANCTIONS_DIR without waiting for the
+# payload to be parsed.
+STATE_DIR = os.environ.get("WORK_GATE_STATE_DIR") or \
+    os.path.join(os.environ.get("TMPDIR", "/tmp"), "claude-work-gate")
+BRIEFS_DIR = os.path.join(STATE_DIR, "briefs")
+SANCTIONS_DIR = os.path.join(STATE_DIR, "sanctions")
+
 # --- 1b. scope: only the repository that carries the work-management system ------------
 # This gate enforces the card system of the validite-app repository, as this file's own
 # header says: bin/work-handover, bin/work-resume, and the card folders under
@@ -519,7 +528,42 @@ if os.environ.get("CLAUDE_GATE_BYPASS") == "1":
 # and deliberately so: failing closed on a scope question would refuse every tool in every
 # project that this gate was never meant to govern, which is the very failure being fixed
 # here. WORK_GATE_SCOPE=on|off forces the answer, for the test suite and for debugging.
-def work_management_repo():
+#
+# PRC-1.D.5: a third step, tried only when the structural test above answers "no" — a
+# session this conversation already sanctioned a card for (bin/work-handover/bin/work-resume,
+# PRC-1.C.3) stays under the gate even while its own cwd sits in a repository that carries no
+# ai/ directory at all, e.g. Pilier's own coordinator or executor, sitting in the code
+# repository `blockchain`, judging or working a card whose folder lives in the private
+# `cloud` repository. This step needs only the session id — never the card name or the
+# spawn's own prompt text — so it is read off `_scope_session_id`, filled in by a throwaway,
+# best-effort JSON parse run just below, before the real, fail-closed parse of stdin_data
+# that the rest of this file already depends on; that real parse is untouched, in its own
+# place, with its own behaviour. The path on disk still has to carry `harness` or `timeline`
+# as a real directory (not a symlink) — a sanction alone never proves the repository it names
+# actually holds a card system, only that some earlier call believed it did. Any error
+# reading a sanction here means False, i.e. today's behaviour: a session with no sanction at
+# all behaves exactly as before, and no foreign repository is pulled under the gate by this
+# step alone.
+def _session_has_work_root_sanction(sid):
+    try:
+        safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(sid)) if sid else "_no_session_id_"
+        d = os.path.join(SANCTIONS_DIR, safe)
+        for name in os.listdir(d):
+            if not name.endswith(".json"):
+                continue
+            with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            if isinstance(obj, dict) and obj.get("work_root"):
+                root = obj["work_root"]
+                for kind in ("harness", "timeline"):
+                    d2 = os.path.join(root, kind)
+                    if os.path.isdir(d2) and not os.path.islink(d2):
+                        return True
+    except Exception:
+        return False
+    return False
+
+def work_management_repo(session_id_for_scope):
     override = os.environ.get("WORK_GATE_SCOPE")
     if override in ("on", "off"):
         return override == "on"
@@ -529,19 +573,32 @@ def work_management_repo():
             capture_output=True, text=True, timeout=5,
         )
     except Exception:
-        return False
-    if result.returncode != 0:
-        return False
-    root = result.stdout.strip()
-    if not root:
-        return False
-    for kind in ("harness", "timeline"):
-        d = os.path.join(root, "ai", kind)
-        if not os.path.isdir(d) or os.path.islink(d):
-            return False
-    return True
+        result = None
+    if result is not None and result.returncode == 0:
+        root = result.stdout.strip()
+        if root:
+            ok = True
+            for kind in ("harness", "timeline"):
+                d = os.path.join(root, "ai", kind)
+                if not os.path.isdir(d) or os.path.islink(d):
+                    ok = False
+                    break
+            if ok:
+                return True
+    return _session_has_work_root_sanction(session_id_for_scope)
 
-if not work_management_repo():
+# Throwaway, best-effort parse — its only purpose is the session id the scope check above
+# needs. The real, fail-closed parse of stdin_data below is untouched and stays the one every
+# other rule in this file relies on.
+try:
+    _scope_data = json.loads(stdin_data)
+    if not isinstance(_scope_data, dict):
+        _scope_data = {}
+except Exception:
+    _scope_data = {}
+_scope_session_id = _scope_data.get("session_id") or ""
+
+if not work_management_repo(_scope_session_id):
     allow_and_exit()
 
 # --- parse stdin (fail closed) --------------------------------------------------------
@@ -556,11 +613,6 @@ tool_name  = data.get("tool_name") or ""
 tool_input = data.get("tool_input") or {}
 agent_id   = data.get("agent_id")
 session_id = data.get("session_id") or ""
-
-STATE_DIR = os.environ.get("WORK_GATE_STATE_DIR") or \
-    os.path.join(os.environ.get("TMPDIR", "/tmp"), "claude-work-gate")
-BRIEFS_DIR = os.path.join(STATE_DIR, "briefs")
-SANCTIONS_DIR = os.path.join(STATE_DIR, "sanctions")
 
 # A card's own log.md, under the new folder shape ai/<kind>/<epic>/<ID>_<slug>/log.md, kind
 # being "harness" or "timeline" (ai/harness/system/project.md, "Эпик"). Only log.md is
