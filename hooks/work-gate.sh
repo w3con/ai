@@ -666,6 +666,13 @@ def find_work_root(card_id=None):
         sanction = matching_sanction(card_id)
         if sanction and sanction.get("work_root"):
             return sanction["work_root"]
+        # HRN-89.B.3: a role with no sanction at all yet (a critic reading before any
+        # handover ever ran for this card) still carries its own work_root, once this same
+        # call's own --root has been written into this agent's own brief by the
+        # is_brief_self_write branch below.
+        agent_wr = _agent_brief_work_root(card_id, agent_id)
+        if agent_wr:
+            return agent_wr
     try:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
@@ -1040,6 +1047,23 @@ def session_brief_path(sid):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(sid)) if sid else "_no_session_id_"
     return os.path.join(BRIEFS_DIR, "session-" + safe + ".json")
 
+def _agent_brief_work_root(card_id, aid):
+    """HRN-89.B.3: this call's own per-agent brief, read directly — a role with no sanction
+    at all (a critic reading before any handover exists) still carries its own work_root,
+    since the hook itself writes that field into this agent's own brief the moment it sees
+    the --role/--card/--root call go by (is_brief_self_write branch below). Returns None on
+    any failure or mismatch — never raises."""
+    if not aid:
+        return None
+    try:
+        with open(agent_brief_path(aid), "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception:
+        return None
+    if isinstance(obj, dict) and obj.get("card") == card_id:
+        return obj.get("work_root")
+    return None
+
 is_brief_self_write = tool_name == "Bash" and bash_names(command_of(tool_input), "work-agent-brief")
 if is_brief_self_write:
     # The one moment this hook writes state of its own accord rather than only reading it:
@@ -1054,6 +1078,7 @@ if is_brief_self_write:
     m_role = re.search(r'--role[= ]+(\S+)', command)
     m_card = re.search(r'--card[= ]+(\S+)', command)
     m_phase = re.search(r'--phase[= ]+(\S+)', command)
+    m_root = re.search(r'--root[= ]+(\S+)', command)
     role_named = m_role.group(1) if m_role else None
     card_given = bool(m_card) or (role_named in CARDLESS_ROLES)
     if m_role and card_given and role_named in KNOWN_ROLES and agent_id:
@@ -1061,6 +1086,12 @@ if is_brief_self_write:
         brief_obj = {"role": role_named, "card": m_card.group(1) if m_card else ""}
         if m_phase:
             brief_obj["phase"] = m_phase.group(1)
+        if m_root:
+            # HRN-89.B.1/B.3: this agent's own work root, named outright on the very call
+            # that briefs it — the one field find_work_root() reads back through
+            # _agent_brief_work_root() so a card whose folder lives outside this
+            # repository still resolves for a role with no sanction of its own.
+            brief_obj["work_root"] = m_root.group(1)
         try:
             with open(agent_brief_path(agent_id), "w", encoding="utf-8") as f:
                 json.dump(brief_obj, f)
@@ -1084,8 +1115,12 @@ def read_brief(aid, sid):
             # "phase" (HRN-2.F, kept on disk after HRN-82.A even though no rule in this file
             # judges it any more — HRN-82.C.2 is the step that removes --phase from the brief
             # itself): the plan phase this run names, purely informational now, still used
-            # only to word a refusal message.
-            return {"role": role, "card": card, "phase": b.get("phase")}
+            # only to word a refusal message. "work_root" (HRN-89.B.1/B.3): the work root
+            # this same brief-writing call named outright with --root, carried by either
+            # copy of the brief — read straight here for symmetry with
+            # _agent_brief_work_root(), which reads the agent-keyed file directly instead.
+            return {"role": role, "card": card, "phase": b.get("phase"),
+                    "work_root": b.get("work_root")}
     return None
 
 brief = read_brief(agent_id, session_id)
