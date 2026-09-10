@@ -1136,6 +1136,45 @@ WRITING_FORMS = re.compile(
     r'-(exec|execdir|ok|okdir|delete|fprint|fls))'
 )
 
+def split_command_segments(command):
+    """Split a command on the shell's own separators — | || && ; newline — respecting
+    quotes, so a separator INSIDE a quoted argument does not start a new segment. Written
+    as a scanner rather than a regex because a regex cannot track quote state: the plain
+    re.split this replaced cut `grep -E "wash|bleach" src` in two and then read `bleach"`
+    as the second segment's own program name, refusing an ordinary alternation search and
+    naming a fragment of the pattern as a forbidden program (measured 2026-09-10, on the
+    critic raised for PRS-1)."""
+    segments, current, quote = [], [], None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+            i += 1
+            continue
+        if command.startswith("&&", i) or command.startswith("||", i):
+            segments.append("".join(current))
+            current = []
+            i += 2
+            continue
+        if ch in "|;\n":
+            segments.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    segments.append("".join(current))
+    return segments
+
+
 def is_read_only_command(command):
     """True when every program the command runs is in READ_ONLY_PROGRAMS and the command
     carries no form that writes. Segments are split on the shell's own separators, and each
@@ -1143,11 +1182,15 @@ def is_read_only_command(command):
     read as a bare word fails closed."""
     if not command.strip() or WRITING_FORMS.search(command):
         return False
-    for segment in re.split(r'\|\||&&|[|;\n]', command):
+    for segment in split_command_segments(command):
         segment = segment.strip()
         if not segment:
             continue
-        m = re.match(r'([A-Za-z0-9_./-]+)', segment)
+        # The leading ~ is part of the path a caller actually types, and this hook's own
+        # refusal text names "~/Dev/ai/bin/websearch" as THE way a reading role searches
+        # the web. Without ~ in this class the match failed at position 0 and the hook
+        # refused the very command it recommends (measured 2026-09-10, same critic run).
+        m = re.match(r'([~A-Za-z0-9_./-]+)', segment)
         if not m:
             return False
         program = os.path.basename(m.group(1))
