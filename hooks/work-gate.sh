@@ -150,23 +150,35 @@
 #     executor's own to edit, so it records the proposed change there and keeps working. An
 #     acceptor may not write log.md — that file is the executor's own.
 #
-#  6a. WORKING COPY BOUNDARY (HRN-70): applies only to role "executor", judged the same way
-#     rule 6 above is — only once card_dir is known, and only for a Write/Edit whose target
-#     does NOT sit inside the run's own card folder (every file that folder holds is written
-#     by whichever command owns it, in the shared checkout, by rules.md's own rule 51 — this
-#     rule is never about those, question.md included). The target's own realpath is compared
-#     against two other paths: the shared checkout's own root (os.path.dirname of the work
-#     root find_work_root() resolves) and this card's own linked working copy, found the same
-#     way bin/work-session cuts one and bin/work-commit already finds one by name — the `git
-#     worktree list --porcelain` entry whose own branch is refs/heads/work/<card id,
-#     lowercased> (rules.md rule 53). A target inside the shared checkout but NOT inside that
-#     working copy is refused, naming both the wrong path it actually named and the right
-#     one — the same path, rewritten under the working copy's own root — so the fix is
-#     repeating the same edit at the right address, never guessing what that address is. A
-#     target already inside the card's own working copy, or outside the shared checkout
-#     entirely, is never judged by this rule at all; nor is a call whose own working copy
-#     this rule cannot resolve — the same fail-open posture every other rule in this file
-#     already takes on an unresolvable state of its own.
+#  6a. WORKING COPY BOUNDARY (HRN-70, hint corrected by HRN-105): applies only to role
+#     "executor", judged the same way rule 6 above is — only once card_dir is known, and only
+#     for a Write/Edit whose target does NOT sit inside the run's own card folder (every file
+#     that folder holds is written by whichever command owns it, in the shared checkout, by
+#     rules.md's own rule 51 — this rule is never about those, question.md included). The
+#     target's own realpath is compared against two other paths: the shared checkout's own
+#     root (os.path.dirname of the work root find_work_root() resolves) and this card's own
+#     linked working copy, found the same way bin/work-session cuts one and bin/work-commit
+#     already finds one by name — the `git worktree list --porcelain` entry whose own branch is
+#     refs/heads/work/<card id, lowercased> (rules.md rule 53). A target inside the shared
+#     checkout but NOT inside that working copy is always refused; what the refusal SAYS
+#     depends on whether the two roots are the same repository, checked once more by
+#     same_repository() (a plain `git rev-parse --git-common-dir` on each root, HRN-105) —
+#     the plain textual rewrite the substitution below performs proves nothing about that on
+#     its own. Same repository: the substituted address — the same path, rewritten under the
+#     working copy's own root — is named, exactly as before, so the fix is repeating the same
+#     edit at the right address. Different repositories, or the check itself could not be
+#     answered (a stale working copy, a removed directory, git unavailable on either side):
+#     no address is substituted at all — a card whose folder and whose code live in two
+#     separate repositories (Pilier's own DPP-4, 2026-09-11: an internal document destined for
+#     the private `cloud` repository, substituted into the public `blockchain-dpp4` clone) must
+#     never be told to write into a repository this rule cannot prove is the right one — and
+#     the refusal instead names the rejected path, the card's own working copy, and the exact
+#     command that hands the step back to the orchestrator: `bin/work-question <ID> --root
+#     <work_root>`, work_root filled in by the rule itself. A target already inside the card's
+#     own working copy, or outside the shared checkout entirely, is never judged by this rule
+#     at all; nor is a call whose own working copy this rule cannot resolve — the same
+#     fail-open posture every other rule in this file already takes on an unresolvable state
+#     of its own.
 #
 #  6b. GIT COMMAND (HRN-70): applies only to role "executor", judged against every Bash call.
 #     A `git …` invocation is read-only by default — status, diff, log, show, rev-parse,
@@ -1592,6 +1604,12 @@ if tool_name in ("Write", "Edit") and card_dir is not None:
 # log.md, question.md and every other file that folder holds are written by whichever
 # command owns each one, in the shared checkout, by design (rules.md rule 51) — this rule
 # exists for the executor's own product-code edits, not for those.
+#
+# HRN-105: the substituted address below is only ever printed once same_repository() (just
+# below) has confirmed the shared checkout and the card's own working copy are the same
+# repository. When they are not — or the check itself could not be answered — the refusal
+# carries no address at all, since a plain rewrite of the path's text proves nothing about
+# which repository it actually names.
 def resolve_shared_checkout_root():
     """The shared checkout's own path — os.path.dirname(work_root), since find_work_root()
     above always returns that path with "ai" appended, by construction or by its own test
@@ -1600,10 +1618,60 @@ def resolve_shared_checkout_root():
         return None
     return os.path.dirname(work_root)
 
+def git_common_dir(path):
+    """`path`'s own git common directory — `git rev-parse --path-format=absolute
+    --git-common-dir` run with cwd=path — resolved to a real path, or None on any failure: a
+    stale working copy, a removed directory, a path outside any git working tree, or git
+    itself unavailable. Read by same_repository() below, never as "different" but as
+    "could not tell" (HRN-105)."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5, cwd=path,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    out = result.stdout.strip()
+    if not out:
+        return None
+    return os.path.realpath(out)
+
+def same_repository(path_a, path_b):
+    """True when path_a and path_b belong to the same repository — their own git common
+    directories match. False when both resolve and differ. None when either could not be
+    resolved at all — the caller then takes the safe side, exactly as an outright False
+    (HRN-105's own "Данные": "лишний безадресный отказ ... стоит одного возврата шага
+    координатору, а подстановка, построенная при неизвестном признаке, может назвать путь в
+    публичном репозитории")."""
+    common_a = git_common_dir(path_a)
+    common_b = git_common_dir(path_b)
+    if common_a is None or common_b is None:
+        return None
+    return common_a == common_b
+
 WORKING_COPY_BOUNDARY_TEMPLATE = (
     "Blocked by work-gate's WORKING COPY BOUNDARY rule: this call would edit %s, inside the "
     "shared checkout — not this card's own working copy, %s. Repeat the same edit at the "
     "right address instead: %s."
+)
+
+# HRN-105: the substitution above is only correct when the shared checkout and the card's own
+# working copy are the same repository — a plain text rewrite of the path, carrying no check of
+# its own that the rewritten address is real or belongs to the right repository. Observed
+# 2026-09-11 on Pilier's own DPP-4: a card whose folder lives in the private `cloud` repository
+# and whose code lives in the public `blockchain-dpp4` clone got a substitution naming a path
+# inside the public clone for an internal document — a disclosure, not a lost step. This rule's
+# own denial is correct and stays: it is only the substituted address that is wrong when the
+# two roots are not the same repository, so nothing here widens what may be written, only what
+# the refusal is allowed to suggest.
+CROSS_REPOSITORY_BOUNDARY_TEMPLATE = (
+    "Blocked by work-gate's WORKING COPY BOUNDARY rule: this call would edit %s, inside the "
+    "shared checkout — not this card's own working copy, %s, and the two are not confirmed to "
+    "be the same repository. No substituted address is offered: a path built by rewriting the "
+    "text alone could name a file in a different repository, the very leak this rule exists to "
+    "stop. Return this step to the orchestrator instead: bin/work-question %s --root %s."
 )
 
 if brief.get("role") == "executor" and tool_name in ("Write", "Edit") and card_dir is not None:
@@ -1622,6 +1690,12 @@ if brief.get("role") == "executor" and tool_name in ("Write", "Edit") and card_d
                 inside_own = (real_fp == real_own_root or
                               real_fp.startswith(real_own_root + os.sep))
                 if inside_shared and not inside_own:
+                    if same_repository(real_shared_root, real_own_root) is not True:
+                        deny_and_exit(
+                            CROSS_REPOSITORY_BOUNDARY_TEMPLATE %
+                            (real_fp, real_own_root, brief["card"], work_root),
+                            "work-gate.working-copy-boundary-cross-repository"
+                        )
                     rel = os.path.relpath(real_fp, real_shared_root)
                     right_path = os.path.join(real_own_root, rel)
                     deny_and_exit(
