@@ -1,0 +1,9 @@
+{
+  "forms": [
+    {
+      "kind": "path",
+      "pattern": "\\.test\\.py$",
+      "description": "a changed path ending in `.test.py`"
+    }
+  ]
+}
