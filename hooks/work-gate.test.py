@@ -4,7 +4,9 @@ throwaway work root — nothing real is touched. HRN-82.A: the PHASE BOUNDARY ru
 this file used to check first and foremost is gone from the hook, and every case built on top
 of a closed-phase fixture went with it; what remains checks the rules the hook still carries —
 the command reference, the log-write ceiling, repeated search, chained recording calls, the
-context/soft-context ceilings, sanction matching and scope.
+context/soft-context ceilings, sanction matching, scope, and (HRN-92) that a command's own
+program name is recognised only by the word standing in the program's own position, never by
+a bare occurrence anywhere else in the command line.
 
 Each case: a payload as the hook receives it, and the decision expected of it.
 """
@@ -56,9 +58,9 @@ def build_tree(base):
     return work_root, state, card_dir
 
 
-def decide(hook_env, tool_name, tool_input):
+def decide(hook_env, tool_name, tool_input, agent_id=AGENT):
     payload = {"tool_name": tool_name, "tool_input": tool_input,
-               "agent_id": AGENT, "session_id": "s-probe"}
+               "agent_id": agent_id, "session_id": "s-probe"}
     r = subprocess.run(["bash", HOOK], input=json.dumps(payload),
                        capture_output=True, text=True, env=hook_env)
     try:
@@ -280,6 +282,175 @@ def chain_cases(base_env, base):
         "упоминание имени команды не в начале звена не считается вызовом",
         "ls && echo bin/work-note", "allow")
     return failures
+
+
+def brief_quote_cases(base_env, base):
+    """HRN-92.C.1/C.2/C.7: a call that merely quotes bin/work-agent-brief's own name inside a
+    heredoc body — a log entry pasting a check's own verbatim output, the exact shape that
+    rewrote a working agent's own brief onto a quoted card twice, 2026-09-10 — must never
+    rewrite the acting agent's own brief file, and must still reach every rule below the
+    brief-writing branch rather than being waved through by it (proven by sending the same
+    shape from an agent carrying no brief at all, and watching it hit the "no brief, no
+    launch" rule instead of being let through). Covers the same shape once more with an
+    unpaired apostrophe standing in the body, the kind of text a check's own verbatim output
+    carries regularly.
+    """
+    work_root, state, card_dir = build_tree(os.path.join(base, "briefquote"))
+    briefs_dir = os.path.join(state, "briefs")
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+
+    failures = 0
+    own_brief_path = os.path.join(briefs_dir, "agent-%s.json" % AGENT)
+
+    # C.1: AGENT already carries its own real brief (role=executor, card=TST-1), written by
+    # build_tree above. A DIFFERENT role and a DIFFERENT card, quoted inside the heredoc body
+    # of an otherwise ordinary work-note call, must leave that file untouched.
+    before = open(own_brief_path, encoding="utf-8").read()
+    quoting_command = (
+        'bin/work-note TST-1 TST-1.A.1 "состояние" <<\'EOF\'\n'
+        'bin/work-agent-brief --role critic --card TST-9\nEOF'
+    )
+    got, _ = decide(env, "Bash", {"command": quoting_command})
+    after = open(own_brief_path, encoding="utf-8").read()
+    ok = got == "allow" and before == after
+    print(("  ok   " if ok else "  FAIL ") +
+          "цитата команды выдачи бланка в теле документа не переписывает бланк исполнителя")
+    if not ok:
+        print("        было: %s\n        стало: %s" % (before, after))
+    failures += 0 if ok else 1
+
+    # C.7: the same shape once more, with an unpaired apostrophe sitting in the same body.
+    before2 = open(own_brief_path, encoding="utf-8").read()
+    quoting_command_apostrophe = (
+        'bin/work-note TST-1 TST-1.A.1 "состояние" <<\'EOF\'\n'
+        "l'exécuteur a cité bin/work-agent-brief --role critic --card TST-9\nEOF"
+    )
+    got7, reason7 = decide(env, "Bash", {"command": quoting_command_apostrophe})
+    after2 = open(own_brief_path, encoding="utf-8").read()
+    ok7 = got7 == "allow" and before2 == after2
+    print(("  ok   " if ok7 else "  FAIL ") +
+          "та же цитата с непарным апострофом в теле документа тоже не переписывает бланк")
+    if not ok7:
+        print("        было: %s\n        стало: %s" % (before2, after2))
+        print("        decision: %s; текст: %s" % (got7, (reason7 or "")[:200]))
+    failures += 0 if ok7 else 1
+
+    # C.2: a SECOND agent, carrying no brief file at all, sends the same shape of quoting
+    # call. Had the old, substring-based recognition still matched, this would have been
+    # waved through by the brief-writing branch's own unconditional allow — here it must
+    # instead reach the "no brief, no launch" rule and be refused by it, proving the quoted
+    # text never enters the brief-writing branch at all.
+    no_brief_agent = "agent-briefquote-nobrief"
+    no_brief_command = (
+        'bin/work-note TST-1 TST-1.A.1 "состояние" <<\'EOF\'\n'
+        'bin/work-agent-brief --role executor --card TST-1\nEOF'
+    )
+    got2, reason2 = decide(env, "Bash", {"command": no_brief_command}, agent_id=no_brief_agent)
+    ok2 = got2 == "deny" and "no caller-brief file" in (reason2 or "")
+    print(("  ok   " if ok2 else "  FAIL ") +
+          "тот же вызов у агента без бланка доходит до правила «нет бланка — нет запуска», "
+          "а не пропускается веткой выдачи бланка")
+    if not ok2:
+        print("        decision: %s; текст: %s" % (got2, (reason2 or "")[:300]))
+    failures += 0 if ok2 else 1
+
+    return failures
+
+
+def brief_real_call_cases(base_env, base):
+    """HRN-92.C.3/C.8: a real invocation of bin/work-agent-brief still writes the calling
+    agent's own brief, in three spellings — the bare short path, a full path, and a leading
+    environment-variable assignment in front of either — and the fields the write ends up
+    carrying (role, card, phase, work root) match what the command line actually named, not
+    just "a brief exists"."""
+    _, state, _ = build_tree(os.path.join(base, "briefforms"))
+    briefs_dir = os.path.join(state, "briefs")
+    env = dict(base_env)
+    env["WORK_GATE_STATE_DIR"] = state
+
+    failures = 0
+    wanted = {"role": "executor", "card": "TST-7", "phase": "TST-7.A",
+              "work_root": "/tmp/root-7"}
+    forms = (
+        ("коротким путём", "short",
+         'bin/work-agent-brief --role executor --card TST-7 --phase TST-7.A '
+         '--root /tmp/root-7'),
+        ("полным путём", "full",
+         '/some/where/bin/work-agent-brief --role executor --card TST-7 --phase TST-7.A '
+         '--root /tmp/root-7'),
+        ("с присваиванием переменной окружения впереди", "envfirst",
+         'FOO=bar bin/work-agent-brief --role executor --card TST-7 --phase TST-7.A '
+         '--root /tmp/root-7'),
+    )
+    for title, tag, command in forms:
+        agent_id = "agent-briefforms-" + tag
+        got, _ = decide(env, "Bash", {"command": command}, agent_id=agent_id)
+        path = os.path.join(briefs_dir, "agent-%s.json" % agent_id)
+        content = None
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                try:
+                    content = json.load(f)
+                except Exception:
+                    content = None
+        ok = got == "allow" and content == wanted
+        print(("  ok   " if ok else "  FAIL ") +
+              "настоящий вызов %s пишет бланк с теми же role/card/phase/root, что в тексте "
+              "вызова" % title)
+        if not ok:
+            print("        decision: %s; записано: %s" % (got, content))
+        failures += 0 if ok else 1
+    return failures
+
+
+def quoted_log_name_no_reset_cases(base_env, base):
+    """HRN-92.C.4: a call whose ARGUMENT merely mentions bin/work-note's own name — never at
+    the position a program name would sit — must not reset the log-write ceiling the way a
+    real bin/work-note call does: standing in the ceiling's own 20th place, it must be
+    refused exactly like any other ordinary call would be."""
+    work_root, state, card_dir = build_tree(os.path.join(base, "quotedlogname-ceiling"))
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+
+    for i in range(19):
+        got, _ = decide(env, "Bash", {"command": "go test ./..."})
+        if got != "allow":
+            print("  FAIL непредвиденный отказ на %d-м обычном вызове" % (i + 1))
+            return 1
+
+    got, reason = decide(env, "Bash",
+                         {"command": 'echo "запись сделай через bin/work-note позже"'})
+    ok = got == "deny" and "LOG CEILING" in (reason or "")
+    print(("  ok   " if ok else "  FAIL ") +
+          "цитата имени bin/work-note внутри аргумента не сбрасывает потолок вызовов без "
+          "записи в журнал")
+    if not ok:
+        print("        decision: %s; текст: %s" % (got, (reason or "")[:200]))
+    return 0 if ok else 1
+
+
+def quoted_log_name_no_chain_refusal_cases(base_env, base):
+    """HRN-92.C.6: the same quoted mention of bin/work-note's own name, sitting inside a
+    chained command, must not be refused by the CHAINED RECORDING CALL rule — that rule is
+    for a real invocation of the command caught inside a chain, and a name merely mentioned
+    after the chain's own separator, never at a segment's own leading position, is not one."""
+    work_root, state, card_dir = build_tree(os.path.join(base, "quotedlogname-chain"))
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+
+    got, reason = decide(env, "Bash",
+                         {"command": 'ls && echo "запись через bin/work-note"'})
+    ok = got == "allow"
+    print(("  ok   " if ok else "  FAIL ") +
+          "цитата имени bin/work-note внутри сцепленного вызова не отказана как сцепленный "
+          "вызов записи")
+    if not ok:
+        print("        decision: %s; текст: %s" % (got, (reason or "")[:200]))
+    return 0 if ok else 1
 
 
 def _transcript_line(context):
@@ -549,6 +720,18 @@ def main():
 
     print("\nВызов записи, собранный цепочкой:")
     failures += chain_cases(env, base)
+
+    print("\nЦитата команды выдачи бланка в теле документа не переписывает чужой бланк:")
+    failures += brief_quote_cases(env, base)
+
+    print("\nНастоящий вызов выдачи бланка пишет его в трёх написаниях:")
+    failures += brief_real_call_cases(env, base)
+
+    print("\nЦитата имени команды записи внутри аргумента не сбрасывает потолок вызовов:")
+    failures += quoted_log_name_no_reset_cases(env, base)
+
+    print("\nТа же цитата внутри сцепленного вызова не отказана как сцепленный вызов записи:")
+    failures += quoted_log_name_no_chain_refusal_cases(env, base)
 
     print("\nПотолок размера контекста и выход из-под него:")
     failures += context_ceiling_cases(env, base)

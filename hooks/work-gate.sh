@@ -628,11 +628,56 @@ def command_of(ti):
     cmd = ti.get("command")
     return cmd if isinstance(cmd, str) else ""
 
+# Every quoted span of a shell command — single-quoted, or double-quoted with backslash
+# escapes honoured — blanked out before this hook looks for a chain separator or a program
+# name, so a `|`, `;`, `&&`, newline or a command's own name, when it merely sits inside a
+# quoted argument or a heredoc body's own prose, is never read as shell syntax. Defined here,
+# ahead of its own canonical home a few hundred lines down (next to chains(), which still
+# reads it from there), because bash_names() below needs it and this script runs top to
+# bottom: bash_names() is first called at this run's own line judging the brief-writing
+# command, hundreds of lines before chains() is ever reached.
+QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", re.S)
+
+# A leading run of environment-variable assignments, or a bare `env` naming them, standing in
+# front of the program word — `FOO=bar bin/work-note …`, `env FOO=bar bin/work-note …` — is
+# skipped when looking for that word, so a command written either way still names its program.
+_ENV_ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=\S*$')
+
 def bash_names(command, script_basename):
-    """True when a Bash command invokes a script by this basename — matched on any
-    occurrence of the basename in the command line, the same coarse-but-safe matching
-    harness-stamp-gate.sh already uses for 'bootstrap.sh' in its own command."""
-    return script_basename in command
+    """True when this Bash command's own program word — and never an occurrence anywhere
+    else in the command, including inside a quoted argument or a heredoc body's own prose —
+    names a script with this basename.
+
+    HRN-92: this used to answer true on any occurrence of the basename anywhere in the
+    command line at all, the same coarse matching harness-stamp-gate.sh still uses for
+    'bootstrap.sh'. That let a handoff or a log entry that merely quoted a command's name —
+    the literal text of a check's own verbatim output, which this system requires be pasted
+    into the journal — be read as a real invocation of that command, rewriting the acting
+    agent's own brief onto whatever card the quoted text happened to name (found live twice
+    on one executor, 2026-09-10).
+
+    Judged on the text outside any heredoc body: the first line up to its own heredoc marker
+    when the command carries one, the whole command otherwise — matched_log_call_kind()'s own
+    convention below, applied here too since a real invocation of any of these commands may
+    legitimately carry a heredoc body of arbitrary prose. That text has every quoted span
+    blanked out, is split on the shell's own chaining separators (&&, ||, ;, | and a bare
+    newline), and each resulting segment's own leading word — after skipping a leading run of
+    environment-variable assignments or a bare `env` naming them — is compared against
+    script_basename by its own trailing path component: a bare name, a short relative path
+    and a full path all match; the name sitting anywhere else in the segment does not."""
+    lines = command.rstrip("\n").split("\n")
+    first_line = lines[0]
+    heredoc_m = re.search(r'<<-?\s*([\'"]?)(\w+)\1\s*$', first_line)
+    text = first_line[:heredoc_m.start()] if heredoc_m else command
+    bare = QUOTED_SPAN_RE.sub("", text)
+    for segment in re.split(r'&&|\|\||[;|\n]', bare):
+        tokens = segment.split()
+        i = 0
+        while i < len(tokens) and (tokens[i] == "env" or _ENV_ASSIGNMENT_RE.match(tokens[i])):
+            i += 1
+        if i < len(tokens) and os.path.basename(tokens[i]) == script_basename:
+            return True
+    return False
 
 # The two kinds of work a card can belong to, each its own folder directly under the work
 # root — identical to bin/work-plan's own KINDS, kept as its own small copy here rather
