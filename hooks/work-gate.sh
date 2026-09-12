@@ -1769,6 +1769,55 @@ def working_copy_boundary_denial(real_fp, card_id):
     return (WORKING_COPY_BOUNDARY_TEMPLATE % (real_fp, real_own_root, right_path),
             "working-copy-boundary")
 
+def declared_repo_boundary_denial(real_fp, card_id):
+    """HRN-109.D.3: the same boundary working_copy_boundary_denial() judges for the primary
+    repository, repeated for every repository this card's own sanction declares beyond the
+    first — a target inside one of those repositories' own shared checkout, but not inside
+    that same repository's own working copy for this card, is refused exactly the same way.
+    Shared between rule 6a (Write/Edit) and rule 6c (a Bash call's own write target) so the
+    two judge this one decision, not two similar ones — the same reason
+    working_copy_boundary_denial() itself is shared between them. `real_fp` is an already
+    realpath'd, absolute target; `real_card_dir` is recomputed here rather than read from an
+    outer variable, since rule 6c reaches this function on a Bash call, where no earlier rule
+    has necessarily set one. None when the target is inside the card's own folder, when the
+    card's sanction names no repository beyond the primary at all (no `code_repos` field, or
+    at most one repository — the ordinary, single-repository card reads back untouched), or
+    when the target is not inside any of the declared repositories beyond the first. Since
+    each of these repositories is resolved and searched on its own (`-C <repo>`), the shared
+    checkout and the working copy this loop compares always belong to the very same
+    repository by construction, so this never reaches the CROSS_REPOSITORY_BOUNDARY_TEMPLATE
+    case above — that one stays for the folder-vs-worktree_path mismatch the primary check
+    already carries.
+
+    This function did not cover rule 6c at all until the gap was closed together with
+    HRN-109.D.4's own observation of it: rule 6c judges a shell write's own target through
+    working_copy_boundary_denial() alone, so a shell write into a declared second
+    repository's own shared checkout — `>`, `tee`, `cp`/`mv`, `sed -i` — passed silently
+    while the identical target through Write or Edit was already refused by rule 6a's own
+    call of this same function. Closed by extracting the loop rule 6a already ran into this
+    one function and calling it from both rules, rather than writing the loop a second time."""
+    real_card_dir = os.path.realpath(card_dir)
+    if os.path.dirname(real_fp) == real_card_dir:
+        return None
+    for repo in declared_repos_beyond_primary(card_id):
+        real_repo = os.path.realpath(repo)
+        inside_repo = (real_fp == real_repo or real_fp.startswith(real_repo + os.sep))
+        if not inside_repo:
+            continue
+        repo_own_root = find_repo_worktree_root(real_repo, card_id)
+        if not repo_own_root:
+            continue
+        real_repo_own_root = os.path.realpath(repo_own_root)
+        inside_repo_own = (real_fp == real_repo_own_root or
+                            real_fp.startswith(real_repo_own_root + os.sep))
+        if inside_repo_own:
+            continue
+        rel = os.path.relpath(real_fp, real_repo)
+        right_path = os.path.join(real_repo_own_root, rel)
+        return (WORKING_COPY_BOUNDARY_TEMPLATE % (real_fp, real_repo_own_root, right_path),
+                "working-copy-boundary")
+    return None
+
 if brief.get("role") == "executor" and tool_name in ("Write", "Edit") and card_dir is not None:
     fp = file_path_of(tool_input)
     if fp is not None:
@@ -1779,38 +1828,13 @@ if brief.get("role") == "executor" and tool_name in ("Write", "Edit") and card_d
             deny_and_exit(text + "\n" + SHELL_BOUNDARY_SCOPE_NOTE, "work-gate." + suffix)
 
         # HRN-109.D.3: the same boundary, repeated for every repository this card declares
-        # beyond the primary one already judged above — a target inside one of those
-        # repositories' own shared checkout, but not inside that same repository's own working
-        # copy for this card, is refused exactly the same way; a target already inside that
-        # working copy is never foreign and never judged at all. Since each of these
-        # repositories is resolved and searched on its own (`-C <repo>`), the shared checkout
-        # and the working copy this loop compares always belong to the very same repository by
-        # construction, so this never reaches the CROSS_REPOSITORY_BOUNDARY_TEMPLATE case above
-        # — that one stays for the folder-vs-worktree_path mismatch rule 6a's own primary check
-        # already carries. A sanction naming no `code_repos` field at all, or naming at most one
-        # repository, changes nothing here: the loop below then runs zero times, exactly the
-        # behaviour before this rule existed.
-        if os.path.dirname(real_fp) != real_card_dir:
-            for repo in declared_repos_beyond_primary(brief["card"]):
-                real_repo = os.path.realpath(repo)
-                inside_repo = (real_fp == real_repo or
-                               real_fp.startswith(real_repo + os.sep))
-                if not inside_repo:
-                    continue
-                repo_own_root = find_repo_worktree_root(real_repo, brief["card"])
-                if not repo_own_root:
-                    continue
-                real_repo_own_root = os.path.realpath(repo_own_root)
-                inside_repo_own = (real_fp == real_repo_own_root or
-                                    real_fp.startswith(real_repo_own_root + os.sep))
-                if inside_repo_own:
-                    continue
-                rel = os.path.relpath(real_fp, real_repo)
-                right_path = os.path.join(real_repo_own_root, rel)
-                deny_and_exit(
-                    WORKING_COPY_BOUNDARY_TEMPLATE % (real_fp, real_repo_own_root, right_path),
-                    "work-gate.working-copy-boundary"
-                )
+        # beyond the primary one already judged above — declared_repo_boundary_denial() is
+        # shared with rule 6c below, so the two judge this one decision rather than two
+        # similar ones.
+        result2 = declared_repo_boundary_denial(real_fp, brief["card"])
+        if result2:
+            text2, suffix2 = result2
+            deny_and_exit(text2, "work-gate." + suffix2)
 
 # --- 6b. GIT COMMAND (HRN-70): an executor's own `git` invocation is read-only by default —
 # status, diff, log, show, rev-parse, ls-files, worktree list — and anything else is refused,
@@ -2213,6 +2237,17 @@ if brief.get("role") == "executor" and tool_name == "Bash" and card_dir is not N
             deny_and_exit(
                 text + "\nCaught by: %s.\n%s" % (form, SHELL_BOUNDARY_SCOPE_NOTE),
                 "work-gate.shell-" + suffix
+            )
+        # HRN-109.D.3 fix: the same secondary-repository check rule 6a already runs above via
+        # declared_repo_boundary_denial(), mirrored here so a shell write into a declared
+        # second repository's own shared checkout is refused exactly as a Write/Edit of the
+        # same target already is.
+        result2 = declared_repo_boundary_denial(real_target, brief["card"])
+        if result2:
+            text2, suffix2 = result2
+            deny_and_exit(
+                text2 + "\nCaught by: %s.\n%s" % (form, SHELL_BOUNDARY_SCOPE_NOTE),
+                "work-gate.shell-" + suffix2
             )
 
 # --- 7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): twenty calls without a log.md
