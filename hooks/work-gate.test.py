@@ -34,6 +34,10 @@ TEMPLATE_TEXT = """Справочник команд: этим ты работа
 1. …
 """
 PHASE = "TST-1.A"
+# The fixed lead-in of SHELL_BOUNDARY_SCOPE_NOTE in hooks/work-gate.sh (HRN-107) — used only
+# to split a denial's own base text from that shared note, never duplicated as a rule of its
+# own: a change to the note's own wording never has to be mirrored here beyond this one line.
+SHELL_SCOPE_NOTE_MARKER = "This boundary is judged on a shell write too"
 
 
 def build_tree(base):
@@ -638,6 +642,225 @@ def sanction_cases(base_env, base):
     return failures
 
 
+def _git(args, cwd):
+    subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True, text=True, check=True)
+
+
+def build_boundary_repo(base, linked=True):
+    """A real git repository carrying this card's own folder, and its own linked working
+    copy on branch work/<card, lowercased> — the layout rule 6a and rule 6c are actually
+    judged against (HRN-107): same_repository() runs a real `git rev-parse
+    --git-common-dir`, which only answers True for two paths genuinely sharing one
+    repository, so a plain pair of temp directories never exercises the "same repository"
+    branch at all. `linked=False` builds a second, wholly separate repository instead, for
+    the cross-repository case. Returns (work_root, state, card_dir, shared_root, own_root)."""
+    shared_root = os.path.join(base, "shared")
+    os.makedirs(shared_root)
+    _git(["init", "-q"], cwd=shared_root)
+    _git(["config", "user.email", "t@example.com"], cwd=shared_root)
+    _git(["config", "user.name", "t"], cwd=shared_root)
+    work_root = os.path.join(shared_root, "ai")
+    card_dir = os.path.join(work_root, "harness", "epic", CARD + "_probe")
+    os.makedirs(card_dir)
+    with open(os.path.join(card_dir, "plan.md"), "w", encoding="utf-8") as f:
+        f.write("plan\n")
+    _git(["add", "-A"], cwd=shared_root)
+    _git(["commit", "-q", "-m", "init"], cwd=shared_root)
+    if linked:
+        _git(["branch", "work/" + CARD.lower()], cwd=shared_root)
+        own_root = os.path.join(base, "own-copy")
+        _git(["worktree", "add", "-q", own_root, "work/" + CARD.lower()], cwd=shared_root)
+    else:
+        own_root = os.path.join(base, "own-copy-foreign")
+        os.makedirs(own_root)
+        _git(["init", "-q"], cwd=own_root)
+        _git(["config", "user.email", "t@example.com"], cwd=own_root)
+        _git(["config", "user.name", "t"], cwd=own_root)
+        with open(os.path.join(own_root, ".gitkeep"), "w", encoding="utf-8") as f:
+            f.write("x\n")
+        _git(["add", "-A"], cwd=own_root)
+        _git(["commit", "-q", "-m", "init"], cwd=own_root)
+    state = os.path.join(base, "state")
+    briefs = os.path.join(state, "briefs")
+    os.makedirs(briefs)
+    with open(os.path.join(briefs, "agent-%s.json" % AGENT), "w", encoding="utf-8") as f:
+        json.dump({"role": "executor", "card": CARD, "phase": PHASE}, f)
+    return work_root, state, card_dir, shared_root, own_root
+
+
+def shell_write_boundary_cases(base_env, base):
+    """HRN-107: the WORKING COPY BOUNDARY rule judged on a Bash call's own write target, not
+    only on a Write/Edit call. Every case is built on a real git repository with a real
+    linked working copy (build_boundary_repo above), since same_repository() runs actual git
+    plumbing and never answers True on a bare pair of temp directories."""
+    work_root, state, card_dir, shared_root, own_root = build_boundary_repo(
+        os.path.join(base, "shellwrite"))
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+    env["WORK_GATE_CARD_WORKTREE_ROOT"] = own_root
+    env["WORK_GATE_SHELL_CWD"] = shared_root
+
+    failures = 0
+
+    def probe(title, command, wanted, must_carry=None, must_not_carry=None):
+        got, reason = decide(env, "Bash", {"command": command})
+        reason = reason or ""
+        ok = got == wanted
+        if ok and must_carry:
+            ok = all(s in reason for s in must_carry)
+        if ok and must_not_carry:
+            ok = all(s not in reason for s in must_not_carry)
+        print(("  ok   " if ok else "  FAIL ") + title + "  → " + str(got))
+        if not ok:
+            print("        ожидалось " + wanted + "; текст: " + reason[:400])
+        return 0 if ok else 1
+
+    # A.7: all six redirection spellings, relative target, no `cd` — each denied, each
+    # naming "output redirection" as the caught form.
+    for op in (">", ">>", ">|", "2>", "2>>", "&>"):
+        failures += probe(
+            "перенаправление %r в общий чекаут — отказ" % op,
+            "echo hi %s runtime/src/lib.rs" % op, "deny",
+            must_carry=["WORKING COPY BOUNDARY", "Caught by: output redirection"])
+
+    # The observed DPP-4 bypass command, verbatim in shape: cat > <путь> <<'EOF' with a body.
+    failures += probe(
+        "наблюдённая команда обхода cat > путь <<'EOF' — отказ",
+        "cat > runtime/src/lib.rs <<'EOF'\nbody\nEOF", "deny",
+        must_carry=["Caught by: output redirection"])
+
+    # tee on the right-hand side of a pipeline.
+    failures += probe(
+        "tee в правой части конвейера — отказ",
+        "echo hi | tee runtime/src/lib.rs", "deny",
+        must_carry=["Caught by: tee"])
+
+    # cp / mv destination, plain and via -t/--target-directory.
+    failures += probe(
+        "приёмник cp — отказ",
+        "cp /tmp/a.txt runtime/src/lib.rs", "deny",
+        must_carry=["Caught by: cp/mv destination"])
+    failures += probe(
+        "приёмник mv — отказ",
+        "mv /tmp/a.txt runtime/src/lib.rs", "deny",
+        must_carry=["Caught by: cp/mv destination"])
+    failures += probe(
+        "форма ключа каталога-приёмника cp -t — отказ",
+        "cp -t runtime/src /tmp/a.txt", "deny",
+        must_carry=["Caught by: cp/mv destination"])
+
+    # sed -i.
+    failures += probe(
+        "правка sed -i файла в общем чекауте — отказ",
+        "sed -i 's/a/b/' runtime/src/lib.rs", "deny",
+        must_carry=["Caught by: sed -i"])
+
+    # Three exceptions: own working copy, the card's own folder, outside the shared checkout.
+    failures += probe(
+        "запись в собственную рабочую копию карточки проходит",
+        "cd %s && echo hi > runtime/src/lib.rs" % own_root, "allow")
+    failures += probe(
+        "запись прямо в папку карточки проходит",
+        "echo hi > %s" % os.path.join(card_dir, "question.md"), "allow")
+    failures += probe(
+        "запись вне общего чекаута проходит",
+        "echo hi > /tmp/hrn107-outside-probe.txt", "allow")
+
+    # Relative target: without cd (denied above), after a literal cd into the own copy
+    # (allowed above), after cd to a non-literal value (unresolved, skipped).
+    failures += probe(
+        "относительная цель после смены каталога переменной — не судится",
+        'cd "$SOME_VAR" && echo hi > runtime/src/lib.rs', "allow")
+
+    # A quoted destination is still caught, and the denial carries no quote characters
+    # around the path it names.
+    got, reason = decide(env, "Bash", {"command": 'echo hi > "runtime/src/lib.rs"'})
+    ok = got == "deny" and '"runtime/src/lib.rs"' not in (reason or "") and \
+        "runtime/src/lib.rs" in (reason or "")
+    print(("  ok   " if ok else "  FAIL ") +
+          "приёмник в кавычках — отказ, кавычек в тексте нет")
+    if not ok:
+        print("        decision: %s; текст: %s" % (got, (reason or "")[:300]))
+    failures += 0 if ok else 1
+
+    # A `>` sitting inside a quoted argument is not a redirection at all.
+    failures += probe(
+        "перенаправление внутри кавычек командой не считается",
+        'echo "a > b"', "allow")
+
+    # A.8: the list of checked forms printed in the denial names exactly the four forms of
+    # SHELL_WRITE_FORM_TABLE, and nothing else.
+    got, reason = decide(env, "Bash", {"command": "echo hi > runtime/src/lib.rs"})
+    reason = reason or ""
+    table_forms = ["output redirection", "tee", "cp/mv destination", "sed -i"]
+    ok = got == "deny" and all(name in reason for name in table_forms)
+    print(("  ok   " if ok else "  FAIL ") +
+          "перечень форм в тексте отказа совпадает с таблицей формы записи")
+    if not ok:
+        print("        текст: " + reason[:600])
+    failures += 0 if ok else 1
+
+    # A.8: rule 6c's own denial and rule 6a's own denial, for the same target path, are
+    # built by the same function — their base text (everything before the shell-only
+    # "Caught by" line) matches exactly, in the same-repository layout this fixture builds.
+    target_fp = os.path.join(shared_root, "runtime", "src", "lib.rs")
+    shell_got, shell_reason = decide(env, "Bash", {"command": "echo hi > runtime/src/lib.rs"})
+    write_got, write_reason = decide(env, "Write", {"file_path": target_fp, "content": "x"})
+    shell_base = (shell_reason or "").split("\nCaught by:")[0]
+    write_base = (write_reason or "").split("\n" + SHELL_SCOPE_NOTE_MARKER)[0] \
+        if SHELL_SCOPE_NOTE_MARKER in (write_reason or "") else (write_reason or "")
+    ok = (shell_got == "deny" and write_got == "deny" and shell_base == write_base)
+    print(("  ok   " if ok else "  FAIL ") +
+          "отказ оболочке и отказ инструменту записи для одного пути совпадают, построенные "
+          "одной функцией")
+    if not ok:
+        print("        shell:  " + (shell_reason or "")[:400])
+        print("        write:  " + (write_reason or "")[:400])
+    failures += 0 if ok else 1
+
+    return failures
+
+
+def shell_write_boundary_cross_repository_cases(base_env, base):
+    """The same comparison as above, in the cross-repository layout: the card's own working
+    copy is a wholly separate repository, so same_repository() answers False and both rules
+    must fall back to CROSS_REPOSITORY_BOUNDARY_TEMPLATE, with no address substituted."""
+    work_root, state, card_dir, shared_root, own_root = build_boundary_repo(
+        os.path.join(base, "shellwrite-cross"), linked=False)
+    env = dict(base_env)
+    env["WORK_GATE_WORK_ROOT"] = work_root
+    env["WORK_GATE_STATE_DIR"] = state
+    env["WORK_GATE_CARD_WORKTREE_ROOT"] = own_root
+    env["WORK_GATE_SHELL_CWD"] = shared_root
+
+    failures = 0
+    target_fp = os.path.join(shared_root, "runtime", "src", "lib.rs")
+    shell_got, shell_reason = decide(env, "Bash", {"command": "echo hi > runtime/src/lib.rs"})
+    write_got, write_reason = decide(env, "Write", {"file_path": target_fp, "content": "x"})
+    ok = (shell_got == "deny" and write_got == "deny" and
+          "not confirmed to be the same repository" in (shell_reason or "") and
+          "not confirmed to be the same repository" in (write_reason or ""))
+    print(("  ok   " if ok else "  FAIL ") +
+          "разные репозитории — оба отказа не подставляют адрес")
+    if not ok:
+        print("        shell:  " + (shell_reason or "")[:400])
+        print("        write:  " + (write_reason or "")[:400])
+    failures += 0 if ok else 1
+
+    shell_base = (shell_reason or "").split("\nCaught by:")[0]
+    write_base = (write_reason or "").split("\n" + SHELL_SCOPE_NOTE_MARKER)[0] \
+        if SHELL_SCOPE_NOTE_MARKER in (write_reason or "") else (write_reason or "")
+    ok2 = shell_base == write_base
+    print(("  ok   " if ok2 else "  FAIL ") +
+          "разные репозитории — база текста отказа тоже совпадает")
+    if not ok2:
+        print("        shell:  " + (shell_reason or "")[:400])
+        print("        write:  " + (write_reason or "")[:400])
+    failures += 0 if ok2 else 1
+    return failures
+
+
 def scope_cases(base_env, base):
     """Rule 1b: the gate governs only the repository that carries the work-management
     system — an ai/ directory holding both card kinds as real directories of its own."""
@@ -739,6 +962,10 @@ def main():
     print("\nРазрешение на подъём исполнителя:")
     failures += sanction_cases(env, base)
     failures += scope_cases(env, base)
+
+    print("\nГраница рабочей копии на записи оболочкой (HRN-107):")
+    failures += shell_write_boundary_cases(env, base)
+    failures += shell_write_boundary_cross_repository_cases(env, base)
 
     print("\n%d случаев не прошли" % failures)
     return 1 if failures else 0

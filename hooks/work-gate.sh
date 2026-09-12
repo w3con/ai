@@ -1674,34 +1674,66 @@ CROSS_REPOSITORY_BOUNDARY_TEMPLATE = (
     "stop. Return this step to the orchestrator instead: bin/work-question %s --root %s."
 )
 
+# HRN-107: the same boundary judged on a shell write, not only on a Write/Edit call — a table
+# of four forms, and the one line every denial this rule and rule 6a both print, naming what
+# is checked and what is deliberately not, so neither refusal reads as a full barrier.
+SHELL_WRITE_FORM_TABLE = (
+    ("output redirection", ">, >>, >|, a leading stream number (2>, 2>>), or &>"),
+    ("tee", "with or without -a"),
+    ("cp/mv destination", "the last non-option argument, or -t/--target-directory's own value"),
+    ("sed -i", "the file arguments left once its own flags are parsed"),
+)
+
+SHELL_WRITE_FORMS_TEXT = "; ".join(
+    "%s (%s)" % (name, desc) for name, desc in SHELL_WRITE_FORM_TABLE
+)
+
+SHELL_BOUNDARY_SCOPE_NOTE = (
+    "This boundary is judged on a shell write too, by these forms only: %s. Two things are "
+    "never judged at all: a write made from inside a heredoc body by another program (e.g. "
+    "`python3 <<'EOF'` opening a file inside its own body), and a relative target after `cd` "
+    "to a value that is not a literal path (a variable, a command substitution)." %
+    SHELL_WRITE_FORMS_TEXT
+)
+
+def working_copy_boundary_denial(real_fp, card_id):
+    """The one decision both rule 6a (Write/Edit) and rule 6c (a Bash call's own write
+    target) judge by, rather than two similar ones (HRN-107). `real_fp` is an already
+    realpath'd, absolute target. None when it is fine; otherwise (text, rule_suffix) — text
+    carries no scope note of its own, since rule 6a and rule 6c each want a different lead-in
+    around SHELL_BOUNDARY_SCOPE_NOTE and append it themselves."""
+    real_card_dir = os.path.realpath(card_dir)
+    if os.path.dirname(real_fp) == real_card_dir:
+        return None
+    shared_root = resolve_shared_checkout_root()
+    own_root = find_card_worktree_root(card_id)
+    if not (shared_root and own_root):
+        return None
+    real_shared_root = os.path.realpath(shared_root)
+    real_own_root = os.path.realpath(own_root)
+    inside_shared = (real_fp == real_shared_root or
+                      real_fp.startswith(real_shared_root + os.sep))
+    inside_own = (real_fp == real_own_root or
+                  real_fp.startswith(real_own_root + os.sep))
+    if not (inside_shared and not inside_own):
+        return None
+    if same_repository(real_shared_root, real_own_root) is not True:
+        return (CROSS_REPOSITORY_BOUNDARY_TEMPLATE %
+                (real_fp, real_own_root, card_id, work_root),
+                "working-copy-boundary-cross-repository")
+    rel = os.path.relpath(real_fp, real_shared_root)
+    right_path = os.path.join(real_own_root, rel)
+    return (WORKING_COPY_BOUNDARY_TEMPLATE % (real_fp, real_own_root, right_path),
+            "working-copy-boundary")
+
 if brief.get("role") == "executor" and tool_name in ("Write", "Edit") and card_dir is not None:
     fp = file_path_of(tool_input)
     if fp is not None:
         real_fp = os.path.realpath(fp)
-        real_card_dir = os.path.realpath(card_dir)
-        if os.path.dirname(real_fp) != real_card_dir:
-            shared_root = resolve_shared_checkout_root()
-            own_root = find_card_worktree_root(brief["card"])
-            if shared_root and own_root:
-                real_shared_root = os.path.realpath(shared_root)
-                real_own_root = os.path.realpath(own_root)
-                inside_shared = (real_fp == real_shared_root or
-                                  real_fp.startswith(real_shared_root + os.sep))
-                inside_own = (real_fp == real_own_root or
-                              real_fp.startswith(real_own_root + os.sep))
-                if inside_shared and not inside_own:
-                    if same_repository(real_shared_root, real_own_root) is not True:
-                        deny_and_exit(
-                            CROSS_REPOSITORY_BOUNDARY_TEMPLATE %
-                            (real_fp, real_own_root, brief["card"], work_root),
-                            "work-gate.working-copy-boundary-cross-repository"
-                        )
-                    rel = os.path.relpath(real_fp, real_shared_root)
-                    right_path = os.path.join(real_own_root, rel)
-                    deny_and_exit(
-                        WORKING_COPY_BOUNDARY_TEMPLATE % (real_fp, real_own_root, right_path),
-                        "work-gate.working-copy-boundary"
-                    )
+        result = working_copy_boundary_denial(real_fp, brief["card"])
+        if result:
+            text, suffix = result
+            deny_and_exit(text + "\n" + SHELL_BOUNDARY_SCOPE_NOTE, "work-gate." + suffix)
 
 # --- 6b. GIT COMMAND (HRN-70): an executor's own `git` invocation is read-only by default —
 # status, diff, log, show, rev-parse, ls-files, worktree list — and anything else is refused,
@@ -1894,6 +1926,217 @@ if brief.get("role") == "executor" and tool_name == "Bash":
         if subcommand in GIT_READ_ONLY_SUBCOMMANDS:
             continue
         deny_and_exit(git_command_denial(subcommand, brief["card"]), "work-gate.git-command")
+
+# --- 6c. WORKING COPY BOUNDARY ON SHELL WRITES (HRN-107): rule 6a above judges a Write/Edit
+# call; this judges a Bash call's own write target the same way, by the same
+# working_copy_boundary_denial() function, so the two are one decision rather than two
+# similar ones. Only the four forms SHELL_WRITE_FORM_TABLE names are recognised — output
+# redirection, tee, cp/mv's own destination, sed -i's own file arguments — and every denial
+# this rule prints names both the form it actually caught and, via SHELL_BOUNDARY_SCOPE_NOTE,
+# the full list of forms checked and the two things never checked at all: a write made from
+# inside a heredoc body by another program, and a relative target following a `cd` to a value
+# that is not a literal path.
+#
+# The base directory a relative target resolves against is this hook's own actual working
+# directory at the moment of the call (executor_shell_cwd() below) — HRN-107.A.1 measured
+# this live and found it equal to the shared checkout's own path, the same one every Bash
+# call the executor makes is reset to. A literal `cd` earlier in the SAME command moves that
+# base for every statement after it; a `cd` to a non-literal value (a variable, a command
+# substitution) makes the base unknown for the rest of the command, and a relative target
+# after that point is skipped rather than judged — the deliberate gap named above, decided in
+# favour of a silent pass rather than a false refusal on an executor standing in its own
+# working copy and writing into it (HRN-107, "Данные": "Ложный отказ здесь останавливает
+# обычную работу целиком... тогда как пропуск оставляет ровно ту дыру, которая честно названа
+# в тексте обоих отказов").
+
+def _strip_quotes(raw):
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        return raw[1:-1]
+    return raw
+
+def _statement_tokens(text):
+    return [(m.group(0), m.start(), m.end()) for m in re.finditer(r'\S+', text)]
+
+def _program_word(tokens):
+    return os.path.basename(tokens[0][0]) if tokens else None
+
+_SHELL_REDIRECT_OPERATOR_RE = re.compile(r'[0-9]{1,2}>{1,2}|&>|>\||>>|>')
+
+def _redirect_targets(blanked, original):
+    """Every ("output redirection", target) pair on this one statement's own blanked text —
+    a quote-blanked copy, same length, same positions as `original` — the operator matched
+    on the blanked text, the target string read back from `original` at the same span so a
+    quoted target keeps its real content and then has its own quotes stripped. `>&1`/`>&-`
+    (fd duplication or fd close) is never a file write and is skipped."""
+    targets = []
+    for m in _SHELL_REDIRECT_OPERATOR_RE.finditer(blanked):
+        op, start = m.group(0), m.start()
+        if op[0].isdigit():
+            before = blanked[start - 1] if start > 0 else None
+            if before is not None and before not in " \t":
+                continue  # the digit belongs to a longer token, not a leading stream number
+        pos = m.end()
+        while pos < len(blanked) and blanked[pos] in " \t":
+            pos += 1
+        if pos < len(blanked) and blanked[pos] == "&":
+            continue  # fd duplication or fd close (>&1, >&-) — never a file write
+        word = re.match(r'\S+', blanked[pos:])
+        if not word:
+            continue
+        targets.append(("output redirection", _strip_quotes(original[pos:pos + word.end()])))
+    return targets
+
+def _tee_targets(tokens, original):
+    if _program_word(tokens) != "tee":
+        return []
+    out = []
+    for tok, start, end in tokens[1:]:
+        if tok in ("-a", "--append", "-") or tok.startswith("-"):
+            continue
+        out.append(("tee", _strip_quotes(original[start:end])))
+    return out
+
+def _cp_mv_targets(tokens, original):
+    if _program_word(tokens) not in ("cp", "mv"):
+        return []
+    positional = []
+    target_dir_span = None
+    i = 1
+    while i < len(tokens):
+        tok, start, end = tokens[i]
+        if tok in ("-t", "--target-directory") and i + 1 < len(tokens):
+            target_dir_span = tokens[i + 1][1:3]
+            i += 2
+            continue
+        if tok.startswith("--target-directory="):
+            value_start = start + len("--target-directory=")
+            target_dir_span = (value_start, end)
+            i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        positional.append((start, end))
+        i += 1
+    if target_dir_span is not None:
+        vstart, vend = target_dir_span
+        return [("cp/mv destination", _strip_quotes(original[vstart:vend]))]
+    if len(positional) >= 2:
+        start, end = positional[-1]
+        return [("cp/mv destination", _strip_quotes(original[start:end]))]
+    return []
+
+def _sed_i_targets(tokens, original):
+    if _program_word(tokens) != "sed":
+        return []
+    has_i = False
+    script_from_flag = False
+    positional = []
+    i = 1
+    while i < len(tokens):
+        tok, start, end = tokens[i]
+        if tok == "-i":
+            has_i = True
+            if i + 1 < len(tokens) and tokens[i + 1][0] in ("''", '""'):
+                i += 2  # BSD sed's own separate-argument suffix, consumed
+                continue
+            i += 1
+            continue
+        if tok.startswith("-i") and not tok.startswith("--"):
+            has_i = True  # GNU sed's own attached suffix, e.g. -i.bak
+            i += 1
+            continue
+        if tok == "--in-place" or tok.startswith("--in-place="):
+            has_i = True
+            i += 1
+            continue
+        if tok in ("-e", "--expression", "-f", "--file"):
+            script_from_flag = True
+            i += 2
+            continue
+        if tok.startswith("--expression=") or tok.startswith("--file="):
+            script_from_flag = True
+            i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        positional.append((start, end))
+        i += 1
+    if not has_i:
+        return []
+    files = positional if script_from_flag else positional[1:]
+    return [("sed -i", _strip_quotes(original[start:end])) for start, end in files]
+
+def _statement_write_targets(blanked, original, tokens):
+    return (_redirect_targets(blanked, original) + _tee_targets(tokens, original) +
+            _cp_mv_targets(tokens, original) + _sed_i_targets(tokens, original))
+
+def _write_statements(command):
+    """git_statements(command), with one correction: CHAINING_RE splits on a bare `|`
+    wherever it sits, including inside the two-character redirection operator `>|`, which
+    reads as one token to the shell and never as a pipe. `>|` is protected with a
+    length-preserving placeholder before the split and restored afterward, so a statement
+    such as `echo hi >| path` is never cut in two at the very operator this rule looks for."""
+    protected = command.replace(">|", ">\x01")
+    return [statement.replace("\x01", "|") for statement in git_statements(protected)]
+
+_LITERAL_PATH_RE = re.compile(r'[$`*?\[\]]')
+
+def executor_shell_cwd():
+    """The directory every Bash call's own cwd is reset to before this executor's shell runs
+    it. HRN-107.A.1 measured this live: this hook's own os.getcwd(), read from a subprocess
+    spawned with no cwd= of its own (the same way every git-plumbing call in this file
+    already runs), equalled both that same call's own `pwd` and the first entry of `git
+    worktree list --porcelain` — the shared checkout's own path. WORK_GATE_SHELL_CWD
+    overrides this outright, the same test-only escape every other lookup in this file that
+    reaches outside itself already carries."""
+    return os.environ.get("WORK_GATE_SHELL_CWD") or os.getcwd()
+
+def shell_write_targets_with_base(command, cwd):
+    """Every (form, resolved absolute path) this command's own head names as a write target —
+    judged statement by statement (_write_statements() above, which already splits on `&&`,
+    `;`, `|` and a bare newline outside any quoted span, protects `>|` from that same split,
+    and already stops at a heredoc marker, so `echo … | tee путь` yields "tee путь" as its own
+    statement and a heredoc body is never reached at all). A relative target resolves against
+    `cwd`, moved by a literal `cd` earlier in the same command; a `cd` to a non-literal value
+    leaves every later relative target unresolved, and those are left out of the answer
+    rather than judged. An absolute target is always included, `cd` or no `cd`."""
+    results = []
+    base = cwd
+    base_known = True
+    for original in _write_statements(command):
+        blanked = QUOTED_SPAN_RE.sub(lambda m: "x" * len(m.group(0)), original)
+        tokens = _statement_tokens(blanked)
+        if tokens and tokens[0][0] == "cd" and len(tokens) >= 2:
+            cd_start, cd_end = tokens[1][1], tokens[1][2]
+            cd_raw = _strip_quotes(original[cd_start:cd_end])
+            if _LITERAL_PATH_RE.search(cd_raw):
+                base_known = False
+            else:
+                base = os.path.expanduser(cd_raw) if cd_raw.startswith("~") else \
+                    (cd_raw if os.path.isabs(cd_raw) else os.path.join(base, cd_raw))
+                base_known = True
+            continue  # a `cd` statement itself never writes anything
+        for form, raw_target in _statement_write_targets(blanked, original, tokens):
+            if os.path.isabs(raw_target):
+                results.append((form, raw_target))
+            elif base_known:
+                results.append((form, os.path.join(base, raw_target)))
+            # else: a relative target after a non-literal `cd` — left unresolved, not judged
+    return results
+
+if brief.get("role") == "executor" and tool_name == "Bash" and card_dir is not None:
+    shell_command = command_of(tool_input)
+    for form, resolved in shell_write_targets_with_base(shell_command, executor_shell_cwd()):
+        real_target = os.path.realpath(resolved)
+        result = working_copy_boundary_denial(real_target, brief["card"])
+        if result:
+            text, suffix = result
+            deny_and_exit(
+                text + "\nCaught by: %s.\n%s" % (form, SHELL_BOUNDARY_SCOPE_NOTE),
+                "work-gate.shell-" + suffix
+            )
 
 # --- 7. LOG-WRITE CEILING (HRN-2.B, extended by HRN-21.B): twenty calls without a log.md
 # write ------------------------------------------------------------------------------------
