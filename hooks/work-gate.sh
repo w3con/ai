@@ -806,6 +806,49 @@ def find_card_worktree_root(card_id):
                 return current_path
     return None
 
+def declared_repos_beyond_primary(card_id):
+    """HRN-109.D.3: every repository this session's own sanction names in its `code_repos`
+    field beyond the first — the first entry is always the card folder's own repository,
+    already the one rule 6a's existing (shared_root, own_root) pair judges, so re-checking it
+    here would only duplicate that work. `[]` when no sanction is found, the sanction carries
+    no `code_repos` field at all (a card handed over before HRN-109.D.1, or a sanction written
+    by a caller that never passed one), or that field names at most one repository — the
+    ordinary, single-repository card reads back exactly as before this rule existed: no
+    additional repository is ever checked, so its behaviour is untouched."""
+    sanction = matching_sanction(card_id)
+    if not sanction:
+        return []
+    repos = sanction.get("code_repos")
+    if not isinstance(repos, list) or len(repos) <= 1:
+        return []
+    return [str(r) for r in repos[1:]]
+
+def find_repo_worktree_root(repo, card_id):
+    """The same resolution find_card_worktree_root() performs, scoped to `repo` alone via
+    `git -C <repo> worktree list --porcelain` rather than this hook's own default cwd — so a
+    declared second repository's own linked working copy is found on its own terms, never by
+    accident inheriting whatever repository the hook process happens to be sitting in. None on
+    any failure to run git there at all, or when no worktree of `repo` carries this card's own
+    branch."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo, "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    target_branch = "refs/heads/work/" + card_id.lower()
+    current_path = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):].strip()
+        elif line.startswith("branch "):
+            if line[len("branch "):].strip() == target_branch and current_path:
+                return current_path
+    return None
+
 # --- 2. no sanction, no executor spawn (HRN-48.B, reshaped per-card by HRN-52.A.1) -----
 def sanctions_dir(sid):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(sid)) if sid else "_no_session_id_"
@@ -1734,6 +1777,40 @@ if brief.get("role") == "executor" and tool_name in ("Write", "Edit") and card_d
         if result:
             text, suffix = result
             deny_and_exit(text + "\n" + SHELL_BOUNDARY_SCOPE_NOTE, "work-gate." + suffix)
+
+        # HRN-109.D.3: the same boundary, repeated for every repository this card declares
+        # beyond the primary one already judged above — a target inside one of those
+        # repositories' own shared checkout, but not inside that same repository's own working
+        # copy for this card, is refused exactly the same way; a target already inside that
+        # working copy is never foreign and never judged at all. Since each of these
+        # repositories is resolved and searched on its own (`-C <repo>`), the shared checkout
+        # and the working copy this loop compares always belong to the very same repository by
+        # construction, so this never reaches the CROSS_REPOSITORY_BOUNDARY_TEMPLATE case above
+        # — that one stays for the folder-vs-worktree_path mismatch rule 6a's own primary check
+        # already carries. A sanction naming no `code_repos` field at all, or naming at most one
+        # repository, changes nothing here: the loop below then runs zero times, exactly the
+        # behaviour before this rule existed.
+        if os.path.dirname(real_fp) != real_card_dir:
+            for repo in declared_repos_beyond_primary(brief["card"]):
+                real_repo = os.path.realpath(repo)
+                inside_repo = (real_fp == real_repo or
+                               real_fp.startswith(real_repo + os.sep))
+                if not inside_repo:
+                    continue
+                repo_own_root = find_repo_worktree_root(real_repo, brief["card"])
+                if not repo_own_root:
+                    continue
+                real_repo_own_root = os.path.realpath(repo_own_root)
+                inside_repo_own = (real_fp == real_repo_own_root or
+                                    real_fp.startswith(real_repo_own_root + os.sep))
+                if inside_repo_own:
+                    continue
+                rel = os.path.relpath(real_fp, real_repo)
+                right_path = os.path.join(real_repo_own_root, rel)
+                deny_and_exit(
+                    WORKING_COPY_BOUNDARY_TEMPLATE % (real_fp, real_repo_own_root, right_path),
+                    "work-gate.working-copy-boundary"
+                )
 
 # --- 6b. GIT COMMAND (HRN-70): an executor's own `git` invocation is read-only by default —
 # status, diff, log, show, rev-parse, ls-files, worktree list — and anything else is refused,
