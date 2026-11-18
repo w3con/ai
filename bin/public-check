@@ -643,6 +643,13 @@ def scanner_platform() -> tuple[str, str, str]:
     return key, digest, f"gitleaks_{GITLEAKS_VERSION}_{key}.tar.gz"
 
 
+def exact_gitleaks_version(output: bytes) -> bool:
+    try:
+        return output.decode("ascii").strip() == GITLEAKS_VERSION
+    except UnicodeDecodeError:
+        return False
+
+
 def install_scanner(destination: Path) -> Path:
     key, expected, archive_name = scanner_platform()
     url = f"https://github.com/gitleaks/gitleaks/releases/download/v{GITLEAKS_VERSION}/{archive_name}"
@@ -675,7 +682,7 @@ def install_scanner(destination: Path) -> Path:
             os.fsync(stream.fileno())
         os.chmod(temporary, 0o700)
         version = subprocess.run([temporary, "version"], capture_output=True, check=False)
-        if version.returncode or GITLEAKS_VERSION.encode() not in version.stdout:
+        if version.returncode or not exact_gitleaks_version(version.stdout):
             raise CheckError("downloaded Gitleaks binary did not report the pinned version")
         os.replace(temporary, output)
     except BaseException:
@@ -699,7 +706,7 @@ def scanner_binary(override: str | None) -> Path:
                                     check=False, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             return False
-        return result.returncode == 0 and GITLEAKS_VERSION.encode() in result.stdout
+        return result.returncode == 0 and exact_gitleaks_version(result.stdout)
 
     if requested:
         binary = Path(requested).expanduser().resolve()

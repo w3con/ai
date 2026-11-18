@@ -6,10 +6,12 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 import ast
 import hashlib
+import io
 import json
 import os
 import subprocess
 import tempfile
+import tarfile
 import tokenize
 import unittest
 from pathlib import Path
@@ -222,6 +224,38 @@ class PublicCheckUnitTests(unittest.TestCase):
                     mock.patch.dict(os.environ, {"GITLEAKS_BIN": ""}), \
                     mock.patch.object(public_check.shutil, "which", return_value=None):
                 self.assertEqual(public_check.scanner_binary(None), binary.resolve())
+
+    def test_scanner_binary_rejects_neighbor_version_82430(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            binary = home / ".cache" / "ai-toolkit" / "public-check" / "gitleaks-8.24.3" / "gitleaks"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\nprintf '%s\\n' '8.24.30'\n", encoding="utf-8")
+            binary.chmod(0o700)
+            with mock.patch.object(Path, "home", return_value=home), \
+                    mock.patch.dict(os.environ, {"GITLEAKS_BIN": ""}), \
+                    mock.patch.object(public_check.shutil, "which", return_value=None):
+                with self.assertRaises(public_check.CheckError):
+                    public_check.scanner_binary(None)
+
+    def test_installer_rejects_neighbor_version_82430(self) -> None:
+        binary = b"#!/bin/sh\nprintf '%s\\n' '8.24.30'\n"
+        archive_bytes = io.BytesIO()
+        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+            info = tarfile.TarInfo("gitleaks")
+            info.mode = 0o755
+            info.size = len(binary)
+            archive.addfile(info, io.BytesIO(binary))
+        payload = archive_bytes.getvalue()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "scanner-cache"
+            with mock.patch.object(public_check, "scanner_platform",
+                                   return_value=("fixture", hashlib.sha256(payload).hexdigest(), "fixture.tar.gz")), \
+                    mock.patch.object(public_check.urllib.request, "urlopen", return_value=io.BytesIO(payload)):
+                with self.assertRaisesRegex(public_check.CheckError, "did not report the pinned version"):
+                    public_check.install_scanner(destination)
+            self.assertFalse((destination / "gitleaks").exists())
+            self.assertEqual(list(destination.iterdir()), [])
 
 
 class PublicCheckIntegrationTests(unittest.TestCase):

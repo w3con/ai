@@ -45,15 +45,43 @@ def init_repo(path: Path, *, bare: bool = False) -> None:
 
 
 def migration_test_environment(home: Path) -> dict[str, str]:
-    """Keep the pinned scanner reachable when migration tests isolate HOME."""
+    """Isolate HOME without smuggling a scanner path through GITLEAKS_BIN."""
     env = dict(os.environ)
-    if not env.get("GITLEAKS_BIN") and not shutil.which("gitleaks"):
-        cached = Path.home() / ".cache" / "ai-toolkit" / "public-check" / \
-            "gitleaks-8.24.3" / "gitleaks"
-        if cached.is_file():
-            env["GITLEAKS_BIN"] = str(cached)
+    env.pop("GITLEAKS_BIN", None)
     env["HOME"] = str(home)
     return env
+
+
+def write_test_gitleaks(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/usr/bin/env python3\n"
+                    "import json, re, subprocess, sys\n"
+                    "from pathlib import Path\n"
+                    "if len(sys.argv) > 1 and sys.argv[1] == 'version':\n"
+                    "    print('8.24.3'); raise SystemExit(0)\n"
+                    "if len(sys.argv) < 2 or sys.argv[1] != 'detect': raise SystemExit(2)\n"
+                    "args=sys.argv[2:]; source=None; report=None; history=False\n"
+                    "for i,arg in enumerate(args):\n"
+                    "    if arg == '--source' and i+1 < len(args): source=args[i+1]\n"
+                    "    if arg == '--report-path' and i+1 < len(args): report=args[i+1]\n"
+                    "    if arg.startswith('--log-opts='): history=True\n"
+                    "if not source or not report: raise SystemExit(2)\n"
+                    "if history:\n"
+                    "    proc=subprocess.run(['git','-C',source,'log','-p','--all'],capture_output=True,text=True)\n"
+                    "    data=proc.stdout.splitlines()\n"
+                    "    filename=source\n"
+                    "else:\n"
+                    "    data=[]; filename=source\n"
+                    "    for item in Path(source).rglob('*'):\n"
+                    "        if item.is_file():\n"
+                    "            try: data.extend(item.read_text(encoding='utf-8',errors='ignore').splitlines())\n"
+                    "            except OSError: pass\n"
+                    "            filename=str(item)\n"
+                    "pattern=re.compile(r\"(?:api_key|secret)\\s*=\\s*['\\\"]SYNTHETIC_(?:TOKEN_A{32}|HISTORY_B{32})\",re.I)\n"
+                    "findings=[{'File':filename,'StartLine':n,'RuleID':'synthetic-test-secret'} for n,line in enumerate(data,1) if pattern.search(line)]\n"
+                    "Path(report).write_text(json.dumps(findings),encoding='utf-8')\n"
+                    "raise SystemExit(1 if findings else 0)\n", encoding="utf-8")
+    path.chmod(0o700)
 
 
 class MigrationTests(unittest.TestCase):
@@ -66,6 +94,7 @@ class MigrationTests(unittest.TestCase):
         self.bare = self.base / "release.git"
         self.release = self.base / "release-work"
         self.home.mkdir()
+        write_test_gitleaks(self.home / ".cache/ai-toolkit/public-check/gitleaks-8.24.3/gitleaks")
         self.make_old_checkout()
         self.make_release()
 
@@ -300,6 +329,7 @@ if projects.is_dir():
 
     def test_default_public_checks_run_in_an_isolated_home(self) -> None:
         env = migration_test_environment(self.home)
+        self.assertNotIn("GITLEAKS_BIN", env)
         args = [sys.executable, str(MIGRATOR), "--target", str(self.outer),
                 "--repository", str(self.bare), "--revision", self.revision]
         result = subprocess.run(args, env=env, capture_output=True, text=True, check=False)
@@ -307,6 +337,74 @@ if projects.is_dir():
         preflight_home = self.base / ".checkout.migration/preflight-home"
         self.assertTrue((preflight_home / ".claude/settings.json").is_file())
         self.assertNotEqual(preflight_home.resolve(), self.home.resolve())
+        self.assertFalse((preflight_home / ".cache/ai-toolkit/public-check/gitleaks-8.24.3/gitleaks").exists(),
+                         "a verified original-home cache binary should be propagated, not reinstalled")
+
+    def test_preflight_installs_pinned_scanner_into_isolated_home_when_no_cache_exists(self) -> None:
+        module = runpy.run_path(str(MIGRATOR))
+        stage = self.base / "installer-stage"
+        (stage / "bin").mkdir(parents=True)
+        script = stage / "bin/public-check"
+        script.write_text("#!/usr/bin/env python3\n"
+                          "import os, pathlib, sys\n"
+                          "if sys.argv[1:] != ['install-gitleaks']: raise SystemExit(21)\n"
+                          "home = pathlib.Path(os.environ['HOME'])\n"
+                          "dest = home / '.cache/ai-toolkit/public-check/gitleaks-8.24.3/gitleaks'\n"
+                          "dest.parent.mkdir(parents=True, exist_ok=True)\n"
+                          "dest.write_text(\"#!/bin/sh\\nprintf '8.24.3\\\\n'\\n\")\n"
+                          "dest.chmod(0o700)\n"
+                          "(home / 'installer-called').write_text('yes')\n", encoding="utf-8")
+        script.chmod(0o700)
+        source_home = self.base / "no-scanner-home"
+        check_home = self.base / "isolated-installer-home"
+        source_home.mkdir()
+        check_home.mkdir()
+        source_env = migration_test_environment(source_home)
+        isolated_env = dict(source_env, HOME=str(check_home))
+
+        scanner = module["ensure_preflight_gitleaks"](stage, check_home, source_env, isolated_env)
+        expected = check_home / ".cache/ai-toolkit/public-check/gitleaks-8.24.3/gitleaks"
+        self.assertEqual(scanner, expected.resolve())
+        self.assertTrue((check_home / "installer-called").is_file())
+        self.assertEqual(subprocess.run([str(scanner), "version"], capture_output=True,
+                                        text=True, check=True).stdout.strip(),
+                         "8.24.3")
+
+    def test_preflight_accepts_exact_gitleaks_version_and_rejects_neighbor_version(self) -> None:
+        module = runpy.run_path(str(MIGRATOR))
+        binary = self.base / "versioned-gitleaks"
+        binary.write_text("#!/bin/sh\nprintf '8.24.3\\n'\n", encoding="utf-8")
+        binary.chmod(0o700)
+        source_env = {"HOME": str(self.home), "GITLEAKS_BIN": str(binary)}
+        isolated_env = dict(source_env, HOME=str(self.base / "preflight-home"))
+        stage = self.base / "unneeded-stage"
+        check_home = self.base / "preflight-home"
+        self.assertEqual(module["ensure_preflight_gitleaks"](
+            stage, check_home, source_env, isolated_env), binary.resolve())
+
+        binary.write_text("#!/bin/sh\nprintf '8.24.30\\n'\n", encoding="utf-8")
+        binary.chmod(0o700)
+        with self.assertRaisesRegex(module["MigrationError"], "GITLEAKS_BIN must identify"):
+            module["ensure_preflight_gitleaks"](stage, check_home, source_env, isolated_env)
+
+    def test_preflight_stops_when_pinned_scanner_installation_fails(self) -> None:
+        module = runpy.run_path(str(MIGRATOR))
+        stage = self.base / "failed-installer-stage"
+        (stage / "bin").mkdir(parents=True)
+        script = stage / "bin/public-check"
+        script.write_text("#!/usr/bin/env python3\nraise SystemExit(17)\n", encoding="utf-8")
+        script.chmod(0o700)
+        source_home = self.base / "no-scanner-home-failure"
+        check_home = self.base / "isolated-installer-failure"
+        source_home.mkdir()
+        check_home.mkdir()
+        source_env = migration_test_environment(source_home)
+        isolated_env = dict(source_env, HOME=str(check_home))
+
+        with self.assertRaisesRegex(module["MigrationError"], "command failed"):
+            module["ensure_preflight_gitleaks"](stage, check_home, source_env, isolated_env)
+        self.assertFalse((check_home / ".cache/ai-toolkit/public-check/gitleaks-8.24.3/gitleaks").exists())
+        self.assertFalse((source_home / ".cache").exists())
 
     @unittest.skipIf(os.environ.get("AI_TOOLKIT_MIGRATION_PREFLIGHT") == "1",
                      "the migrator preflight already runs the candidate test suite")
@@ -325,11 +423,15 @@ if projects.is_dir():
         actual_revision = cmd(["git", "-C", str(release_root), "rev-parse", "HEAD"]).stdout.strip()
 
         env = migration_test_environment(self.home)
+        self.assertNotIn("GITLEAKS_BIN", env)
         result = subprocess.run([
             sys.executable, str(MIGRATOR), "--target", str(self.outer),
             "--repository", str(actual_bare), "--revision", actual_revision,
         ], env=env, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
+        preflight_home = self.base / ".checkout.migration/preflight-home"
+        self.assertFalse((preflight_home / ".cache/ai-toolkit/public-check/gitleaks-8.24.3/gitleaks").exists(),
+                         "real-candidate CLI must use the only available default original-home cache")
         self.assertEqual(cmd(["git", "-C", str(self.target), "rev-parse", "HEAD"]).stdout.strip(), actual_revision)
         self.assertTrue((self.target / "commands/.gitkeep").is_file())
         self.assertEqual((self.home / ".claude/commands").resolve(), (self.target / "commands").resolve())

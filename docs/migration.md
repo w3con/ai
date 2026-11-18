@@ -2,6 +2,8 @@
 
 `bin/migrate-public-release` replaces an existing checkout with an exact public commit while preserving the target machine's local recovery data. The script uses Python's standard library and Git. Run it from a terminal on the machine being migrated, not from the live toolkit session or by pulling into the old checkout.
 
+The Python 3 interpreter used for migration and its preflight suite must have the declared `PyYAML==6.0.1` dependency available; the knowledge-index tests import it. If it is absent, install the declared dependency before migration with `python3 -m pip install 'PyYAML==6.0.1'`. The migrator resolves Gitleaks 8.24.3 from an explicitly configured binary or the invoking home’s versioned cache; otherwise it installs the checksum-pinned scanner into its restricted preflight home and passes that verified absolute path to the test suite. No global Gitleaks setup is required.
+
 ## Before running
 
 1. Choose the immutable full commit SHA for the accepted release and its public repository URL.

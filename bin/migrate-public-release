@@ -29,6 +29,8 @@ from typing import Any, Iterator
 
 
 SHA_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+GITLEAKS_VERSION = "8.24.3"
+GITLEAKS_RELATIVE_PATH = Path(".cache/ai-toolkit/public-check") / f"gitleaks-{GITLEAKS_VERSION}" / "gitleaks"
 MUTATING_GIT = {"pull", "fetch", "merge", "push", "checkout", "switch", "reset", "rebase", "clean", "update-ref"}
 MANAGED_LINKS = ("CLAUDE.md", "agents", "hooks", "skills", "commands", "statusline-command.sh")
 DEFAULT_CHECKS = [[sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]]
@@ -674,16 +676,66 @@ def public_clone(repository: str, revision: str, old_commits: list[str],
         raise MigrationError("the pinned release is missing required installer files")
 
 
-def run_public_checks(stage: Path, state_dir: Path, checks: list[list[str]]) -> None:
+def valid_gitleaks_binary(path: Path, env: dict[str, str]) -> Path | None:
+    try:
+        binary = path.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        return None
+    try:
+        result = run([str(binary), "version"], env=env, capture=True, check=False, timeout=10)
+    except MigrationError:
+        return None
+    if result.returncode or result.stdout.strip() != GITLEAKS_VERSION:
+        return None
+    return binary
+
+
+def ensure_preflight_gitleaks(stage: Path, check_home: Path,
+                              source_env: dict[str, str], isolated_env: dict[str, str]) -> Path:
+    """Resolve a pinned scanner before HOME is isolated, or install it into that HOME."""
+    configured = source_env.get("GITLEAKS_BIN", "").strip()
+    if configured:
+        scanner = valid_gitleaks_binary(Path(configured), isolated_env)
+        if scanner is None:
+            raise MigrationError(f"GITLEAKS_BIN must identify a working Gitleaks {GITLEAKS_VERSION} binary")
+        return scanner
+
+    original_home = Path(source_env.get("HOME", str(Path.home()))).expanduser().resolve()
+    cached = valid_gitleaks_binary(original_home / GITLEAKS_RELATIVE_PATH, isolated_env)
+    if cached is not None:
+        return cached
+
+    installer = stage / "bin" / "public-check"
+    if installer.is_symlink() or not installer.is_file():
+        raise MigrationError("pinned release has no public-check Gitleaks installer")
+    install_env = dict(isolated_env)
+    install_env.pop("GITLEAKS_BIN", None)
+    run([sys.executable, str(installer), "install-gitleaks"], cwd=stage,
+        env=install_env, timeout=1800)
+    installed = valid_gitleaks_binary(check_home / GITLEAKS_RELATIVE_PATH, isolated_env)
+    if installed is None:
+        raise MigrationError(f"isolated install did not provide verified Gitleaks {GITLEAKS_VERSION}")
+    return installed
+
+
+def run_public_checks(stage: Path, state_dir: Path, checks: list[list[str]],
+                      original_home: Path | None = None) -> None:
     check_home = state_dir / "preflight-home"
     if check_home.is_symlink() or (check_home.exists() and not check_home.is_dir()):
         raise MigrationError("isolated preflight home is not a real directory")
     check_home.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(check_home, 0o700)
-    env = dict(os.environ)
+    source_env = dict(os.environ)
+    if original_home is not None:
+        source_env["HOME"] = str(original_home)
+    env = dict(source_env)
     env["HOME"] = str(check_home)
     env["AI_TOOLKIT_MIGRATION_PREFLIGHT"] = "1"
     env.pop("AI_TOOLKIT_CONFIG", None)
+    scanner = ensure_preflight_gitleaks(stage, check_home, source_env, env)
+    env["GITLEAKS_BIN"] = str(scanner)
     for command in checks:
         run(command, cwd=stage, env=env, timeout=3600)
     run([sys.executable, str(stage / "bin" / "bootstrap.py"), "--root", str(stage)],
@@ -1082,7 +1134,7 @@ def prepare_and_switch(state: dict[str, Any], state_path: Path, target: Path,
         ).hexdigest()
         write_state(state_path, state)
         public_clone(state["repository"], state["revision"], state["old_commits"], stage)
-        run_public_checks(stage, state_dir, checks)
+        run_public_checks(stage, state_dir, checks, home)
         state["phase"] = "clone_verified"
         write_state(state_path, state)
         failpoint("after_clone_verified")
