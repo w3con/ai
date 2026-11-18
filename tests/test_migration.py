@@ -109,9 +109,21 @@ class MigrationTests(unittest.TestCase):
         (self.target / ".private").mkdir()
         (self.target / ".gitignore").write_text(".env\n.private/\n", encoding="utf-8")
         (self.target / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+        old_settings_template = {
+            "model": "old-shared-model",
+            "tone": "neutral",
+            "enabledPlugins": ["synthetic-default-plugin"],
+            "skillOverrides": {"synthetic-skill": {"enabled": False}},
+            "theme": "dark",
+            "preferredNotifChannel": "silent",
+            "agentPushNotifEnabled": False,
+            "skipAutoPermissionPrompt": True,
+            "hooks": {"SessionStart": [{"hooks": [
+                {"type": "command", "command": "hooks/git-sync-notice.sh"},
+            ]}]},
+        }
         (self.target / "settings.json.template").write_text(
-            json.dumps({"tone": "neutral", "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "hooks/git-sync-notice.sh"}]}]}}),
-            encoding="utf-8")
+            json.dumps(old_settings_template), encoding="utf-8")
         (self.target / ".private" / "settings.json").write_text(
             json.dumps({"tone": "neutral"}), encoding="utf-8")
         legacy_style_heading = "## How " + "you write"
@@ -162,7 +174,12 @@ class MigrationTests(unittest.TestCase):
         old_settings = {
             "model": "synthetic-machine-model",
             "tone": "neutral",
-            "enabledPlugins": ["synthetic-plugin"],
+            "enabledPlugins": ["synthetic-default-plugin"],
+            "skillOverrides": {"synthetic-skill": {"enabled": False}},
+            "theme": "dark",
+            "preferredNotifChannel": "silent",
+            "agentPushNotifEnabled": False,
+            "skipAutoPermissionPrompt": True,
             "hooks": {"SessionStart": [{"hooks": [
                 {"type": "command", "command": "bash " + str(self.target / "hooks/git-sync-notice.sh")},
                 {"type": "command", "command": "bash /synthetic/custom-hook.sh"},
@@ -196,7 +213,12 @@ class MigrationTests(unittest.TestCase):
         (self.release / ".gitignore").write_text(".env\n.private/\n__pycache__/\n", encoding="utf-8")
         (self.release / "tracked.txt").write_text("public baseline\n", encoding="utf-8")
         (self.release / "settings.json.template").write_text(json.dumps({
+            "model": "new-shared-model",
             "tone": "new-default",
+            "theme": "system",
+            "preferredNotifChannel": "in-app",
+            "agentPushNotifEnabled": True,
+            "skipAutoPermissionPrompt": False,
             "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "git-sync-notice.sh"}]}]},
             "permissions": {"allow": ["WebSearch"]},
         }), encoding="utf-8")
@@ -474,7 +496,12 @@ if projects.is_dir():
         settings = json.loads((self.home / ".claude/settings.json").read_text())
         self.assertEqual(settings["model"], "synthetic-machine-model")
         self.assertEqual(settings["tone"], "neutral")
-        self.assertEqual(settings["enabledPlugins"], ["synthetic-plugin"])
+        self.assertEqual(settings["enabledPlugins"], ["synthetic-default-plugin"])
+        self.assertEqual(settings["skillOverrides"], {"synthetic-skill": {"enabled": False}})
+        self.assertEqual(settings["theme"], "dark")
+        self.assertEqual(settings["preferredNotifChannel"], "silent")
+        self.assertIs(settings["agentPushNotifEnabled"], False)
+        self.assertIs(settings["skipAutoPermissionPrompt"], True)
         self.assertEqual(settings["home"], os.path.realpath(self.home))
         session_hooks = [hook for entry in settings["hooks"]["SessionStart"]
                          for hook in entry.get("hooks", [])]

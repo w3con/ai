@@ -317,8 +317,7 @@ def managed_preferences(old_template: Path, installed_settings: Path,
     for key, value in actual.items():
         if key in {"hooks", "_comment"}:
             continue
-        if key not in base or value != base[key]:
-            prefs[key] = value
+        prefs[key] = value
     old_managed = hook_command_basenames(base.get("hooks", {}))
     new_hooks = json.loads(json.dumps(new_base.get("hooks", {})))
     actual_hooks = actual.get("hooks", {})
