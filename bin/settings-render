@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Render shared settings plus an optional private overlay deterministically.
+
+The renderer is intended to be called by both the installer and the settings-stamp
+gate.  It uses only the Python standard library.  Rendering with ``--digest`` writes
+the SHA-256 of exactly the bytes that ``--output`` would install, including its final
+newline.  It does not inspect or modify the current user's installed settings unless
+the caller explicitly supplies those paths.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+class RenderError(ValueError):
+    """Invalid settings input or unsafe rendering request."""
+
+
+def _load_object(path: Path, *, optional: bool = False) -> dict[str, Any]:
+    if optional and not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RenderError(f"cannot read valid JSON from {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RenderError(f"settings root must be a JSON object: {path}")
+    return value
+
+
+def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Return a recursive object merge; arrays and scalar values replace wholesale."""
+    result = dict(base)
+    for key, value in overlay.items():
+        old = result.get(key)
+        if isinstance(old, dict) and isinstance(value, dict):
+            result[key] = _merge(old, value)
+        else:
+            result[key] = value
+    return result
+
+
+def _expand(value: Any, home: str) -> Any:
+    if isinstance(value, str):
+        rendered = value.replace("__HOME__", home)
+        if "__HOME__" in rendered:
+            raise RenderError("unexpanded __HOME__ placeholder")
+        return rendered
+    if isinstance(value, list):
+        return [_expand(item, home) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand(item, home) for key, item in value.items()}
+    return value
+
+
+def render(template: Path, overlay: Path | None, home: str) -> bytes:
+    if not home.strip():
+        raise RenderError("--home must name a non-empty directory")
+    normalized_home = str(Path(home).expanduser().absolute())
+    settings = _load_object(template)
+    private_settings = _load_object(overlay, optional=True) if overlay else {}
+    merged = _expand(_merge(settings, private_settings), normalized_home)
+    return (json.dumps(merged, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def write_atomic(output: Path, payload: bytes) -> None:
+    """Replace output atomically after a complete, validated render."""
+    output = output.expanduser()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{output.name}.", dir=str(output.parent))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, output)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--template", type=Path, required=True, help="shared JSON template")
+    parser.add_argument("--overlay", type=Path, help="optional ignored machine-local JSON object")
+    parser.add_argument("--home", default=os.path.expanduser("~"), help="home path for __HOME__")
+    parser.add_argument("--output", type=Path, help="atomically write rendered settings here")
+    parser.add_argument("--digest", action="store_true", help="print rendered-byte SHA-256")
+    args = parser.parse_args(argv)
+    if not args.output and not args.digest:
+        parser.error("at least one of --output or --digest is required")
+    try:
+        payload = render(args.template, args.overlay, args.home)
+        if args.output:
+            write_atomic(args.output, payload)
+        if args.digest:
+            print(hashlib.sha256(payload).hexdigest())
+    except (RenderError, OSError) as exc:
+        print(f"settings-render: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

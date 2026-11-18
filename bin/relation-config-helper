@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Show a configured knowledge-document tree and its optional relation rules.
+
+Usage:
+  bin/relation-config-helper [--root DIR] [--full]
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from collections import defaultdict
+import subprocess
+
+PROJECT_ROOT = None
+SYNC_STATE = None
+RELATIONS_DIR = None
+RELATION_CONFIG = None
+
+
+def load_titles():
+    titles = {}
+    for f in RELATIONS_DIR.glob("*.json"):
+        try:
+            r = json.loads(f.read_text())
+            titles[r["doc_id"]] = r.get("title", "?")
+        except Exception:
+            pass
+    return titles
+
+
+def load_config():
+    if RELATION_CONFIG.exists():
+        try:
+            return json.loads(RELATION_CONFIG.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def main():
+    global PROJECT_ROOT, SYNC_STATE, RELATIONS_DIR, RELATION_CONFIG
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", help="target repository root; defaults to the current Git root")
+    parser.add_argument("--full", action="store_true", help="include leaf documents")
+    args = parser.parse_args()
+    if args.root:
+        PROJECT_ROOT = Path(args.root).expanduser().resolve()
+    else:
+        try:
+            PROJECT_ROOT = Path(subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"], text=True, timeout=10).strip())
+        except (OSError, subprocess.SubprocessError):
+            parser.error("run inside a repository or supply --root DIR")
+    SYNC_STATE = PROJECT_ROOT / ".ai" / ".sync-state.json"
+    RELATIONS_DIR = PROJECT_ROOT / ".ai" / "relations"
+    RELATION_CONFIG = PROJECT_ROOT / ".ai" / "relation-config.json"
+    if not SYNC_STATE.is_file():
+        parser.error(f"relation state is not present: {SYNC_STATE}")
+
+    state = json.loads(SYNC_STATE.read_text())
+    titles = load_titles()
+    config = load_config()
+
+    skip_ids = set(config.get("skip_doc_ids", []))
+    raw = config.get("skip_subtrees", [])
+    skip_parents = {s if isinstance(s, str) else s.get("parent_id") for s in raw} - {None}
+    skip_cols = set(config.get("skip_collections", []))
+    force_cols = set(config.get("force_sonnet", {}).get("collections", []))
+    force_parents = set(config.get("force_sonnet", {}).get("parents", []))
+
+    # Build children index and top-level lists
+    children = defaultdict(list)
+    top_level = defaultdict(list)
+
+    for doc_id, entry in state.items():
+        if doc_id == "__meta__" or not isinstance(entry, dict):
+            continue
+        parent = entry.get("parent_id")
+        col = entry.get("collection", "unknown")
+        if parent:
+            children[parent].append(doc_id)
+        else:
+            top_level[col].append(doc_id)
+
+    def has_children(doc_id):
+        return bool(children.get(doc_id))
+
+    def status_tag(doc_id, col):
+        tags = []
+        if doc_id in skip_ids:
+            tags.append("SKIP(doc_id)")
+        if doc_id in skip_parents:
+            tags.append("SKIP(subtree)")
+        if col in skip_cols:
+            tags.append("SKIP(collection)")
+        if doc_id in force_parents:
+            tags.append("SONNET(parent)")
+        if col in force_cols:
+            tags.append("SONNET(collection)")
+        return f"  [{', '.join(tags)}]" if tags else ""
+
+    def print_tree(doc_id, col, indent=0):
+        kids = children.get(doc_id, [])
+        is_branch = bool(kids)
+        title = titles.get(doc_id, "?")
+        tag = status_tag(doc_id, col)
+
+        if is_branch:
+            # Always print branches
+            print(f"{'  ' * indent}\033[1m{doc_id}\033[0m  {title}{tag}")
+            for kid in sorted(kids):
+                kid_entry = state.get(kid, {})
+                kid_col = kid_entry.get("collection", col) if isinstance(kid_entry, dict) else col
+                print_tree(kid, kid_col, indent + 1)
+        elif args.full:
+            # Only print leaves in --full mode
+            print(f"{'  ' * indent}{doc_id}  {title} (leaf){tag}")
+
+    collections = sorted(top_level, key=str.casefold)
+
+    print("\n=== Knowledge document structure ===")
+    print("Bold IDs are branches and can be named in skip_subtrees or force_sonnet.parents.")
+    if not args.full:
+        print("Leaf documents are hidden. Use --full to show all.\n")
+    else:
+        print()
+
+    for col in collections:
+        docs = top_level.get(col, [])
+        if not docs:
+            continue
+        col_tag = ""
+        if col in skip_cols:
+            col_tag = "  [SKIP(collection)]"
+        elif col in force_cols:
+            col_tag = "  [SONNET(collection)]"
+        print(f"\n── {col}{col_tag}")
+        for doc_id in sorted(docs):
+            print_tree(doc_id, col)
+
+    print("\n=== Current relation configuration ===")
+    print(f"skip_collections:       {config.get('skip_collections', [])}")
+    print(f"skip_doc_ids:           {config.get('skip_doc_ids', [])}")
+    raw = config.get('skip_subtrees', [])
+    subtrees = [s if isinstance(s, str) else s.get('parent_id') for s in raw]
+    print(f"skip_subtrees parents:  {subtrees}")
+    print(f"force_sonnet.collections: {config.get('force_sonnet', {}).get('collections', [])}")
+    print(f"force_sonnet.parents:   {config.get('force_sonnet', {}).get('parents', [])}")
+    print(f"\nConfig file: {RELATION_CONFIG}")
+
+
+if __name__ == "__main__":
+    main()

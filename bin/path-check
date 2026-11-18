@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Reject host-specific absolute paths in files intended to be portable.
+
+The checker scans load-bearing files: scripts, configuration and executable agent
+instructions. It recognizes home-directory paths, mounted-volume paths and the
+documented placeholders below. Comments and historical records are excluded because
+they describe past evidence rather than runtime instructions. A deliberate exception
+must carry ``path-check: allow`` on the same line so it stays auditable.
+
+Usage:
+    bin/path-check                 check tracked files in this repository
+    bin/path-check --root DIR      check a different repository
+    bin/path-check --staged        check staged files only
+    bin/path-check <path> ...      check named files
+
+Exit codes: 0 — clean; 1 — at least one violation; 2 — invalid invocation.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+# A host home-directory prefix, followed by a separator or the end of the token.
+HOME_LITERAL = re.compile(r"/Users/([A-Za-z0-9._-]+)")
+
+# Names that are placeholders by design rather than one machine's real home.
+PLACEHOLDERS = {"__HOME__", "alice", "youruser", "username", "user"}
+
+# A mounted-volume prefix. Excluding shell globs prevents a path-classification test
+# from being mistaken for a literal volume name.
+VOLUME_LITERAL = re.compile(r"/Volumes/([A-Za-z0-9._-]+)")
+
+# Volume names that are placeholders by design. There are none today; the set exists so
+# that adding one later is an obvious one-line change rather than a re-reading of the
+# matching logic.
+VOLUME_PLACEHOLDERS = set()
+
+# Every shape this script refuses, each paired with the names that are exempt from it.
+MACHINE_SPECIFIC = ((HOME_LITERAL, PLACEHOLDERS), (VOLUME_LITERAL, VOLUME_PLACEHOLDERS))
+
+# A line carrying this marker is passed over, whatever it contains.
+ESCAPE_MARKER = "path-check: allow"
+
+# Directories whose contents are a record of the past, not something anything runs.
+EXEMPT_DIR_PREFIXES = ("decisions/", "plans/")
+
+# Extensions this script treats as load-bearing.
+LOAD_BEARING_EXTENSIONS = {".sh", ".bash", ".zsh", ".py", ".json", ".yaml", ".yml",
+                          ".toml", ".template", ".conf", ".cfg", ".ini"}
+
+# Markdown is load-bearing only in these directories, where an agent reads it as a
+# standing instruction rather than as a note about what once happened.
+INSTRUCTION_DIRS = ("memory/", "skills/", "agents/", "commands/")
+
+COMMENT_STARTS = ("#", "//", "*", "<!--")
+
+
+def is_load_bearing(rel_path):
+    """True when a wrong path in this file would actually break something or misdirect
+    an agent, rather than merely sit in prose somebody reads."""
+    for prefix in EXEMPT_DIR_PREFIXES:
+        if rel_path.startswith(prefix):
+            return False
+    _, ext = os.path.splitext(rel_path)
+    if ext in LOAD_BEARING_EXTENSIONS:
+        return True
+    if ext == ".md":
+        return any(rel_path.startswith(d) for d in INSTRUCTION_DIRS)
+    if ext == "":
+        # An extension-less file directly under bin/ or hooks/ is a command.
+        return rel_path.startswith("bin/") or rel_path.startswith("hooks/")
+    return False
+
+
+def is_comment(line):
+    stripped = line.lstrip()
+    return any(stripped.startswith(c) for c in COMMENT_STARTS)
+
+
+def violations_in(abs_path, rel_path):
+    """Yield (line number, line text) for every offending line in one file."""
+    try:
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return
+    # Whether this is Python is decided by the shebang as well as by the extension:
+    # every command under bin/ here is extension-less, so extension alone would leave
+    # their module docstrings — which are prose — treated as code.
+    is_python = rel_path.endswith(".py") or (
+        lines and lines[0].startswith("#!") and "python" in lines[0])
+
+    in_docstring = False
+    for number, line in enumerate(lines, start=1):
+        # Track Python triple-quoted blocks so a module docstring counts as prose.
+        if is_python:
+            ticks = line.count('"""') + line.count("'''")
+            if ticks % 2 == 1:
+                in_docstring = not in_docstring
+                continue
+            if in_docstring:
+                continue
+        if ESCAPE_MARKER in line or is_comment(line):
+            continue
+        # One line is reported once however many shapes it offends against, because the
+        # reader is being sent to a line to rewrite, not handed a tally.
+        if any(match.group(1) not in exempt
+               for pattern, exempt in MACHINE_SPECIFIC
+               for match in pattern.finditer(line)):
+            yield number, line.rstrip("\n")
+
+
+def tracked_files(root, staged):
+    args = ["git", "-C", root, "diff", "--cached", "--name-only", "--diff-filter=ACMR"] \
+        if staged else ["git", "-C", root, "ls-files"]
+    out = subprocess.run(args, capture_output=True, text=True)
+    if out.returncode != 0:
+        print("bin/path-check: not a git repository: %s" % root, file=sys.stderr)
+        sys.exit(2)
+    return [p for p in out.stdout.splitlines() if p]
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="bin/path-check",
+        description="Refuse a machine-specific location — one machine's own home "
+                    "directory, or one machine's own mounted volume — written into a "
+                    "file that both machines run or read as a standing instruction.")
+    parser.add_argument("paths", nargs="*", help="check exactly these files instead")
+    parser.add_argument("--root", default=None, help="repository root to check")
+    parser.add_argument("--staged", action="store_true",
+                        help="check only what is staged for commit")
+    args = parser.parse_args()
+
+    # Both sides are resolved through every symbolic link before they are compared.
+    # 2026-08-13: they used to be merely made absolute, and that silently disabled the
+    # whole check whenever the two sides disagreed about a link — naming a file inside a
+    # directory under /var, which on macOS is a link to /private/var, produced a relative
+    # path that resolved to nothing, so the file was skipped and the run reported success.
+    # A checker that quietly checks nothing is the very disease this program exists to
+    # cure, so it may not be reintroduced here.
+    root = os.path.realpath(args.root) if args.root else \
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+    named_explicitly = bool(args.paths)
+    if named_explicitly:
+        candidates = [os.path.relpath(os.path.realpath(p), root) for p in args.paths]
+    else:
+        candidates = tracked_files(root, args.staged)
+
+    found = 0
+    unreadable = 0
+    for rel in candidates:
+        abs_path = os.path.join(root, rel)
+        if not os.path.isfile(abs_path):
+            # A file listed by git but no longer on disk is an ordinary deletion and
+            # nothing to report. A file the caller named by hand and this program cannot
+            # open is a different matter: staying quiet about it would report success for
+            # something that was never read.
+            if named_explicitly:
+                print("bin/path-check: cannot read %s — it was named on the command line "
+                      "but is not a readable file." % rel, file=sys.stderr)
+                unreadable += 1
+            continue
+        if not is_load_bearing(rel):
+            continue
+        for number, text in violations_in(abs_path, rel):
+            print("%s:%d: %s" % (rel, number, text.strip()))
+            found += 1
+
+    if found:
+        print()
+        print("bin/path-check: %d line(s) name one machine's own home directory or one "
+              "machine's own mounted volume. Both machines run these files, and on the "
+              "other one that path does not exist. Derive the location instead — from "
+              "the running file's own position, from $HOME, from an environment variable "
+              "the machine already sets, from a short list of candidate locations where "
+              "the first that actually exists wins, or from the __HOME__ placeholder "
+              "bootstrap.sh substitutes at deploy time. If an occurrence genuinely must "
+              "stay, put the marker '%s' on that line so the exception is visible in the "
+              "file itself." % (found, ESCAPE_MARKER), file=sys.stderr)
+        return 1
+    if unreadable:
+        return 2
+    print("bin/path-check: no machine-specific location in any load-bearing file.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

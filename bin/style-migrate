@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Review or migrate explicitly configured legacy style settings.
+
+Default behavior is a non-mutating preview. ``--apply`` removes the legacy
+``outputStyle`` field only from paths declared in private configuration and
+backs up each original file before writing. No home-directory or project scan
+is performed by default.
+
+Usage:
+  bin/style-migrate [--dry-run] [--apply]
+
+Exit codes: 0 completed, 2 invalid arguments or configuration, 1 migration failed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+
+def atomic_write(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--dry-run", action="store_true", help="preview only (the default)")
+    group.add_argument("--apply", action="store_true", help="back up and update declared files")
+    args = parser.parse_args(argv)
+    dry_run = not args.apply
+    try:
+        from lib.private_config import ConfigError, load, resolved_path
+        config = load(ROOT)
+    except (ConfigError, OSError, ValueError) as exc:
+        print(f"style-migrate: invalid private configuration: {exc}", file=sys.stderr)
+        return 2
+
+    paths = config.get("style_settings", [])
+    if not isinstance(paths, list) or any(not isinstance(item, str) for item in paths):
+        print("style-migrate: private style_settings must be an array of paths", file=sys.stderr)
+        return 2
+    recovery_value = config.get("style_recovery_root") or \
+        str(Path.home() / ".local" / "share" / "ai-toolkit" / "recovery" / "style-migrate")
+    recovery = resolved_path(ROOT, recovery_value)
+    changed = 0
+    failures = 0
+    for value in paths:
+        path = resolved_path(ROOT, value)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            print(f"style-migrate: cannot read {path}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        if not isinstance(data, dict) or "outputStyle" not in data:
+            continue
+        if dry_run:
+            print(f"would preserve a backup and remove outputStyle from {path}")
+            changed += 1
+            continue
+        try:
+            path_key = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+            backup = recovery / (path.name + "." + path_key + ".backup")
+            if backup.exists():
+                backup = recovery / (path.name + "." + str(os.getpid()) + ".backup")
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, backup)
+            del data["outputStyle"]
+            atomic_write(path, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode())
+            print(f"updated {path}; original preserved at {backup}")
+            changed += 1
+        except OSError as exc:
+            print(f"style-migrate: failed to update {path}: {exc}", file=sys.stderr)
+            failures += 1
+    if failures:
+        return 1
+    if changed == 0:
+        print("style-migrate: no declared settings contain outputStyle")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

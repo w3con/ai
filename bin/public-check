@@ -1,0 +1,902 @@
+#!/usr/bin/env python3
+"""Check a public export boundary, source language, Git history, and secrets."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import textwrap
+import tokenize
+import urllib.parse
+import urllib.request
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+
+GITLEAKS_VERSION = "8.24.3"
+# SHA-256 values match the official gitleaks v8.24.3 checksums asset.
+GITLEAKS_SHA256 = {
+    "darwin_arm64": "b90f13bb8c90ab72083d9b0c842e39dafb82c0e5c3f872f407366b7a58909013",
+    "darwin_x64": "41c44ae8ad1d6eef57d4526ad0fd67d8129eee9a856f55c2b3b9395fd3d9ec0f",
+    "linux_arm64": "5f2edbe1f49f7b920f9e06e90759947d3c5dfc16f752fb93aaafc17e9d14cf07",
+    "linux_x64": "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c",
+}
+BACKSLASH = chr(92)
+CYRILLIC = re.compile(f"[{chr(0x0400)}-{chr(0x052F)}]")
+SHORT_ESCAPE = re.compile(re.escape(BACKSLASH + "u") + r"([0-9A-Fa-f]{4})")
+LONG_ESCAPE = re.compile(re.escape(BACKSLASH + "U") + r"([0-9A-Fa-f]{8})")
+HOME_PREFIX = "/" + "Users" + "/"
+LINUX_HOME_PREFIX = "/" + "home" + "/"
+VOLUME_PREFIX = "/" + "Volumes" + "/"
+MACHINE_PATHS = tuple(re.compile(re.escape(prefix) + r"([^/\s]+)")
+                      for prefix in (HOME_PREFIX, LINUX_HOME_PREFIX, VOLUME_PREFIX))
+PATH_CHECK_PATTERN_FILE = "bin/path-check"
+PYTHON_ALIAS_VALUE_HASHES = {
+    "bin/plan-check": {
+        "LEGACY_STATUS": {"7c6abedc4cb719c8a7221bd51691650c60a1799bb88037e3b250d20b59b0878e"},
+        "LEGACY_APPROVED_WORD": {"1c89ab1efd27d7eb508ab010e2522fb9817983133e1913c7784ecdf0629f8345"},
+        "LEGACY_APPROVAL_HEADING": {
+            "1d1b67524b393d3a9f6ed21f39768c379d91df9f878fe8091f69ecc811296c6a",
+            "3314ad5d77bd70856254622578e8ff2ec98b1890a910e1507a7ae382a7b0aa16",
+        },
+        "INTERVIEW_NAMES": {"f87d179fc3d53dd04b72db7a3358f0e5ddd758b0cd1cf77c670cf3f0177eb1d4"},
+        "SOURCES_NAMES": {"c8c9c973a1c83b76b17cb0e9359d92c403ab3d70740a5da891af74b8d2f8a805"},
+        "SUMMARY_NAMES": {"cd0ab2184894eb321f5daac006c215f2ba94ddfe1ef2fae6affe866cee2feda7"},
+        "SCOPE_WORDSETS": {
+            "fa23857de32566fc4d8a2bb6a7a738f74663df08fb9000853b4da05d1771d1a4",
+            "8545fb71c6ee55c9765c2a92d65a5993dd27b7c7f368585a7e3fd4db93c964ab",
+        },
+        "ACCEPTANCE_WORDSETS": {
+            "33a89a456bd9f846d4203526802a05e851472f63df6cfe61ecdf3085d048d1d2",
+            "7235ad572cef704abecf6f40b3038d5a8e2beb09a820d9c63c2354056a95208f",
+            "c73176b44124b7047deba8ea30c3a0391fa37f3e5b1bf505b67c95b7405eb054",
+        },
+        "section_with_subsections": {
+            "ee37daae337722f55d77e23f91e3f9a0ce2d347e81a6bcbb8132d1a388bc8f83",
+            "de5e60baf6e5bb921a0ab48f825179b19b21c7757ed654769426952aba530230",
+            "54b3dc1e3f3df1f3242db8fd3c1fccfe0c3d6bf341a2da6680fc94bb3bf14ed4",
+        },
+    },
+    "bin/style-check": {
+        "LEGACY_STYLE_MARKERS": {
+            "1cd8f34cd67c4f1b4d60bf1a07a80c0227dd082ba94a08af91537bf93e83a12f",
+            "4087e9271361b98c97491f8b41ffa7c4c40af6d926682e79bcfe77776fe75990",
+            "7babe3756d5c1ec4c6b1e6e29360fc50f5c06cc9fce440aba01cfa504866d727",
+            "6f57c72c4eddd883e7846a081550445937fabdcf449804d71c3a84d05419d03a",
+            "8732169352fed9dbf92d4074242135b84bc9fdcf77db874c1d35de9d2d5f0608",
+        },
+    },
+    "bin/migrate-public-release": {
+        "LEGACY_STYLE_HEADING_PATTERN": {"ddd5c6ecd84e6bb9df4374ef07993f8ddd9312891dba4943ab2cdffc0eaec722"},
+    },
+    "tests/test_plan_check.py": {
+        "legacy_card": {
+            "225077c6d4791e693ff47d24e846cfc3198da287d2b8e77fd2bba435183f0d54",
+            "9c2a7d79e8f891559f30ae5eaf8228e94f9cc5ea7873b7ae0a15722eb3fde0c2",
+            "f2e1315d11b649c2a290aef1772c9fda78b33ee43730e335fe77d8bd84a84edb",
+            "be2e047897fa18f56e3aa8f150c18b95db437010388b76feb4c4389885b3a680",
+            "e5f057a0b5940bd0a8b6575f50101000218fc9aa76605fb66c942bd2dbdb1b9e",
+        },
+        "legacy_interview_card": {
+            "cce0dff7856df419a3968217b0fce21f811df4c5f959fabf1ea449de987cb2dc",
+            "d0578b52b359ad7f15b67f4835fa00fe878fe248120e15fb3208880b28513379",
+            "3fe113e6c02a7ed0372815534468c4b056b065495e63471bd0a354630d8dc749",
+            "9999719a79940664c8f668f3919bc545aecbbd3d1d7d730f10abe0cf1491098a",
+        },
+    },
+    "hooks/work-gate.test.py": {
+        "legacy_brief_template": {
+            "bc2adc78e840859ff926f73f89d05d6c0a60b4b880c8bea7fccae0ff1c781caa",
+            "32a6e1cd78b0cf97762ff906826cc4e36e03d39f50ce62332b49df3eb4111eb5",
+        },
+    },
+}
+SHELL_PYTHON_ALIAS_VALUE_HASHES = {
+    "hooks/work-gate.sh": {
+        "LEGACY_BRIEF_HEADINGS": {
+            "bc2adc78e840859ff926f73f89d05d6c0a60b4b880c8bea7fccae0ff1c781caa",
+            "32a6e1cd78b0cf97762ff906826cc4e36e03d39f50ce62332b49df3eb4111eb5",
+        },
+    },
+}
+PRIVATE_COMPONENTS = {
+    ".private", "private-originals", "_legacy", "memory", "session", "sessions",
+    "harness", "timeline", "ralph", "recovery", "recovery-check", "backups",
+    "archives", "secrets", "worktrees", "logs",
+}
+PRIVATE_RECORD_NAMES = {
+    "file-manifest.json", "audit-findings.md", "consumer-inventory.md", "disposition.md",
+    "disclosure-patterns.json", "migration-evidence.md", "docs-log.md", "public-release.md",
+}
+ARCHIVE_SUFFIXES = (".bundle", ".tar", ".tar.gz", ".tgz", ".zip", ".7z")
+class PublicCheckError(RuntimeError):
+    pass
+
+
+CheckError = PublicCheckError
+
+
+def git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(["git", "-C", str(root), *args], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, check=False)
+    except OSError as exc:
+        raise PublicCheckError("Git could not be executed") from exc
+
+
+def repository_root(path: Path) -> Path:
+    result = git(path, "rev-parse", "--show-toplevel")
+    if result.returncode:
+        raise PublicCheckError("the selected root is not a Git checkout")
+    return Path(os.path.realpath(result.stdout.decode().strip()))
+
+
+def decode_git_path(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PublicCheckError("the Git index contains a non-UTF-8 path") from exc
+
+
+def index_entries(root: Path) -> dict[str, tuple[str, str, int]]:
+    result = git(root, "ls-files", "--stage", "-z")
+    if result.returncode:
+        raise PublicCheckError("cannot read Git index entries")
+    entries: dict[str, tuple[str, str, int]] = {}
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, oid, stage = metadata.decode("ascii").split(" ")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise PublicCheckError("the Git index contains an unreadable entry") from exc
+        path = decode_git_path(raw_path)
+        value = (mode, oid, int(stage))
+        if path in entries and entries[path] != value:
+            raise PublicCheckError("the Git index contains conflicting merge entries")
+        entries[path] = value
+    return entries
+
+
+def git_paths(root: Path, *args: str) -> list[str]:
+    result = git(root, *args)
+    if result.returncode:
+        raise PublicCheckError("cannot build the requested export manifest")
+    return [decode_git_path(value) for value in result.stdout.split(b"\0") if value]
+
+
+def read_explicit_manifest(path: Path) -> list[str]:
+    try:
+        data = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicCheckError("explicit export manifest is missing or invalid JSON") from exc
+    items = data.get("files") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise PublicCheckError("export manifest must be a JSON array or contain a files array")
+    result: list[str] = []
+    for item in items:
+        value = item.get("path") if isinstance(item, dict) else item
+        if not isinstance(value, str) or not value:
+            raise PublicCheckError("export manifest contains an invalid entry")
+        result.append(value)
+    if len(result) != len(set(result)):
+        raise PublicCheckError("export manifest contains duplicate paths")
+    return result
+
+
+def select_export(root: Path, staged: bool, manifest_path: Path | None,
+                  index: dict[str, tuple[str, str, int]]) -> list[str]:
+    if manifest_path is not None:
+        paths = read_explicit_manifest(manifest_path)
+        if staged:
+            staged_paths = set(git_paths(root, "diff", "--cached", "--name-only",
+                                         "--diff-filter=ACMR", "-z"))
+            if not set(paths).issubset(staged_paths):
+                raise PublicCheckError("staged manifest contains paths that are not staged")
+        return paths
+    if staged:
+        return git_paths(root, "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z")
+    tracked = set(index)
+    untracked = set(git_paths(root, "ls-files", "--others", "--exclude-standard", "-z"))
+    return sorted(tracked | untracked)
+
+
+def blocked_path(path: str) -> str | None:
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or ".." in pure.parts:
+        return "path escapes the candidate root"
+    parts = [part.lower() for part in pure.parts]
+    if any(part in PRIVATE_COMPONENTS for part in parts):
+        return "private data or recovery directory"
+    if ".git" in parts:
+        return "Git metadata path"
+    if ".claude" in parts and "templates" not in parts:
+        return "local agent configuration directory"
+    filename = parts[-1] if parts else ""
+    if filename == ".env" or (filename.startswith(".env.") and filename != ".env.example"):
+        return "environment file"
+    if filename in PRIVATE_RECORD_NAMES:
+        return "private work record"
+    if filename in {"settings.local.json", "settings.local.yaml", "settings.local.yml"}:
+        return "machine-local settings"
+    if filename == "settings.json" and not (parts and parts[0] == "templates"):
+        return "rendered machine settings"
+    if filename.endswith(ARCHIVE_SUFFIXES):
+        return "archive or recovery bundle"
+    return None
+
+
+def _allowed_path_pattern_definition(rel: str, line: str) -> bool:
+    # bin/path-check must contain generic matchers for the path forms this checker
+    # rejects. The grouped character-class pattern is not a concrete host path.
+    if rel != PATH_CHECK_PATTERN_FILE or "re.compile" not in line:
+        return False
+    has_prefix = HOME_PREFIX in line or VOLUME_PREFIX in line
+    return has_prefix and "([A-Za-z0-9._-]+)" in line
+
+
+def path_literal_finding(rel: str, line: str) -> str | None:
+    if _allowed_path_pattern_definition(rel, line):
+        return None
+    decoded = decode_unicode_escapes(line)
+    for pattern in MACHINE_PATHS:
+        match = pattern.search(decoded)
+        if match:
+            return "machine-specific absolute path"
+    return None
+
+
+def python_alias_spans(text: str, registry: dict[str, set[str]], *, first_line: int = 1,
+                       original_lines: list[str] | None = None,
+                       column_offsets: list[int] | None = None) -> set[tuple[int, int, int]]:
+    """Return exact string-token spans with both an allowed AST context and value hash."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    contexts: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for child in ast.walk(target):
+                    if isinstance(child, ast.Name) and child.id in registry:
+                        contexts.append((node.lineno, getattr(node, "end_lineno", node.lineno), child.id))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in registry:
+            contexts.append((node.lineno, getattr(node, "end_lineno", node.lineno), node.name))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in registry:
+            contexts.append((node.lineno, getattr(node, "end_lineno", node.lineno), node.func.id))
+
+    lines = text.splitlines()
+    source_lines = original_lines if original_lines is not None else lines
+    offsets = column_offsets if column_offsets is not None else [0] * len(lines)
+    allowed: set[tuple[int, int, int]] = set()
+    escape_token = re.compile(re.escape(BACKSLASH) + r"(?:u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})")
+    tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+
+    def registered(start_line: int, end_line: int, digest: str) -> bool:
+        return any(start <= start_line and end_line <= end and digest in registry.get(name, set())
+                   for start, end, name in contexts)
+
+    def add_span(start: tuple[int, int], end: tuple[int, int]) -> None:
+        for local_line in range(start[0], end[0] + 1):
+            offset = offsets[local_line - 1] if local_line - 1 < len(offsets) else 0
+            start_column = start[1] + offset if local_line == start[0] else offset
+            end_column = end[1] + offset if local_line == end[0] else len(source_lines[local_line - 1])
+            allowed.add((first_line + local_line - 1, start_column, end_column))
+
+    def source_slice(start: tuple[int, int], end: tuple[int, int]) -> str:
+        if start[0] == end[0]:
+            return lines[start[0] - 1][start[1]:end[1]]
+        parts = [lines[start[0] - 1][start[1]:]]
+        parts.extend(lines[start[0]:end[0] - 1])
+        parts.append(lines[end[0] - 1][:end[1]])
+        return "\n".join(parts)
+
+    fstring_start = getattr(tokenize, "FSTRING_START", None)
+    fstring_end = getattr(tokenize, "FSTRING_END", None)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        raw_fstring = None
+        start_position = token.start
+        end_position = token.end
+        if fstring_start is not None and token.type == fstring_start:
+            depth = 1
+            end_index = index + 1
+            while end_index < len(tokens) and depth:
+                current = tokens[end_index]
+                if current.type == fstring_start:
+                    depth += 1
+                elif current.type == fstring_end:
+                    depth -= 1
+                end_index += 1
+            if depth:
+                index += 1
+                continue
+            ending = tokens[end_index - 1]
+            end_position = ending.end
+            raw_fstring = source_slice(start_position, end_position)
+            index = end_index
+        elif token.type == tokenize.STRING:
+            prefix = re.match(r"(?i)^([rubf]*)['\"]", token.string)
+            if prefix and "f" in prefix.group(1).lower():
+                raw_fstring = token.string
+                index += 1
+            else:
+                index += 1
+                if not escape_token.search(token.string):
+                    continue
+                try:
+                    value = ast.literal_eval(token.string)
+                except (SyntaxError, ValueError):
+                    continue
+                if not isinstance(value, str):
+                    continue
+                normalized = decode_unicode_escapes(value)
+                digest = hashlib.sha256(normalized.encode("utf-8", errors="surrogatepass")).hexdigest()
+                if registered(token.start[0], token.end[0], digest):
+                    add_span(token.start, token.end)
+                continue
+        else:
+            index += 1
+            continue
+
+        if raw_fstring is not None and escape_token.search(raw_fstring):
+            normalized = decode_unicode_escapes(raw_fstring)
+            digest = hashlib.sha256(b"fstring-template\0" +
+                                    normalized.encode("utf-8", errors="surrogatepass")).hexdigest()
+            if registered(start_position[0], end_position[0], digest):
+                add_span(start_position, end_position)
+    return allowed
+
+
+def python_heredoc_alias_spans(rel: str, text: str) -> set[tuple[int, int, int]]:
+    """Inspect only Python here-doc string tokens in the one legacy parser shell."""
+    registry = SHELL_PYTHON_ALIAS_VALUE_HASHES.get(rel)
+    if registry is None:
+        return set()
+    lines = text.splitlines()
+    opener = re.compile(r"<<(-)?\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|\"([A-Za-z_][A-Za-z0-9_]*)\"|([A-Za-z_][A-Za-z0-9_]*))")
+    allowed: set[tuple[int, int, int]] = set()
+    for index, line in enumerate(lines):
+        if not re.search(r"\bpython(?:[0-9]+(?:\.[0-9]+)*)?\b", line):
+            continue
+        for match in opener.finditer(line):
+            delimiter = next(group for group in match.groups()[1:] if group is not None)
+            end = next((position for position in range(index + 1, len(lines))
+                        if (lines[position].lstrip("\t") if match.group(1) else lines[position]) == delimiter),
+                       None)
+            if end is None:
+                continue
+            original_body_lines = lines[index + 1:end]
+            body = "\n".join(original_body_lines)
+            dedented = textwrap.dedent(body)
+            dedented_lines = dedented.splitlines()
+            offsets = [len(original) - len(dedented_line)
+                       for original, dedented_line in zip(original_body_lines, dedented_lines)]
+            offsets.extend([0] * (len(dedented_lines) - len(offsets)))
+            allowed.update(python_alias_spans(dedented, registry, first_line=index + 2,
+                                               original_lines=original_body_lines,
+                                               column_offsets=offsets))
+    return allowed
+
+
+def allowed_encoded_alias_spans(rel: str, text: str) -> set[tuple[int, int, int]]:
+    registry = PYTHON_ALIAS_VALUE_HASHES.get(rel)
+    allowed = python_alias_spans(text, registry) if registry is not None else set()
+    allowed.update(python_heredoc_alias_spans(rel, text))
+    return allowed
+
+
+def unicode_escape_findings(rel: str, text: str) -> list[tuple[int, str]]:
+    short = re.compile(re.escape(BACKSLASH + "u") + r"([0-9A-Fa-f]{4})")
+    long = re.compile(re.escape(BACKSLASH + "U") + r"([0-9A-Fa-f]{8})")
+    allowed = allowed_encoded_alias_spans(rel, text)
+    findings = []
+    for number, line in enumerate(text.splitlines(), 1):
+        matches = list(short.finditer(line)) + list(long.finditer(line))
+        if not matches:
+            continue
+        matches.sort(key=lambda item: item.start())
+        values = [int(item.group(1), 16) for item in matches]
+        # This exact character-range escape is a test for the language checker itself,
+        # not an input alias or an encoded project identifier.
+        if rel == "tests/test_websearch.py" and values == [0x0400, 0x04FF] and "]" in line:
+            continue
+        for match in matches:
+            value = int(match.group(1), 16)
+            permitted_span = any(line_number == number and start <= match.start() and match.end() <= end
+                                 for line_number, start, end in allowed)
+            if not (0x0400 <= value <= 0x052F and permitted_span):
+                reason = ("encoded non-alias identifier is not allowed" if value < 0x0400 or value > 0x052F
+                          else "encoded Unicode is not a declared legacy input alias")
+                findings.append((number, reason))
+    return findings
+
+
+def decode_unicode_escapes(value: str) -> str:
+    def convert(match: re.Match[str]) -> str:
+        try:
+            return chr(int(match.group(1), 16))
+        except (ValueError, OverflowError):
+            return ""
+    value = SHORT_ESCAPE.sub(convert, value)
+    return LONG_ESCAPE.sub(convert, value)
+
+
+def inspect_text(rel: str, payload: bytes) -> list[tuple[int, str]]:
+    if b"\0" in payload:
+        return []
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return [(0, "public text is not valid UTF-8")]
+    findings = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if CYRILLIC.search(line):
+            findings.append((number, "public text contains Cyrillic characters"))
+        path_problem = path_literal_finding(rel, line)
+        if path_problem:
+            findings.append((number, path_problem))
+    findings.extend(unicode_escape_findings(rel, text))
+    return findings
+
+
+def is_text(rel: str, payload: bytes) -> bool:
+    if b"\0" in payload:
+        return False
+    suffix = PurePosixPath(rel).suffix.lower()
+    return suffix in {".md", ".py", ".sh", ".bash", ".zsh", ".json", ".toml", ".yaml",
+                      ".yml", ".txt", ".template", ".conf", ".cfg", ".ini", ".html", ".css",
+                      ".js", ".ts", ".tsx", ".sql", ".go", ".rs"} or \
+        (not suffix and PurePosixPath(rel).parts[0] in {"bin", "hooks", "examples"})
+
+
+def read_worktree_file(root: Path, rel: str) -> bytes | None:
+    path = root / rel
+    if not path.exists():
+        return None
+    if not path.is_file():
+        return None
+    return path.read_bytes()
+
+
+def read_index_blob(root: Path, rel: str, entries: dict[str, tuple[str, str, int]]) -> tuple[bytes | None, str | None]:
+    entry = entries.get(rel)
+    if entry is None:
+        return None, "staged manifest path is absent from the index"
+    mode, object_id, stage = entry
+    if stage != 0:
+        return None, "Git index has an unresolved merge entry"
+    if mode == "160000":
+        return None, "nested Git submodule link"
+    if mode == "120000":
+        return None, "symlinked export path"
+    if mode not in {"100644", "100755"}:
+        return None, "unsupported Git index mode"
+    result = git(root, "cat-file", "blob", object_id)
+    if result.returncode:
+        return None, "cannot read staged object"
+    return result.stdout, None
+
+
+def check_history(root: Path, private_rules: dict[str, Any] | None) -> list[dict[str, Any]]:
+    findings = []
+    shallow = git(root, "rev-parse", "--is-shallow-repository")
+    if shallow.returncode == 0 and shallow.stdout.strip() == b"true":
+        findings.append({"kind": "shallow history prevents complete audit", "path": "<git-history>", "line": 0})
+    for metadata in ("objects/info/alternates", "info/grafts"):
+        check = git(root, "rev-parse", "--git-path", metadata)
+        if check.returncode == 0:
+            path = Path(check.stdout.decode().strip())
+            if not path.is_absolute():
+                path = root / path
+            if path.exists():
+                findings.append({"kind": "alternate or grafted Git history", "path": "<git-history>", "line": 0})
+    refs = git(root, "for-each-ref", "--format=%(refname)")
+    if refs.returncode:
+        findings.append({"kind": "cannot enumerate Git refs", "path": "<git-history>", "line": 0})
+    else:
+        for ref in refs.stdout.decode().splitlines():
+            if ref.startswith(("refs/original/", "refs/replace/", "refs/stash", "refs/backup/", "refs/old/")):
+                findings.append({"kind": "recovery or replacement Git ref", "path": "<git-history>", "line": 0})
+                break
+    remotes = git(root, "config", "--get-regexp", r"^remote\..*\.url$")
+    if remotes.returncode not in (0, 1):
+        findings.append({"kind": "cannot inspect Git remote configuration", "path": "<git-config>", "line": 0})
+    elif remotes.returncode == 0:
+        for setting in remotes.stdout.decode(errors="replace").splitlines():
+            parts = setting.split(None, 1)
+            if len(parts) != 2:
+                continue
+            url = parts[1]
+            parsed = urllib.parse.urlparse(url)
+            local_remote = (url.startswith(("/", "./", "../", "file://")) or
+                            (not parsed.scheme and not url.startswith("git@")))
+            credentialed_remote = bool(parsed.username or parsed.password)
+            path_remote = any(pattern.search(decode_unicode_escapes(url)) for pattern in MACHINE_PATHS)
+            if local_remote or credentialed_remote or path_remote:
+                findings.append({"kind": "local, credentialed, or machine-specific Git remote", "path": "<git-config>", "line": 0})
+                break
+    fsck = git(root, "fsck", "--full", "--unreachable", "--no-reflogs", "--no-progress")
+    fsck_lines = [line.strip() for line in (fsck.stdout + fsck.stderr).splitlines() if line.strip()]
+    empty_ref_notices = (
+        refs.returncode == 0 and not refs.stdout.strip() and
+        all(line.startswith(b"notice: HEAD points to an unborn branch (") or
+            line == b"notice: No default references" for line in fsck_lines)
+    )
+    if fsck.returncode or (fsck_lines and not empty_ref_notices):
+        findings.append({"kind": "unreachable Git objects or object-database errors", "path": "<git-history>", "line": 0})
+    if private_rules:
+        commits = private_rules.get("forbidden_commits", [])
+        if not isinstance(commits, list):
+            findings.append({"kind": "invalid private history rule", "path": "<git-history>", "line": 0})
+        else:
+            reachable = git(root, "rev-list", "--all")
+            ids = set(reachable.stdout.decode().splitlines()) if reachable.returncode == 0 else set()
+            if any(isinstance(value, str) and value in ids for value in commits):
+                findings.append({"kind": "private forbidden commit is reachable", "path": "<git-history>", "line": 0})
+    return findings
+
+
+def load_private_rules(path: Path | None, root: Path) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    resolved = path.expanduser().resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise CheckError("private disclosure rules must be outside the public checkout")
+    try:
+        rules = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CheckError("private disclosure rules are missing or invalid JSON") from exc
+    if not isinstance(rules, dict):
+        raise CheckError("private disclosure rules must be a JSON object")
+    for key in ("patterns", "forbidden_paths", "forbidden_commits"):
+        if key in rules and not isinstance(rules[key], list):
+            raise CheckError(f"private rule field {key} must be an array")
+    return rules
+
+
+def private_content_findings(rel: str, payload: bytes,
+                             rules: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not rules:
+        return []
+    text = decode_unicode_escapes(payload.decode("utf-8", errors="replace"))
+    findings = []
+    for item in rules.get("patterns", []):
+        if isinstance(item, str):
+            pattern, identifier = item, "private-pattern"
+        elif isinstance(item, dict) and isinstance(item.get("regex"), str):
+            pattern, identifier = item["regex"], str(item.get("id", "private-pattern"))
+        else:
+            continue
+        try:
+            regex = re.compile(pattern)
+        except re.error:
+            findings.append({"kind": "invalid private content pattern", "path": "<private-rules>", "line": 0})
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            if regex.search(line):
+                findings.append({"kind": "private disclosure pattern", "path": rel,
+                                 "line": number, "private_rule": identifier})
+    for pattern in rules.get("forbidden_paths", []):
+        if isinstance(pattern, str):
+            try:
+                if re.search(pattern, rel):
+                    findings.append({"kind": "private path pattern", "path": rel, "line": 0,
+                                     "private_rule": "private-path"})
+            except re.error:
+                findings.append({"kind": "invalid private path pattern", "path": "<private-rules>", "line": 0})
+    return findings
+
+
+def private_report(path: Path | None, root: Path, findings: list[dict[str, Any]]) -> None:
+    if path is None:
+        return
+    output = path.expanduser().absolute()
+    try:
+        output.resolve().relative_to(root)
+    except ValueError:
+        pass
+    else:
+        raise CheckError("private report must be written outside the public checkout")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"findings": findings}, stream, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, output)
+    except BaseException:
+        try: os.unlink(temporary)
+        except OSError: pass
+        raise
+
+
+def scanner_platform() -> tuple[str, str, str]:
+    system = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    machine = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine().lower())
+    key = f"{system}_{machine}" if system and machine else ""
+    digest = GITLEAKS_SHA256.get(key)
+    if not digest:
+        raise CheckError("pinned Gitleaks installer does not support this platform and architecture")
+    return key, digest, f"gitleaks_{GITLEAKS_VERSION}_{key}.tar.gz"
+
+
+def install_scanner(destination: Path) -> Path:
+    key, expected, archive_name = scanner_platform()
+    url = f"https://github.com/gitleaks/gitleaks/releases/download/v{GITLEAKS_VERSION}/{archive_name}"
+    try:
+        with urllib.request.urlopen(url, timeout=45) as response:
+            archive_bytes = response.read(100 * 1024 * 1024 + 1)
+    except Exception as exc:
+        raise CheckError("cannot download the pinned Gitleaks release asset") from exc
+    if len(archive_bytes) > 100 * 1024 * 1024 or hashlib.sha256(archive_bytes).hexdigest() != expected:
+        raise CheckError("pinned Gitleaks release asset failed its SHA-256 check")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+            matches = [member for member in archive.getmembers()
+                       if PurePosixPath(member.name).name == "gitleaks" and member.isfile()]
+            if len(matches) != 1 or matches[0].size > 100 * 1024 * 1024:
+                raise CheckError("pinned Gitleaks archive has an unexpected layout")
+            stream = archive.extractfile(matches[0])
+            if stream is None:
+                raise CheckError("pinned Gitleaks binary is absent from its archive")
+            binary = stream.read()
+    except (OSError, tarfile.TarError) as exc:
+        raise CheckError("cannot read the pinned Gitleaks archive") from exc
+    destination.mkdir(parents=True, exist_ok=True)
+    output = destination / "gitleaks"
+    fd, temporary = tempfile.mkstemp(prefix=".gitleaks.", dir=destination)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(binary)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o700)
+        version = subprocess.run([temporary, "version"], capture_output=True, check=False)
+        if version.returncode or GITLEAKS_VERSION.encode() not in version.stdout:
+            raise CheckError("downloaded Gitleaks binary did not report the pinned version")
+        os.replace(temporary, output)
+    except BaseException:
+        try: os.unlink(temporary)
+        except OSError: pass
+        raise
+    print(f"Installed verified Gitleaks {GITLEAKS_VERSION} at {output}")
+    return output
+
+
+def scanner_binary(override: str | None) -> Path:
+    requested = override or os.environ.get("GITLEAKS_BIN")
+    cached = Path.home() / ".cache" / "ai-toolkit" / "public-check" / \
+        f"gitleaks-{GITLEAKS_VERSION}" / "gitleaks"
+
+    def is_pinned(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        try:
+            result = subprocess.run([str(path), "version"], capture_output=True,
+                                    check=False, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0 and GITLEAKS_VERSION.encode() in result.stdout
+
+    if requested:
+        binary = Path(requested).expanduser().resolve()
+        if not is_pinned(binary):
+            raise CheckError(f"Gitleaks {GITLEAKS_VERSION} is required; install the pinned scanner")
+        return binary
+    if is_pinned(cached):
+        return cached.resolve()
+    found = shutil.which("gitleaks")
+    if found:
+        binary = Path(found).resolve()
+        if is_pinned(binary):
+            return binary
+    raise CheckError("Gitleaks is not installed; run python3 bin/public-check install-gitleaks")
+
+
+def scan_report(binary: Path, command: list[str], report: Path, scope: str,
+                scan_root: Path | None = None) -> list[dict[str, Any]]:
+    result = subprocess.run([str(binary), *command, "--report-format", "json",
+                             "--report-path", str(report), "--redact", "--exit-code", "1"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode not in (0, 1):
+        raise CheckError(f"pinned Gitleaks failed during {scope}; scanner output suppressed")
+    if not report.is_file() or not report.stat().st_size:
+        return []
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CheckError(f"pinned Gitleaks returned an invalid {scope} report") from exc
+    findings = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                reported = Path(str(item.get("File", "<unknown>")))
+                if scan_root is not None:
+                    if reported.is_absolute():
+                        try:
+                            reported = reported.resolve().relative_to(scan_root.resolve())
+                        except (OSError, ValueError):
+                            reported = Path("<outside-scan-root>")
+                    elif reported.parts and reported.parts[0] == scan_root.name:
+                        reported = Path(*reported.parts[1:])
+                findings.append({"kind": "secret detected", "path": reported.as_posix(),
+                                 "line": int(item.get("StartLine", 0) or 0),
+                                 "rule": str(item.get("RuleID", "secret"))})
+    if result.returncode == 1 and not findings:
+        findings.append({"kind": "secret detected", "path": "<redacted>", "line": 0, "rule": "secret"})
+    return findings
+
+
+def run_secret_scans(binary: Path, root: Path, files: list[tuple[str, bytes]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="public-check-tree-") as temporary:
+        snapshot = Path(temporary) / "export"
+        snapshot.mkdir()
+        for rel, payload in files:
+            target = snapshot / PurePosixPath(rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        report = Path(temporary) / "tree-report.json"
+        findings.extend(scan_report(binary, ["detect", "--no-git", "--source", str(snapshot),
+                                             "--config", str(root / ".gitleaks.toml")],
+                                    report, "public tree", scan_root=snapshot))
+
+    commits = git(root, "rev-list", "--all")
+    if commits.returncode:
+        raise CheckError("cannot enumerate public Git history for secret scanning")
+    if commits.stdout.strip():
+        with tempfile.TemporaryDirectory(prefix="public-check-history-") as temporary:
+            report = Path(temporary) / "history-report.json"
+            findings.extend(scan_report(binary, ["detect", "--source", str(root),
+                                                 "--log-opts=--all", "--config",
+                                                 str(root / ".gitleaks.toml")], report, "Git history",
+                                        scan_root=root))
+    return findings
+
+
+def check_export(root: Path, *, staged: bool = False, manifest: Path | None = None,
+                 gitleaks_bin: str | None = None, private_patterns: Path | None = None,
+                 private_report_path: Path | None = None) -> int:
+    root = root.resolve()
+    if repository_root(root) != root:
+        raise CheckError("--root must be the top-level Git checkout")
+    entries = index_entries(root)
+    paths = select_export(root, staged, manifest, entries)
+    private_rules = load_private_rules(private_patterns, root)
+    findings: list[dict[str, Any]] = []
+    payloads: list[tuple[str, bytes]] = []
+    seen: set[str] = set()
+    for rel in paths:
+        if rel in seen:
+            continue
+        seen.add(rel)
+        path_reason = blocked_path(rel)
+        if path_reason:
+            findings.append({"kind": path_reason, "path": "<blocked-private-path>", "line": 0})
+            continue
+        if staged:
+            mode = entries.get(rel, ("", "", -1))[0]
+            if mode == "160000":
+                findings.append({"kind": "nested Git submodule link", "path": rel, "line": 0})
+                continue
+            if mode == "120000":
+                findings.append({"kind": "symlinked public export path", "path": rel, "line": 0})
+                continue
+            payload, problem = read_index_blob(root, rel, entries)
+            if problem:
+                findings.append({"kind": problem, "path": rel, "line": 0})
+                continue
+        else:
+            mode = entries.get(rel, ("", "", -1))[0]
+            if mode == "160000":
+                findings.append({"kind": "nested Git submodule link", "path": rel, "line": 0})
+                continue
+            if mode == "120000":
+                findings.append({"kind": "symlinked public export path", "path": rel, "line": 0})
+                continue
+            working_path = root / rel
+            if working_path.is_symlink():
+                findings.append({"kind": "symlinked public export path", "path": rel, "line": 0})
+                continue
+            if working_path.is_dir() and (working_path / ".git").exists():
+                findings.append({"kind": "nested Git repository", "path": rel, "line": 0})
+                continue
+            payload = read_worktree_file(root, rel)
+            if payload is None:
+                continue
+        if not staged:
+            for parent in PurePosixPath(rel).parents:
+                if parent != PurePosixPath(".") and (root / parent / ".git").exists():
+                    findings.append({"kind": "nested Git repository", "path": rel, "line": 0})
+                    break
+        if payload is None:
+            continue
+        if is_text(rel, payload):
+            for line, reason in inspect_text(rel, payload):
+                findings.append({"kind": reason, "path": rel, "line": line})
+            findings.extend(private_content_findings(rel, payload, private_rules))
+        payloads.append((rel, payload))
+
+    for rel, payload in payloads:
+        if rel == ".gitmodules" and re.search(rb"(?im)^\s*\[submodule\s+", payload):
+            findings.append({"kind": "nested Git submodule declaration", "path": rel, "line": 0})
+    findings.extend(check_history(root, private_rules))
+    scanner = scanner_binary(gitleaks_bin)
+    findings.extend(run_secret_scans(scanner, root, payloads))
+    private_detail = [item for item in findings
+                      if item.get("kind", "").startswith("private ")]
+    private_report(private_report_path, root, private_detail)
+
+    if findings:
+        groups: dict[tuple[str, str], int] = {}
+        for item in findings:
+            kind = str(item.get("kind", "public boundary violation"))
+            path = str(item.get("path", "<unknown>"))
+            if kind.startswith("private disclosure") or kind.startswith("private path"):
+                path = "<private finding>"
+            key = (path, kind)
+            groups[key] = groups.get(key, 0) + 1
+        for (path, kind), count in sorted(groups.items()):
+            print(f"public-check: {path}: {kind} ({count})")
+        print(f"public-check: {len(findings)} finding(s); matched content was not printed.", file=sys.stderr)
+        return 1
+    mode = "staged manifest" if staged else "tree manifest"
+    print(f"public-check: {len(payloads)} intended public file(s) passed {mode}, language, history and secret checks.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    check = subparsers.add_parser("check", help="check a tree or staged export")
+    check.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    mode = check.add_mutually_exclusive_group()
+    mode.add_argument("--tree", action="store_true", help="scan tracked and non-ignored untracked worktree files (default)")
+    mode.add_argument("--staged", action="store_true", help="scan changed staged paths instead of the worktree")
+    check.add_argument("--manifest", type=Path, help="explicit JSON path manifest for this export")
+    check.add_argument("--gitleaks-bin", help="use this pinned Gitleaks executable")
+    check.add_argument("--private-patterns", type=Path,
+                       help="optional private JSON patterns file outside the candidate")
+    check.add_argument("--private-report", type=Path,
+                       help="write detailed private findings outside the candidate with mode 0600")
+    install = subparsers.add_parser("install-gitleaks", help="install SHA-256-pinned Gitleaks 8.24.3")
+    install.add_argument("--destination", type=Path,
+                         default=Path.home() / ".cache" / "ai-toolkit" / "public-check" / "gitleaks-8.24.3")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "install-gitleaks":
+            install_scanner(args.destination.expanduser())
+            return 0
+        return check_export(args.root.expanduser(), staged=args.staged, manifest=args.manifest,
+                            gitleaks_bin=args.gitleaks_bin, private_patterns=args.private_patterns,
+                            private_report_path=args.private_report)
+    except CheckError as exc:
+        print(f"public-check: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,23 @@
+# {{PROJECT_NAME}} Knowledge Base
+
+{{PROJECT_DESCRIPTION}}
+
+Optional project memory directory (when configured): {{MEMORY_DIR}}
+
+Resolve the project root from the Git repository rather than hard-coding an absolute path.
+
+## Knowledge base
+
+The Markdown knowledge base lives under `kb/`. Read `kb/_index.md` to locate documents, then consult `KB-CONVENTIONS.md` for metadata ownership and structure. Generated index or metadata files must be updated only through the documented builder workflow.
+
+## Project-specific tools
+
+Document commands only after they exist in this project and their arguments have been verified. Add local skills or agent definitions only when the project requires them. Keep private configuration and data out of versioned shared files.
+
+## Sources and decisions
+
+Distinguish cited facts, estimates, and hypotheses. Link to the source material that supports important conclusions. Record durable decisions in the project's established decision log.
+
+## Local files
+
+<List non-knowledge-base assets that need explanation.>

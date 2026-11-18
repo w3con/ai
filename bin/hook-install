@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# hook-install — install a tested hook atomically into the configured hook directory.
+#
+# Installed hook files may be loaded for every tool call. A partial replacement can
+# interrupt a running session, so candidates are validated before an atomic rename.
+#
+# A candidate is tested against the adjacent hook suite before it replaces the installed
+# path. The rename happens inside the hook directory, so readers see the old or new file.
+#
+# usage: bin/hook-install <candidate-file> <hook-name>
+#        bin/hook-install --check
+#        bin/hook-install -h | --help
+#
+# <hook-name> is the hook's bare name, with or without its suffix. Both shell and Python
+# hooks are supported; when omitted, the existing file determines the language.
+#
+# Refuses, naming the reason, when: the candidate file does not exist; the candidate does
+# not parse; the named hook has no test suite; that test suite fails against the
+# candidate; or the live path is not a regular file. Only once none of those five holds
+# does it install.
+#
+# --check reports
+# every file directly inside the hooks directory that either differs from that
+# directory's last commit (modified or plainly untracked, per 'git status --porcelain')
+# or fails to parse (bash -n for a .sh file, an AST parse for a .py file), and exits
+# non-zero when an uninstalled or unparsable hook is found.
+#
+# HOOK_INSTALL_HOOKS_DIR overrides the hooks directory for isolated tests. When this
+# utility is installed beside a hooks directory, that directory is derived from its path;
+# otherwise the user-level ~/.claude/hooks directory is used.
+
+usage() {
+  cat <<'EOF'
+usage: bin/hook-install <candidate-file> <hook-name>
+       bin/hook-install --check
+       bin/hook-install -h | --help
+
+Installs <candidate-file> as <hook-name> in the configured hooks directory (default:
+~/.claude/hooks when no adjacent hooks directory is found).
+
+It refuses unless the candidate parses and unless that hook's own test suite
+(hooks/<hook-name>.test.py) passes when run against the candidate, and only then
+installs it: the candidate is written into hooks/ under a temporary name and renamed
+onto the live path in one atomic step, so no reader of the live path ever sees a
+partially written file.
+
+<hook-name> is the hook's bare name, with or without its suffix (for example
+"card-touch-gate", "card-touch-gate.sh" or "inbox-stop.py"). Shell hooks and Python
+hooks are both installable; given a bare name, the language is read off whichever file
+is live under the hooks directory, and the candidate is parse-checked with that
+language's own parser.
+
+--check reports every file directly inside the hooks directory that either differs
+from that directory's last commit or fails to parse, and exits non-zero the moment it
+finds one. It changes nothing; it only reads the directory and the git history behind
+it, so it is safe to run at any time.
+
+Environment:
+  HOOK_INSTALL_HOOKS_DIR   overrides the hooks directory (default: ~/.claude/hooks),
+                           for proving this script's own refusals against a scratch
+                           copy instead of the live directory.
+EOF
+}
+
+# --check reports each direct hook file that differs from its last commit or fails
+# to parse. It is read-only.
+run_check() {
+  local repo_root
+  repo_root=$(cd "$HOOKS_DIR" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)
+  if [ -z "$repo_root" ]; then
+    echo "hook-install: --check refuses — '$HOOKS_DIR' is not inside a git working tree." >&2
+    return 1
+  fi
+
+  local rel_dir
+  rel_dir=$(cd "$HOOKS_DIR" && git rev-parse --show-prefix)
+
+  local problem_found=0
+  local f base tracked_path status_line parse_err
+
+  for f in "$HOOKS_DIR"/*; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    case "$base" in
+      .hook-install.*) continue ;;  # this script's own transient install temp files
+    esac
+
+    tracked_path="${rel_dir}${base}"
+
+    status_line=$(git -C "$repo_root" status --porcelain -- "$tracked_path")
+    if [ -n "$status_line" ]; then
+      echo "hook-install: --check found '$f' differs from the last commit ($status_line)." >&2
+      problem_found=1
+    fi
+
+    case "$base" in
+      *.sh)
+        parse_err=$(bash -n "$f" 2>&1)
+        if [ $? -ne 0 ]; then
+          echo "hook-install: --check found '$f' does not parse; 'bash -n' reported: $parse_err" >&2
+          problem_found=1
+        fi
+        ;;
+      *.py)
+        parse_err=$(python3 -c 'import ast, sys
+ast.parse(open(sys.argv[1]).read(), filename=sys.argv[1])' "$f" 2>&1)
+        if [ $? -ne 0 ]; then
+          echo "hook-install: --check found '$f' does not parse; python reported: $parse_err" >&2
+          problem_found=1
+        fi
+        ;;
+    esac
+  done
+
+  if [ "$problem_found" -eq 0 ]; then
+    echo "hook-install: --check found no file in '$HOOKS_DIR' that differs from the last commit or fails to parse."
+    return 0
+  fi
+  return 1
+}
+
+# Help is answered before anything else so asking about behavior cannot install a hook.
+for arg in "$@"; do
+  if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
+    usage
+    exit 0
+  fi
+done
+
+set -u
+
+_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${_SELF_DIR}/brief_reader.py" ]; then
+  _HOOKS_DEFAULT="$_SELF_DIR"
+elif [ -d "${_SELF_DIR}/../hooks" ]; then
+  _HOOKS_DEFAULT="$(cd "${_SELF_DIR}/../hooks" && pwd)"
+else
+  _HOOKS_DEFAULT="${HOME}/.claude/hooks"
+fi
+HOOKS_DIR="${HOOK_INSTALL_HOOKS_DIR:-$_HOOKS_DEFAULT}"
+
+if [ "$#" -eq 1 ] && [ "$1" = "--check" ]; then
+  run_check
+  exit $?
+fi
+
+if [ "$#" -lt 2 ]; then
+  echo "hook-install: refuses — expected two arguments, a candidate file and a hook name; got $#. Run 'bin/hook-install -h' for usage." >&2
+  exit 1
+fi
+
+CANDIDATE="$1"
+
+# 2026-08-13: the live path used to be spelled "$HOOKS_DIR/$HOOK_NAME.sh" outright, which
+# meant this script could install a shell hook and nothing else. That was not a harmless
+# limitation. hooks/inbox-stop.py is a Python hook, so the one prescribed, tested, atomic
+# route for changing a live hook simply did not exist for it, and the only way to change
+# it at all was to edit it in place — the exact thing this script and hooks/README.md
+# exist to forbid. The --check half of this script already knew about both languages; only
+# the installing half did not. It does now: the hook may be named with either suffix or
+# with none, and when none is given the language is read off whichever file is actually
+# live under the hooks directory.
+HOOK_NAME="${2%.sh}"
+HOOK_NAME="${HOOK_NAME%.py}"
+
+case "$2" in
+  *.sh) HOOK_EXT=".sh" ;;
+  *.py) HOOK_EXT=".py" ;;
+  *)
+    if [ -f "$HOOKS_DIR/$HOOK_NAME.sh" ]; then
+      HOOK_EXT=".sh"
+    elif [ -f "$HOOKS_DIR/$HOOK_NAME.py" ]; then
+      HOOK_EXT=".py"
+    else
+      # Neither is live. Refusal 5 below reports that in its own words; carry the
+      # historical default so the message names the file the caller most likely meant.
+      HOOK_EXT=".sh"
+    fi
+    ;;
+esac
+
+LIVE_PATH="$HOOKS_DIR/$HOOK_NAME$HOOK_EXT"
+TEST_PATH="$HOOKS_DIR/$HOOK_NAME.test.py"
+
+# Refusal 1: the candidate file does not exist.
+if [ ! -f "$CANDIDATE" ]; then
+  echo "hook-install: refuses — the candidate file '$CANDIDATE' does not exist." >&2
+  exit 1
+fi
+
+# Refusal 2: the candidate does not parse, checked with the parser of the hook's own
+# language rather than always with bash — the same pair of checks --check already applies.
+if [ "$HOOK_EXT" = ".py" ]; then
+  parse_err=$(python3 -c 'import ast, sys
+ast.parse(open(sys.argv[1]).read(), filename=sys.argv[1])' "$CANDIDATE" 2>&1)
+  parse_status=$?
+  parse_language="a Python script"
+  parse_tool="python"
+else
+  parse_err=$(bash -n "$CANDIDATE" 2>&1)
+  parse_status=$?
+  parse_language="a shell script"
+  parse_tool="'bash -n'"
+fi
+if [ "$parse_status" -ne 0 ]; then
+  echo "hook-install: refuses — the candidate file '$CANDIDATE' does not parse as $parse_language; $parse_tool reported: $parse_err" >&2
+  exit 1
+fi
+
+# Refusal 3: the named hook has no test suite.
+if [ ! -f "$TEST_PATH" ]; then
+  echo "hook-install: refuses — the hook '$HOOK_NAME' has no test suite; expected one at '$TEST_PATH'." >&2
+  exit 1
+fi
+
+# Refusal 4: that test suite fails against the candidate.
+test_output=$(python3 "$TEST_PATH" "$CANDIDATE" 2>&1)
+test_status=$?
+if [ "$test_status" -ne 0 ]; then
+  echo "hook-install: refuses — the test suite '$TEST_PATH' failed against the candidate '$CANDIDATE':" >&2
+  echo "$test_output" >&2
+  exit 1
+fi
+
+# Refusal 5: the live path is not a regular file.
+if [ ! -f "$LIVE_PATH" ]; then
+  echo "hook-install: refuses — the live path '$LIVE_PATH' is not a regular file." >&2
+  exit 1
+fi
+
+# All five checks passed: install by writing under a temporary name inside the hooks
+# directory, then renaming onto the live path. Both the temporary write and the live
+# path are on the same filesystem (both inside HOOKS_DIR), so the rename is atomic — a
+# reader of LIVE_PATH sees either the old file or the new one, never a partial write.
+tmp_path=$(mktemp "$HOOKS_DIR/.hook-install.$HOOK_NAME.XXXXXX")
+cp "$CANDIDATE" "$tmp_path"
+chmod 755 "$tmp_path"
+mv -f "$tmp_path" "$LIVE_PATH"
+
+echo "hook-install: installed '$CANDIDATE' as '$LIVE_PATH' (test suite '$TEST_PATH' passed)."
+exit 0

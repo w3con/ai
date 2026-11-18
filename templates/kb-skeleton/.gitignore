@@ -1,0 +1,12 @@
+# Local credentials and environment files
+.env
+
+# Operating-system and Python artifacts
+.DS_Store
+**/__pycache__/
+*.pyc
+
+# Local knowledge-base application state and generated caches
+.obsidian/
+.ai/docs/
+.ai/logs/

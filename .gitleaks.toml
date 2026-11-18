@@ -1,0 +1,11 @@
+title = "AI Engineering Toolkit secret scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-long-token"
+description = "Generic token-like value for reproducible secret-scanner tests"
+regex = '''(?i)\b(?:token|secret|api[_-]?key)\b\s*[:=]\s*["']([a-z0-9_+/=-]{24,})["']'''
+secretGroup = 1
+keywords = ["token", "secret", "api_key"]

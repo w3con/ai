@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Refresh generated knowledge-base metadata for staged Markdown. If the
+# builder cannot run, report that generated metadata may be stale.
+
+set -u
+PROJECT_ROOT="$(git rev-parse --show-toplevel)" || exit 1
+BUILDER="$PROJECT_ROOT/bin/relation-build"
+
+STAGED_KB="$(git diff --cached --name-only --diff-filter=ACM -- 'kb/*.md' 'kb/**/*.md')"
+[[ -n "$STAGED_KB" ]] || exit 0
+
+CONTENT_KB="$(while IFS= read -r path; do
+  [[ "$path" == "kb/_index.md" ]] || printf '%s\n' "$path"
+done <<< "$STAGED_KB")"
+CONTENT_KB="${CONTENT_KB%$'\n'}"
+[[ -n "$CONTENT_KB" ]] || exit 0
+
+ABS_PATHS=()
+while IFS= read -r path; do
+  ABS_PATHS+=("$PROJECT_ROOT/$path")
+done <<< "$CONTENT_KB"
+
+(( ${#ABS_PATHS[@]} )) || exit 0
+
+if [[ ! -x "$BUILDER" ]]; then
+  echo "[pre-commit] WARNING: knowledge-base builder is unavailable; metadata may be stale." >&2
+else
+  "$BUILDER" --ids "${ABS_PATHS[@]}"
+  BUILD_STATUS=$?
+  if (( BUILD_STATUS != 0 )); then
+    echo "[pre-commit] WARNING: knowledge-base builder exited $BUILD_STATUS; metadata may be stale." >&2
+  fi
+fi
+
+REL_PATHS=()
+while IFS= read -r path; do
+  REL_PATHS+=("$path")
+done <<< "$CONTENT_KB"
+git -C "$PROJECT_ROOT" add -- "${REL_PATHS[@]}"
+[[ ! -f "$PROJECT_ROOT/kb/_index.md" ]] || git -C "$PROJECT_ROOT" add -- kb/_index.md

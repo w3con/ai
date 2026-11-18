@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Generate ``kb/_index.md``, a navigation index for a Markdown knowledge base.
+
+Reads every kb/**/*.md document's YAML frontmatter and emits one line per
+document (wikilink + one-line summary + type/tags), grouped by collection,
+followed by a domain cross-reference built from each doc's ai.domains.
+
+This standalone helper keeps the generated index in sync with one idempotent pass.
+
+Usage:
+    bin/kb-index [--root DIR]        # regenerate kb/_index.md
+    bin/kb-index --root DIR --check  # exit 1 if the index would change
+
+Never hand-edit kb/_index.md — rerun this instead.
+"""
+import datetime
+import argparse
+import glob
+import os
+import re
+import subprocess
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("PyYAML is required; install dependencies with python3 -m pip install -r bin/requirements.txt")
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+KB = os.path.join(ROOT, "kb")
+INDEX = os.path.join(KB, "_index.md")
+
+sys.path.insert(0, ROOT)
+try:
+    from lib.private_config import load
+    _PRIVATE_CONFIG = load(ROOT)
+except (ImportError, ValueError, OSError) as exc:
+    sys.exit(f"kb-index: invalid private configuration: {exc}")
+_KB_CONFIG = _PRIVATE_CONFIG.get("knowledge_base", {})
+COLLECTION_ORDER = _KB_CONFIG.get("collection_order", []) if isinstance(_KB_CONFIG, dict) else []
+
+
+def load_docs():
+    docs = []
+    for path in glob.glob(os.path.join(KB, "**", "*.md"), recursive=True):
+        rel = os.path.relpath(path, KB)
+        if rel.startswith("_") or any(p.startswith("_") for p in rel.split(os.sep)[:-1]) or os.path.basename(path) == "_index.md":
+            continue
+        text = open(path, encoding="utf-8").read()
+        m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        if not m:
+            continue
+        try:
+            fm = yaml.safe_load(m.group(1)) or {}
+        except yaml.YAMLError:
+            fm = {}
+        parts = rel.split(os.sep)
+        collection = parts[0] if len(parts) > 1 else "(root)"
+        slug = os.path.splitext(os.path.basename(path))[0]
+        ai = fm.get("ai") or {}
+        summary = (ai.get("summary") or "").strip().replace("\n", " ")
+        if len(summary) > 200:
+            summary = summary[:197].rstrip() + "…"
+        docs.append({
+            "slug": slug,
+            "title": fm.get("title") or slug,
+            "type": fm.get("type") or "?",
+            "tags": fm.get("tags") or [],
+            "status": fm.get("status") or "",
+            "summary": summary,
+            "collection": collection,
+            "domains": ai.get("domains") or [],
+        })
+    return docs
+
+
+def line_for(d):
+    meta = d["type"]
+    if d["tags"]:
+        meta += " · " + ", ".join(d["tags"])
+    tail = " — " + d["summary"] if d["summary"] else " — *(no summary yet)*"
+    return "- [[%s|%s]]%s  *(%s)*" % (d["slug"], d["title"], tail, meta)
+
+
+def render(docs):
+    today = datetime.date.today().isoformat()
+    out = ["# Knowledge Base — Index", ""]
+    out.append("*Generated %s by `bin/kb-index`. One line per document, "
+               "grouped by collection. Do not hand-edit — rerun the helper.*"
+               % today)
+    out.append("")
+    out.append("**%d documents** across %d collections."
+               % (len(docs), len({d["collection"] for d in docs})))
+    out.append("")
+
+    by_coll = {}
+    for d in docs:
+        by_coll.setdefault(d["collection"], []).append(d)
+    ordered = [c for c in COLLECTION_ORDER if c in by_coll]
+    ordered += sorted(c for c in by_coll if c not in COLLECTION_ORDER)
+
+    for coll in ordered:
+        items = sorted(by_coll[coll], key=lambda d: d["title"].lower())
+        out.append("## %s" % coll)
+        out.append("")
+        out.extend(line_for(d) for d in items)
+        out.append("")
+
+    # Domain cross-reference
+    by_domain = {}
+    for d in docs:
+        for dom in d["domains"]:
+            by_domain.setdefault(dom, []).append(d)
+    if by_domain:
+        out.append("## Domain cross-reference")
+        out.append("")
+        out.append("*Built from each document's `ai.domains` (folded from "
+                   "legacy relations; docs without metadata yet are absent "
+                   "here until the builder runs).*")
+        out.append("")
+        for dom in sorted(by_domain):
+            titles = sorted({d["title"] for d in by_domain[dom]}, key=str.lower)
+            slugs = {d["title"]: d["slug"] for d in by_domain[dom]}
+            links = ", ".join("[[%s|%s]]" % (slugs[t], t) for t in titles)
+            out.append("- **%s** — %s" % (dom, links))
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def main():
+    global ROOT, KB, INDEX, COLLECTION_ORDER
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", default=ROOT, help="knowledge-base checkout root")
+    parser.add_argument("--check", action="store_true", help="report stale output without writing")
+    args = parser.parse_args()
+    ROOT = os.path.realpath(args.root)
+    KB = os.path.join(ROOT, "kb")
+    INDEX = os.path.join(KB, "_index.md")
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    try:
+        from lib.private_config import load
+        config = load(ROOT)
+    except (ImportError, OSError, ValueError) as exc:
+        sys.exit(f"kb-index: invalid private configuration: {exc}")
+    kb_config = config.get("knowledge_base", {})
+    COLLECTION_ORDER = kb_config.get("collection_order", [])
+    docs = load_docs()
+    content = render(docs)
+    if args.check:
+        existing = open(INDEX, encoding="utf-8").read() if os.path.exists(INDEX) else ""
+        if existing != content:
+            print("kb/_index.md is stale; run bin/kb-index")
+            sys.exit(1)
+        print("kb/_index.md up to date")
+        return
+    open(INDEX, "w", encoding="utf-8").write(content)
+    no_meta = sum(1 for d in docs if not d["summary"])
+    print("Wrote kb/_index.md — %d documents, %d without a summary."
+          % (len(docs), no_meta))
+
+
+if __name__ == "__main__":
+    main()

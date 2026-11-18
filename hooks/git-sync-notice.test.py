@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""Scratch-only behavioral tests for hooks/git-sync-notice.sh.
+
+Every scenario creates local bare repositories and clones under temporary directories.
+No actual remote, source checkout or user configuration is contacted. Optional argv
+selects a candidate hook; without it, the adjacent hook is tested.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+_AI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HOOKS = os.path.join(_AI_ROOT, "hooks")
+
+HOOK = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_HOOKS, "git-sync-notice.sh")
+
+fails = 0
+
+
+def state_path_for(state_dir, repo):
+    """The per-repository state file path, computed with the SAME sanitisation the hook
+    itself applies to a repo path (non alnum/underscore/hyphen characters replaced with
+    '_') — used so a scenario can pre-seed or read back a specific repository's own
+    fetch-attempt record directly, rather than discovering the filename by inspecting
+    whatever the hook happens to write."""
+    key = re.sub(r'[^A-Za-z0-9_-]', '_', repo)
+    return os.path.join(state_dir, "git-sync-notice-%s.json" % key)
+
+
+def run_git(cwd, *args, check=True):
+    r = subprocess.run(["git", "-C", cwd] + list(args), capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError("git -C %s %s failed: %s" % (cwd, " ".join(args), r.stderr))
+    return r.stdout.strip()
+
+
+def write_and_commit(repo, name, content, message):
+    with open(os.path.join(repo, name), "w", encoding="utf-8") as f:
+        f.write(content)
+    run_git(repo, "add", name)
+    run_git(repo, "commit", "-q", "-m", message)
+
+
+def make_remote_and_clone(root, branch="main"):
+    """Build the fixture every scenario below starts from: a bare repository (the
+    'remote') seeded with one commit, and a clone of it that tracks origin/<branch>.
+    Returns (bare_path, clone_path)."""
+    bare = os.path.join(root, "remote.git")
+    subprocess.run(["git", "init", "--quiet", "--bare", "-b", branch, bare], check=True)
+
+    seed = os.path.join(root, "seed")
+    run_git(root, "clone", "--quiet", bare, seed)
+    run_git(seed, "config", "user.email", "test@example.com")
+    run_git(seed, "config", "user.name", "Test")
+    write_and_commit(seed, "file.txt", "one\n", "initial commit")
+    run_git(seed, "push", "--quiet", "origin", "HEAD:%s" % branch)
+
+    clone = os.path.join(root, "clone")
+    run_git(root, "clone", "--quiet", "-b", branch, bare, clone)
+    run_git(clone, "config", "user.email", "test@example.com")
+    run_git(clone, "config", "user.name", "Test")
+    return bare, clone
+
+
+def advance_remote(bare, root, branch="main", n=1, tag=""):
+    """Push N more commits to the bare repo through a second, throwaway clone — never
+    through the fixture's own primary clone, so the primary clone's remote-tracking ref
+    stays exactly where it was at its last fetch (never), proving the hook reads only
+    refs already on disk."""
+    pusher = tempfile.mkdtemp(prefix="git-sync-notice-pusher-", dir=root)
+    run_git(root, "clone", "--quiet", "-b", branch, bare, pusher)
+    run_git(pusher, "config", "user.email", "test@example.com")
+    run_git(pusher, "config", "user.name", "Test")
+    for i in range(n):
+        write_and_commit(pusher, "remote-advance%s.txt" % tag, "advance %d\n" % i,
+                          "remote-only commit %d%s" % (i, tag))
+    run_git(pusher, "push", "--quiet", "origin", "HEAD:%s" % branch)
+
+
+def advance_local(clone, n=1):
+    for i in range(n):
+        write_and_commit(clone, "local-advance.txt", "local %d\n" % i,
+                          "local-only commit %d" % i)
+
+
+def call(repos, state_dir=None, fetch_interval=None, extra_env=None):
+    """Invoke the hook once. GIT_SYNC_NOTICE_STATE_DIR is set UNCONDITIONALLY on every
+    call, never left unset for the hook to fall back to its own default (~/.claude) —
+    that fallback is exactly what let 28 scratch-repository fetch-state files leak into
+    the real ~/.claude across earlier runs of this suite, one per case that omitted
+    state_dir. A caller that does not need to inspect the state file afterward gets a
+    fresh scratch directory nested under this run's own fixture root, cleaned up with
+    everything else that root holds; a caller that DOES need to inspect it still passes
+    state_dir explicitly, exactly as before."""
+    payload = {"hook_event_name": "SessionStart", "source": "startup"}
+    env = dict(os.environ)
+    env["GIT_SYNC_NOTICE_REPOS"] = " ".join(repos)
+    env["GIT_SYNC_NOTICE_STATE_DIR"] = (
+        state_dir if state_dir is not None
+        else tempfile.mkdtemp(prefix="state-", dir=root))
+    if fetch_interval is not None:
+        env["GIT_SYNC_NOTICE_FETCH_INTERVAL"] = str(fetch_interval)
+    if extra_env:
+        env.update(extra_env)
+    r = subprocess.run(["bash", HOOK], input=json.dumps(payload),
+                        capture_output=True, text=True, env=env, timeout=15)
+    return r.returncode, r.stdout
+
+
+def check(label, condition, detail=""):
+    global fails
+    fails += 0 if condition else 1
+    print(f"  {'PASS' if condition else 'FAIL'}  {label}{'' if condition else '  ' + detail}")
+
+
+try:
+    root = tempfile.mkdtemp(prefix="git-sync-notice-test-")
+
+    # --- ahead: local has an unpushed commit, remote unchanged ---
+    scen = os.path.join(root, "ahead")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_local(clone, 1)
+    code, out = call([clone])
+    check("ahead: exit code is 0", code == 0, f"got {code}")
+    check("ahead: names the repo, 1 ahead, 0 behind",
+          (clone in out and "1 commit(s) ahead" in out and "0 commit(s) behind" in out),
+          f"stdout={out!r}")
+
+    # --- behind: the remote advances, and a PRIOR fetch (simulated here, in the fixture's
+    # own setup, standing in for an earlier session's background fetch) already brought
+    # the new commits onto disk as the local remote-tracking ref — never a fetch made by
+    # the hook's own call below, which reads only what is already there ---
+    scen = os.path.join(root, "behind")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=2, tag="-behind")
+    run_git(clone, "fetch", "--quiet")
+    code, out = call([clone])
+    check("behind: exit code is 0", code == 0, f"got {code}")
+    check("behind: names the repo, 0 ahead, 2 behind",
+          (clone in out and "0 commit(s) ahead" in out and "2 commit(s) behind" in out),
+          f"stdout={out!r}")
+
+    # --- both at once: local has an unpushed commit AND a prior fetch already brought the
+    # remote's own further advance onto disk ---
+    scen = os.path.join(root, "both")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=3, tag="-both")
+    run_git(clone, "fetch", "--quiet")
+    advance_local(clone, 1)
+    code, out = call([clone])
+    check("both: exit code is 0", code == 0, f"got {code}")
+    check("both: names the repo, 1 ahead, 3 behind",
+          (clone in out and "1 commit(s) ahead" in out and "3 commit(s) behind" in out),
+          f"stdout={out!r}")
+
+    # --- agreement: freshly cloned, nothing diverged — prints nothing ---
+    scen = os.path.join(root, "agree")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    code, out = call([clone])
+    check("agreement: exit code is 0", code == 0, f"got {code}")
+    check("agreement: prints nothing at all", out.strip() == "", f"stdout={out!r}")
+
+    # --- a missing directory: never crashes, never named, exit 0 ---
+    missing = os.path.join(root, "does-not-exist-at-all")
+    code, out = call([missing])
+    check("missing directory: exit code is 0", code == 0, f"got {code}")
+    check("missing directory: prints nothing", out.strip() == "", f"stdout={out!r}")
+
+    # --- a repository with no remote at all ---
+    scen = os.path.join(root, "no-remote")
+    os.makedirs(scen)
+    run_git(root, "init", "--quiet", scen)
+    run_git(scen, "config", "user.email", "test@example.com")
+    run_git(scen, "config", "user.name", "Test")
+    write_and_commit(scen, "file.txt", "one\n", "only commit")
+    code, out = call([scen])
+    check("no remote: exit code is 0", code == 0, f"got {code}")
+    check("no remote: prints nothing", out.strip() == "", f"stdout={out!r}")
+
+    # --- a detached head, even with real drift against its own remote ---
+    scen = os.path.join(root, "detached")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=1, tag="-detached")
+    run_git(clone, "fetch", "--quiet")
+    head_sha = run_git(clone, "rev-parse", "HEAD")
+    run_git(clone, "checkout", "--quiet", "--detach", head_sha)
+    code, out = call([clone])
+    check("detached head: exit code is 0", code == 0, f"got {code}")
+    check("detached head: prints nothing even though the branch it left behind is behind",
+          out.strip() == "", f"stdout={out!r}")
+
+    # --- several repositories in one call: each is judged independently ---
+    scen = os.path.join(root, "multi")
+    os.makedirs(scen)
+    bare1, clone1 = make_remote_and_clone(os.path.join(scen, "one"))
+    bare2, clone2 = make_remote_and_clone(os.path.join(scen, "two"))
+    advance_local(clone1, 1)
+    code, out = call([clone1, clone2])
+    check("multi-repo: exit code is 0", code == 0, f"got {code}")
+    check("multi-repo: the drifted repo is named", clone1 in out, f"stdout={out!r}")
+    check("multi-repo: the agreeing repo is never named", clone2 not in out,
+          f"stdout={out!r}")
+
+    # =====================================================================================
+    # The rate-limited background fetch records its attempt synchronously before
+    # detaching the network operation, making the state deterministic to test.
+    # =====================================================================================
+
+    # --- no prior state at all: an attempt is recorded now ---
+    scen = os.path.join(root, "fetch-fresh")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    state_dir = os.path.join(scen, "state")
+    before = time.time()
+    code, out = call([clone], state_dir=state_dir, fetch_interval=100)
+    after = time.time()
+    check("fetch interval, no prior state: exit code is 0", code == 0, f"got {code}")
+    state_files = [f for f in os.listdir(state_dir)] if os.path.isdir(state_dir) else []
+    check("fetch interval, no prior state: a state file was written",
+          len(state_files) == 1, f"found {state_files!r}")
+    if state_files:
+        with open(os.path.join(state_dir, state_files[0]), encoding="utf-8") as f:
+            recorded = json.load(f).get("last_attempt")
+        check("fetch interval, no prior state: recorded timestamp is roughly now",
+              recorded is not None and before - 5 <= recorded <= after + 5,
+              f"recorded={recorded!r}, window=({before - 5}, {after + 5})")
+
+    # --- a recent attempt (well inside the interval): no new attempt is recorded ---
+    scen = os.path.join(root, "fetch-recent")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    state_dir = os.path.join(scen, "state")
+    os.makedirs(state_dir)
+    real_state_path = state_path_for(state_dir, clone)
+    recent_ts = time.time() - 10  # 10s ago, well inside a 100s interval
+    with open(real_state_path, "w", encoding="utf-8") as f:
+        json.dump({"last_attempt": recent_ts}, f)
+    code, out = call([clone], state_dir=state_dir, fetch_interval=100)
+    check("fetch interval, recent attempt: exit code is 0", code == 0, f"got {code}")
+    with open(real_state_path, encoding="utf-8") as f:
+        after_recorded = json.load(f).get("last_attempt")
+    check("fetch interval, recent attempt: timestamp is left untouched (no new attempt)",
+          abs(after_recorded - recent_ts) < 0.5, f"before={recent_ts!r}, after={after_recorded!r}")
+
+    # --- a stale attempt (older than the interval): a new attempt IS recorded ---
+    scen = os.path.join(root, "fetch-stale")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    state_dir = os.path.join(scen, "state")
+    os.makedirs(state_dir)
+    real_state_path = state_path_for(state_dir, clone)
+    stale_ts = time.time() - 200  # older than the 100s interval below
+    with open(real_state_path, "w", encoding="utf-8") as f:
+        json.dump({"last_attempt": stale_ts}, f)
+    before = time.time()
+    code, out = call([clone], state_dir=state_dir, fetch_interval=100)
+    after = time.time()
+    check("fetch interval, stale attempt: exit code is 0", code == 0, f"got {code}")
+    with open(real_state_path, encoding="utf-8") as f:
+        after_recorded = json.load(f).get("last_attempt")
+    check("fetch interval, stale attempt: timestamp is updated to roughly now",
+          after_recorded is not None and before - 5 <= after_recorded <= after + 5,
+          f"recorded={after_recorded!r}, window=({before - 5}, {after + 5})")
+
+    # --- fast-forward: a repository named in GIT_SYNC_NOTICE_PULL_REPOS, behind by two
+    # commits already on disk, with a clean tree, is moved onto its upstream — and the move
+    # is what makes the reporting below silent about it ---
+    scen = os.path.join(root, "ff-clean")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=2, tag="-ff-clean")
+    run_git(clone, "fetch", "--quiet")
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_PULL_REPOS": clone})
+    head = run_git(clone, "rev-parse", "HEAD")
+    upstream_head = run_git(clone, "rev-parse", "@{upstream}")
+    check("fast-forward, clean tree: exit code is 0", code == 0, f"got {code}")
+    check("fast-forward, clean tree: HEAD now equals the upstream ref",
+          head == upstream_head, f"head={head!r}, upstream={upstream_head!r}")
+    check("fast-forward, clean tree: says so, naming the count",
+          ("fast-forwarded 2 commit(s)" in out and clone in out), f"stdout={out!r}")
+    check("fast-forward, clean tree: reports no drift afterwards",
+          "commit(s) behind" not in out, f"stdout={out!r}")
+
+    # --- fast-forward refused: the same situation with one uncommitted file present. The
+    # tree is left where it was and the drift is reported instead ---
+    scen = os.path.join(root, "ff-dirty")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=2, tag="-ff-dirty")
+    run_git(clone, "fetch", "--quiet")
+    before_head = run_git(clone, "rev-parse", "HEAD")
+    with open(os.path.join(clone, "uncommitted.txt"), "w", encoding="utf-8") as f:
+        f.write("work in progress\n")
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_PULL_REPOS": clone})
+    after_head = run_git(clone, "rev-parse", "HEAD")
+    check("fast-forward, dirty tree: exit code is 0", code == 0, f"got {code}")
+    check("fast-forward, dirty tree: HEAD is untouched",
+          after_head == before_head, f"before={before_head!r}, after={after_head!r}")
+    check("fast-forward, dirty tree: nothing claims a fast-forward",
+          "fast-forwarded" not in out, f"stdout={out!r}")
+    check("fast-forward, dirty tree: the drift is reported instead",
+          "2 commit(s) behind" in out, f"stdout={out!r}")
+
+    # --- a repository NOT named in the pull list is never moved, however far behind ---
+    scen = os.path.join(root, "ff-not-listed")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    advance_remote(bare, scen, n=2, tag="-ff-not-listed")
+    run_git(clone, "fetch", "--quiet")
+    before_head = run_git(clone, "rev-parse", "HEAD")
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_PULL_REPOS": ""})
+    after_head = run_git(clone, "rev-parse", "HEAD")
+    check("fast-forward, not in the pull list: HEAD is untouched",
+          after_head == before_head, f"before={before_head!r}, after={after_head!r}")
+    check("fast-forward, not in the pull list: the drift is reported instead",
+          "2 commit(s) behind" in out, f"stdout={out!r}")
+
+    # =====================================================================================
+    # 2026-09-18: a clone nobody has fetched for a long time, and two working copies of one
+    # repository under different directory names. Both were real on this machine, and the
+    # reporting above was blind to both: the drift counts are only as fresh as the last
+    # fetch, and two clones of one repository each look perfectly healthy on their own.
+    # =====================================================================================
+
+    def seed_fetch_state(state_dir, repo):
+        """Record a fetch attempt as of now, so the background fetch step stays quiet in a
+        scenario whose fixture carries a network-shaped remote URL."""
+        os.makedirs(state_dir, exist_ok=True)
+        with open(state_path_for(state_dir, repo), "w", encoding="utf-8") as f:
+            json.dump({"last_attempt": time.time()}, f)
+
+    # --- a clone whose last fetch is older than the threshold is named ---
+    scen = os.path.join(root, "stale-fetch")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    run_git(clone, "fetch", "--quiet")
+    fetch_head = os.path.join(clone, ".git", "FETCH_HEAD")
+    old = time.time() - 40 * 86400
+    os.utime(fetch_head, (old, old))
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_STALE_DAYS": "7"})
+    check("stale fetch: exit code is 0", code == 0, f"got {code}")
+    check("stale fetch: names the repo and the age",
+          clone in out and "last fetched 40 day(s) ago" in out, f"stdout={out!r}")
+
+    # --- a clone fetched just now is not named ---
+    scen = os.path.join(root, "fresh-fetch")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    run_git(clone, "fetch", "--quiet")
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_STALE_DAYS": "7"})
+    check("fresh fetch: says nothing about staleness",
+          "last fetched" not in out, f"stdout={out!r}")
+
+    # --- a clone that has never been fetched is not named: a fresh clone is current ---
+    scen = os.path.join(root, "never-fetched")
+    os.makedirs(scen)
+    bare, clone = make_remote_and_clone(scen)
+    check("never fetched: the fixture really has no FETCH_HEAD",
+          not os.path.exists(os.path.join(clone, ".git", "FETCH_HEAD")))
+    code, out = call([clone], extra_env={"GIT_SYNC_NOTICE_STALE_DAYS": "1"})
+    check("never fetched: says nothing about staleness",
+          "last fetched" not in out, f"stdout={out!r}")
+
+    # --- two working copies of ONE repository, under two remote addresses ---
+    scen = os.path.join(root, "duplicate")
+    os.makedirs(scen)
+    bare, clone_a = make_remote_and_clone(scen)
+    clone_b = os.path.join(scen, "clone-b")
+    run_git(scen, "clone", "--quiet", bare, clone_b)
+    run_git(clone_a, "remote", "set-url", "origin", "git@example.com:org/old-name.git")
+    run_git(clone_b, "remote", "set-url", "origin", "git@example.com:org/new-name.git")
+    state_dir = os.path.join(scen, "state")
+    seed_fetch_state(state_dir, clone_a)
+    seed_fetch_state(state_dir, clone_b)
+    code, out = call([clone_a, clone_b], state_dir=state_dir)
+    check("duplicate clones: exit code is 0", code == 0, f"got {code}")
+    check("duplicate clones: both paths and both addresses are named",
+          (clone_a in out and clone_b in out
+           and "old-name.git" in out and "new-name.git" in out
+           and "ONE repository" in out), f"stdout={out!r}")
+
+    # --- two clones sharing ONE address are a normal arrangement, never named ---
+    scen = os.path.join(root, "same-url")
+    os.makedirs(scen)
+    bare, clone_a = make_remote_and_clone(scen)
+    clone_b = os.path.join(scen, "clone-b")
+    run_git(scen, "clone", "--quiet", bare, clone_b)
+    for c in (clone_a, clone_b):
+        run_git(c, "remote", "set-url", "origin", "git@example.com:org/same.git")
+    state_dir = os.path.join(scen, "state")
+    seed_fetch_state(state_dir, clone_a)
+    seed_fetch_state(state_dir, clone_b)
+    code, out = call([clone_a, clone_b], state_dir=state_dir)
+    check("same address twice: never called a duplicate",
+          "ONE repository" not in out, f"stdout={out!r}")
+
+    # --- a remote that is a local path is a fixture or a mirror, never a duplicate ---
+    scen = os.path.join(root, "local-remote")
+    os.makedirs(scen)
+    bare, clone_a = make_remote_and_clone(scen)
+    clone_b = os.path.join(scen, "clone-b")
+    run_git(scen, "clone", "--quiet", bare, clone_b)
+    code, out = call([clone_a, clone_b])
+    check("local-path remotes: never called duplicates",
+          "ONE repository" not in out, f"stdout={out!r}")
+
+    shutil.rmtree(root, ignore_errors=True)
+
+except Exception:
+    fails += 1
+    import traceback
+    traceback.print_exc()
+
+print(f"\n  git-sync-notice.test.py: {fails} failure(s)")
+sys.exit(1 if fails else 0)

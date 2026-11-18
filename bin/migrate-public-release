@@ -1,0 +1,1454 @@
+#!/usr/bin/env python3
+"""Safely replace an existing toolkit checkout with a pinned public release.
+
+All recovery and progress data is kept in a restricted sibling directory so that
+resumption and rollback remain possible while the checkout path is being switched.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+import uuid
+from pathlib import Path
+from typing import Any, Iterator
+
+
+SHA_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+MUTATING_GIT = {"pull", "fetch", "merge", "push", "checkout", "switch", "reset", "rebase", "clean", "update-ref"}
+MANAGED_LINKS = ("CLAUDE.md", "agents", "hooks", "skills", "commands", "statusline-command.sh")
+DEFAULT_CHECKS = [[sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]]
+# Input-only alias for old-language style headings in private configuration records.
+LEGACY_STYLE_HEADING_PATTERN = r"\u0441\u0442\u0438\u043b[\u044c\u044f]"
+
+
+class MigrationError(RuntimeError):
+    pass
+
+
+def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
+        check: bool = True, capture: bool = False, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(argv, cwd=cwd, env=env, text=True,
+                                stdout=subprocess.PIPE if capture else None,
+                                stderr=subprocess.PIPE if capture else None,
+                                check=False, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise MigrationError(f"command could not be completed: {Path(argv[0]).name}: {exc}") from exc
+    if check and result.returncode:
+        detail = (result.stderr or result.stdout or "").strip() if capture else ""
+        raise MigrationError(f"command failed ({result.returncode}): {Path(argv[0]).name}" +
+                             (f"; {detail}" if detail else ""))
+    return result
+
+
+def fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def atomic_bytes(path: Path, payload: bytes, mode: int = 0o600) -> None:
+    if path.is_symlink():
+        raise MigrationError(f"refusing to replace a symlinked recovery/configuration file: {path.name}")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, mode)
+        os.replace(name, path)
+        fsync_dir(path.parent)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+        raise
+
+
+def atomic_json(path: Path, value: Any) -> None:
+    atomic_bytes(path, (json.dumps(value, sort_keys=True, indent=2) + "\n").encode(), 0o600)
+
+
+def physical_target(value: str, *, allow_missing: bool = False) -> Path:
+    requested = Path(value).expanduser()
+    if not requested.exists() and not allow_missing:
+        raise MigrationError("target checkout does not exist")
+    target = Path(os.path.realpath(requested))
+    if not target.is_dir() and not (allow_missing and target.parent.is_dir()):
+        raise MigrationError("target must resolve to a checkout directory")
+    return target
+
+
+def validate_revision(revision: str) -> str:
+    if not SHA_RE.fullmatch(revision):
+        raise MigrationError("--revision must be a full immutable commit SHA")
+    return revision.lower()
+
+
+def validate_repository(value: str) -> str:
+    if not value or value.startswith("-") or any(char.isspace() for char in value):
+        raise MigrationError("--repository must be a URL or an existing local Git repository path")
+    if value.startswith("git@") and ":" in value:
+        return value
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme:
+        if parsed.scheme not in {"https", "ssh", "file"}:
+            raise MigrationError("repository URL scheme must be HTTPS, SSH, or file")
+        if parsed.username or parsed.password:
+            raise MigrationError("do not embed credentials in --repository; use the machine's Git credential configuration")
+        if parsed.scheme != "file" and not parsed.netloc:
+            raise MigrationError("repository URL has no host")
+        return value
+    if not Path(value).expanduser().exists():
+        raise MigrationError("local --repository path does not exist")
+    return str(Path(value).expanduser())
+
+
+def git_root(path: Path) -> Path:
+    result = run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], capture=True)
+    return Path(os.path.realpath(result.stdout.strip()))
+
+
+def state_directory(target: Path) -> Path:
+    return target.parent / f".{target.name}.migration"
+
+
+def archive_terminal_state(directory: Path, state: dict[str, Any]) -> None:
+    archive = directory.with_name(directory.name + ".history-" + str(state.get("run_id", "unknown")))
+    if archive.is_symlink() or (archive.exists() and not archive.is_dir()):
+        raise MigrationError("prior migration history path is not a directory")
+    archive.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(archive, 0o700)
+    pending = directory / "pending-upgrade.json"
+    if state.get("phase") == "complete":
+        atomic_json(pending, {"target": state.get("target"),
+                              "repository": state.get("repository"),
+                              "prior_public_revision": state.get("revision")})
+    # Keep the stable private-data directory in place: installed aliases may point
+    # into it. All run state, old checkouts, and recovery copies move to the archive.
+    entries = [entry for entry in directory.iterdir()
+               if entry.name not in {"private", "state.json", "pending-upgrade.json"}]
+    for entry in entries:
+        destination = archive / entry.name
+        if destination.exists() or destination.is_symlink():
+            if entry.exists() or entry.is_symlink():
+                raise MigrationError("prior history archive already contains a conflicting recovery path")
+            continue
+        os.replace(entry, destination)
+    current_state = directory / "state.json"
+    archived_state = archive / "state.json"
+    if current_state.exists() and not archived_state.exists():
+        os.replace(current_state, archived_state)
+    fsync_dir(directory.parent)
+
+
+def write_state(path: Path, state: dict[str, Any]) -> None:
+    if path.is_symlink():
+        raise MigrationError("migration state file is a symlink; recovery stopped")
+    state["updated_at"] = int(time.time())
+    atomic_json(path, state)
+
+
+def failpoint(name: str) -> None:
+    """Process-kill failpoints used only by isolated migration recovery tests."""
+    if os.environ.get("AI_TOOLKIT_MIGRATION_FAILPOINT") == name:
+        os._exit(86)
+
+
+def read_state(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise MigrationError("migration state file is a symlink; recovery stopped")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MigrationError("migration state is missing or invalid; retain recovery data and inspect it") from exc
+    if not isinstance(value, dict):
+        raise MigrationError("migration state is invalid")
+    return value
+
+
+@contextlib.contextmanager
+def locked(directory: Path, *, dry_run: bool = False) -> Iterator[None]:
+    if dry_run:
+        yield
+        return
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise MigrationError("migration recovery path is not a real directory")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    lock_path = directory.with_name(directory.name + ".lock")
+    if lock_path.is_symlink():
+        raise MigrationError("migration lock path is a symlink")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise MigrationError("another migration process holds the target lock") from exc
+        yield
+    finally:
+        os.close(fd)
+
+
+def configured_map(root: Path, explicit: str | None) -> list[dict[str, str]]:
+    path = Path(explicit).expanduser() if explicit else root / ".private" / "migration-map.json"
+    mappings: list[dict[str, str]] = []
+    if path.exists():
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise MigrationError("private migration map is unreadable or invalid JSON") from exc
+        if not isinstance(value, dict) or not isinstance(value.get("mappings", []), list):
+            raise MigrationError("private migration map must contain a mappings array")
+        for entry in value.get("mappings", []):
+            if not isinstance(entry, dict):
+                raise MigrationError("each private mapping must be an object")
+            source, destination = entry.get("source"), entry.get("destination")
+            kind = entry.get("kind", "directory" if source == "memory" else "file")
+            if not isinstance(source, str) or not source.strip() or not isinstance(destination, str):
+                raise MigrationError("private mapping source and destination must be non-empty paths")
+            if kind not in ("file", "directory"):
+                raise MigrationError("private mapping kind must be file or directory")
+            mappings.append({"source": source, "destination": destination, "kind": kind})
+    elif (root / "memory").is_dir() or (root / "memory").is_symlink():
+        mappings.append({"source": "memory", "destination": "memory", "kind": "directory"})
+    for item in mappings:
+        destination = Path(item["destination"])
+        if destination.is_absolute() or ".." in destination.parts or not destination.parts:
+            raise MigrationError("private mapping destinations must be safe relative paths")
+        if destination.parts[0] == ".git":
+            raise MigrationError("private mappings may not target Git metadata")
+        if destination.as_posix() in {".private/config.json", ".private/settings.json", ".private/rules.md"}:
+            raise MigrationError("private mapping conflicts with an installer-owned configuration path")
+    return mappings
+
+
+def mapped_source(root: Path, value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    if not path.exists() and not path.is_symlink():
+        raise MigrationError("a private mapping source is missing; recovery data was left untouched")
+    return path
+
+
+def mapping_identity(root: Path, value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    return os.path.realpath(path)
+
+
+def secure_copy(source: Path, destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise MigrationError("private mapping recovery destination already exists")
+    if source.is_symlink():
+        try:
+            resolved = source.resolve(strict=True)
+        except OSError as exc:
+            raise MigrationError("private mapping contains a broken symlink") from exc
+        secure_copy(resolved, destination)
+        return
+    if source.is_dir():
+        destination.mkdir(parents=True, mode=0o700)
+        for child in source.iterdir():
+            secure_copy(child, destination / child.name)
+        os.chmod(destination, 0o700)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shutil.copyfile(source, destination, follow_symlinks=False)
+    source_mode = source.stat().st_mode
+    os.chmod(destination, 0o700 if source_mode & 0o111 else 0o600)
+
+
+def is_tracked(root: Path, relative: str) -> bool:
+    result = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", "--", relative],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    return result.returncode == 0
+
+
+def add_local_exclude(root: Path, relative: str) -> None:
+    exclude = root / ".git" / "info" / "exclude"
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    pattern = "/" + Path(relative).as_posix().rstrip("/")
+    if pattern not in existing.splitlines():
+        atomic_bytes(exclude, (existing + ("" if not existing or existing.endswith("\n") else "\n") +
+                               pattern + "\n").encode(), 0o600)
+
+
+def managed_preferences(old_template: Path, installed_settings: Path,
+                        new_template: Path) -> dict[str, Any]:
+    """Preserve machine values and custom hooks while using the new core hook set."""
+    if not installed_settings.exists():
+        return {}
+    try:
+        actual = json.loads(installed_settings.read_text(encoding="utf-8"))
+        base = json.loads(old_template.read_text(encoding="utf-8")) if old_template.is_file() else {}
+        new_base = json.loads(new_template.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MigrationError("cannot safely derive private settings from the existing installation") from exc
+    if not isinstance(actual, dict) or not isinstance(base, dict) or not isinstance(new_base, dict):
+        raise MigrationError("settings must be JSON objects")
+    prefs: dict[str, Any] = {}
+    for key, value in actual.items():
+        if key in {"hooks", "_comment"}:
+            continue
+        if key not in base or value != base[key]:
+            prefs[key] = value
+    old_managed = hook_command_basenames(base.get("hooks", {}))
+    new_hooks = json.loads(json.dumps(new_base.get("hooks", {})))
+    actual_hooks = actual.get("hooks", {})
+    has_custom_hooks = False
+    if isinstance(actual_hooks, dict):
+        for event, entries in actual_hooks.items():
+            if not isinstance(entries, list):
+                continue
+            custom_entries = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    custom_entries.append(entry)
+                    continue
+                nested = entry.get("hooks")
+                if not isinstance(nested, list):
+                    custom_entries.append(entry)
+                    continue
+                custom = [hook for hook in nested if not (
+                    isinstance(hook, dict) and isinstance(hook.get("command"), str) and
+                    hook_command_basename(hook["command"]) in old_managed
+                )]
+                if custom:
+                    retained = dict(entry)
+                    retained["hooks"] = custom
+                    custom_entries.append(retained)
+            if custom_entries:
+                has_custom_hooks = True
+                new_hooks.setdefault(event, [])
+                if not isinstance(new_hooks[event], list):
+                    new_hooks[event] = []
+                new_hooks[event].extend(custom_entries)
+    if has_custom_hooks:
+        prefs["hooks"] = new_hooks
+    return prefs
+
+
+def old_settings_overlay(root: Path, config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("settings_overlay", ".private/settings.json")
+    if not isinstance(value, str) or not value.strip():
+        raise MigrationError("existing settings_overlay is invalid")
+    expanded = Path(os.path.expandvars(os.path.expanduser(value)))
+    path = expanded if expanded.is_absolute() else root / expanded
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MigrationError("existing private settings overlay is invalid") from exc
+    if not isinstance(data, dict):
+        raise MigrationError("existing private settings overlay must be a JSON object")
+    return {key: value for key, value in data.items() if key not in {"hooks", "_comment"}}
+
+
+def merge_objects(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in overlay.items():
+        old = result.get(key)
+        if isinstance(old, dict) and isinstance(value, dict):
+            result[key] = merge_objects(old, value)
+        else:
+            result[key] = value
+    return result
+
+
+def hook_command_basenames(hooks: Any) -> set[str]:
+    names: set[str] = set()
+    if not isinstance(hooks, dict):
+        return names
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                continue
+            for hook in entry["hooks"]:
+                if isinstance(hook, dict) and isinstance(hook.get("command"), str):
+                    name = hook_command_basename(hook["command"])
+                    if name:
+                        names.add(name)
+    return names
+
+
+def hook_command_basename(command: str) -> str:
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return ""
+    if not words:
+        return ""
+    script_words = [word for word in words if "/" in word]
+    return Path(script_words[-1] if script_words else words[0]).name
+
+
+def disable_session_sync(settings_path: Path, recovery_settings: Path) -> tuple[bool, bytes | None]:
+    if not settings_path.exists():
+        return False, None
+    if settings_path.is_symlink():
+        raise MigrationError("refusing migration because installed settings are a symlink")
+    try:
+        original = settings_path.read_bytes()
+        data = json.loads(original)
+    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+        raise MigrationError("installed settings cannot be read as valid JSON") from exc
+    if not isinstance(data, dict):
+        raise MigrationError("installed settings root must be a JSON object")
+    if not recovery_settings.exists():
+        atomic_bytes(recovery_settings, original, 0o600)
+    hooks = data.get("hooks")
+    changed = False
+    if isinstance(hooks, dict):
+        session_start = hooks.get("SessionStart")
+        if isinstance(session_start, list):
+            filtered = []
+            for entry in session_start:
+                if not isinstance(entry, dict):
+                    filtered.append(entry)
+                    continue
+                nested = entry.get("hooks")
+                if not isinstance(nested, list):
+                    filtered.append(entry)
+                    continue
+                kept = [hook for hook in nested if not (
+                    isinstance(hook, dict) and isinstance(hook.get("command"), str) and
+                    "git-sync-notice.sh" in hook["command"]
+                )]
+                if len(kept) != len(nested):
+                    changed = True
+                if kept:
+                    updated = dict(entry)
+                    updated["hooks"] = kept
+                    filtered.append(updated)
+            if changed:
+                if filtered:
+                    hooks["SessionStart"] = filtered
+                else:
+                    hooks.pop("SessionStart", None)
+                if not hooks:
+                    data.pop("hooks", None)
+    if changed:
+        atomic_bytes(recovery_settings, original, 0o600)
+        atomic_json(settings_path, data)
+    return changed, original
+
+
+def restore_settings(settings_path: Path, recovery_settings: Path, had_settings: bool) -> None:
+    if had_settings:
+        if not recovery_settings.is_file():
+            raise MigrationError("the saved installed settings are missing; recovery stopped")
+        atomic_bytes(settings_path, recovery_settings.read_bytes(), 0o600)
+    else:
+        with contextlib.suppress(FileNotFoundError):
+            settings_path.unlink()
+
+
+def preserve_installed_state(settings_path: Path, state: dict[str, Any],
+                             state_path: Path, state_dir: Path) -> None:
+    if "settings_existed" not in state:
+        if settings_path.is_symlink():
+            raise MigrationError("installed settings is a symlink; refusing to change it")
+        state["settings_existed"] = settings_path.is_file()
+        if settings_path.is_file():
+            atomic_bytes(state_dir / "installed-settings.original", settings_path.read_bytes(), 0o600)
+        stamp = settings_path.parent / ".harness-stamp"
+        if stamp.is_symlink():
+            raise MigrationError("installed settings stamp is a symlink; refusing to change it")
+        state["stamp_existed"] = stamp.is_file()
+        if stamp.is_file():
+            atomic_bytes(state_dir / "installed-stamp.original", stamp.read_bytes(), 0o600)
+        write_state(state_path, state)
+
+
+def restore_installed_stamp(settings_path: Path, state: dict[str, Any], state_dir: Path) -> None:
+    stamp = settings_path.parent / ".harness-stamp"
+    if state.get("stamp_existed"):
+        saved = state_dir / "installed-stamp.original"
+        if not saved.is_file():
+            raise MigrationError("the saved settings stamp is missing; recovery stopped")
+        atomic_bytes(stamp, saved.read_bytes(), 0o600)
+    else:
+        with contextlib.suppress(FileNotFoundError):
+            stamp.unlink()
+
+
+def external_config_payload(path: Path) -> bytes:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def check_external_config_rollback(state: dict[str, Any], target: Path,
+                                   state_dir: Path) -> None:
+    external = state.get("external_config_path")
+    if not external:
+        return
+    path = Path(external)
+    backup = state_dir / "external-config.original"
+    if not backup.is_file() or not path.is_file():
+        raise MigrationError("external configuration or its recovery copy is missing; rollback stopped")
+    config_path = state_dir / "new-checkout" / ".private" / "config.json"
+    if target.exists():
+        try:
+            current_revision = run(["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"],
+                                   capture=True, check=False).stdout.strip().lower()
+        except MigrationError:
+            current_revision = ""
+        if current_revision == state.get("revision"):
+            config_path = target / ".private" / "config.json"
+    failed = state_dir / f"failed-checkout-{state.get('run_id', 'unknown')}"
+    if not config_path.is_file() and failed.is_dir():
+        config_path = failed / ".private" / "config.json"
+    if not config_path.is_file():
+        raise MigrationError("migrated private configuration is unavailable; rollback stopped")
+    current = path.read_bytes()
+    if current not in (backup.read_bytes(), external_config_payload(config_path)):
+        raise MigrationError("external private configuration changed after migration; refusing to overwrite it during rollback")
+
+
+def active_updaters(target: Path) -> list[str]:
+    result = run(["ps", "-axo", "pid=,command="], capture=True, check=False, timeout=10)
+    if result.returncode:
+        raise MigrationError("cannot inspect running processes to pause automatic synchronization")
+    found: list[str] = []
+    target_text = str(target)
+    for line in result.stdout.splitlines():
+        match = re.match(r"\s*(\d+)\s+(.*)$", line)
+        if not match or int(match.group(1)) == os.getpid():
+            continue
+        command = match.group(2)
+        if "git-sync-notice.sh" in command:
+            found.append("sync hook process")
+            continue
+        if "git" not in command:
+            continue
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            continue
+        if not any(Path(word).name == "git" for word in words):
+            continue
+        if not any(word in MUTATING_GIT for word in words):
+            continue
+        if target_text in command:
+            found.append("Git updater process")
+            continue
+        pid = int(match.group(1))
+        cwd = process_cwd(pid)
+        if cwd is None or cwd == target or target in cwd.parents:
+            found.append("Git updater process")
+    return found
+
+
+def process_cwd(pid: int) -> Path | None:
+    proc_link = Path(f"/proc/{pid}/cwd")
+    if proc_link.exists():
+        try:
+            return Path(os.path.realpath(proc_link))
+        except OSError:
+            return None
+    try:
+        result = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                                capture_output=True, text=True, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n") and len(line) > 1:
+            return Path(os.path.realpath(line[1:]))
+    return None
+
+
+def wait_for_updaters(target: Path, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        active = active_updaters(target)
+        if not active:
+            return
+        if time.monotonic() >= deadline:
+            raise MigrationError("an automatic Git updater did not become idle; migration stopped before switching the checkout")
+        time.sleep(0.25)
+
+
+def pause_marker(target: Path) -> Path:
+    return state_directory(target) / "sync.paused"
+
+
+def pause_sync(target: Path, state: dict[str, Any], state_path: Path,
+               settings_path: Path, state_dir: Path) -> None:
+    preserve_installed_state(settings_path, state, state_path, state_dir)
+    marker = pause_marker(target)
+    atomic_bytes(marker, b"migration in progress\n", 0o600)
+    state["sync_pause_marker"] = str(marker)
+    state["phase"] = "pausing_sync"
+    write_state(state_path, state)
+    recovery_settings = state_dir / "installed-settings.original"
+    changed, original = disable_session_sync(settings_path, recovery_settings)
+    state["settings_existed"] = settings_path.exists() or original is not None
+    state["settings_sync_disabled"] = changed
+    state["phase"] = "sync_paused"
+    write_state(state_path, state)
+    external_config = state.get("external_config_path")
+    if external_config:
+        prepared = state_dir / "new-checkout" / ".private" / "config.json"
+        if not prepared.is_file():
+            prepared = target / ".private" / "config.json"
+        backup = state_dir / "external-config.original"
+        if not prepared.is_file() or not backup.is_file():
+            raise MigrationError("external private configuration recovery is incomplete")
+        destination = Path(external_config)
+        original = backup.read_bytes()
+        current = destination.read_bytes()
+        payload = (json.dumps(json.loads(prepared.read_text(encoding="utf-8")),
+                              sort_keys=True, indent=2) + "\n").encode()
+        if current not in (original, payload):
+            raise MigrationError("external private configuration changed during migration; refusing to overwrite it")
+        if current != payload:
+            atomic_bytes(destination, payload, int(state.get("external_config_mode", 0o600)))
+        state["external_config_updated"] = True
+        write_state(state_path, state)
+    wait_for_updaters(target)
+
+
+def public_clone(repository: str, revision: str, old_commits: list[str],
+                 stage: Path) -> None:
+    if stage.is_symlink():
+        raise MigrationError("staging path is a symlink; refusing to clone through it")
+    ready = False
+    if stage.exists():
+        try:
+            existing = run(["git", "-C", str(stage), "rev-parse", "--verify", "HEAD^{commit}"],
+                           capture=True).stdout.strip().lower()
+        except MigrationError:
+            existing = ""
+        if existing == revision:
+            ready = True
+        else:
+            quarantine = stage.with_name(f"incomplete-stage-{uuid.uuid4().hex}")
+            os.replace(stage, quarantine)
+            fsync_dir(stage.parent)
+    if not ready:
+        stage.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        run(["git", "clone", "--no-local", "--no-checkout", "--no-tags", repository, str(stage)],
+            capture=True, timeout=1800)
+    if (stage / ".git" / "objects" / "info" / "alternates").exists():
+        raise MigrationError("fresh clone unexpectedly uses an alternate object database")
+    run(["git", "-C", str(stage), "checkout", "--detach", revision], capture=True)
+    actual = run(["git", "-C", str(stage), "rev-parse", "--verify", "HEAD^{commit}"], capture=True).stdout.strip().lower()
+    if actual != revision:
+        raise MigrationError("checked-out commit does not match the requested immutable revision")
+    for old_commit in old_commits:
+        old_object = run(["git", "-C", str(stage), "cat-file", "-e", old_commit + "^{commit}"],
+                         capture=True, check=False)
+        if old_object.returncode == 0:
+            raise MigrationError("pinned release contains an old checkout commit; refusing to import old history")
+    if not all((stage / path).is_file() for path in ("bootstrap.sh", "bin/bootstrap.py", "settings.json.template")):
+        raise MigrationError("the pinned release is missing required installer files")
+
+
+def run_public_checks(stage: Path, state_dir: Path, checks: list[list[str]]) -> None:
+    check_home = state_dir / "preflight-home"
+    if check_home.is_symlink() or (check_home.exists() and not check_home.is_dir()):
+        raise MigrationError("isolated preflight home is not a real directory")
+    check_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(check_home, 0o700)
+    env = dict(os.environ)
+    env["HOME"] = str(check_home)
+    env["AI_TOOLKIT_MIGRATION_PREFLIGHT"] = "1"
+    env.pop("AI_TOOLKIT_CONFIG", None)
+    for command in checks:
+        run(command, cwd=stage, env=env, timeout=3600)
+    run([sys.executable, str(stage / "bin" / "bootstrap.py"), "--root", str(stage)],
+        cwd=stage, env=env, timeout=1800)
+    clean = run(["git", "-C", str(stage), "status", "--porcelain", "--untracked-files=all"],
+                capture=True)
+    # The candidate's ignored .private/rules.md is install-owned; it must stay ignored.
+    if clean.stdout.strip():
+        raise MigrationError("public preflight changed tracked or unignored release files")
+
+
+def copy_machine_material(old_root: Path, new_root: Path, state_dir: Path,
+                          mappings: list[dict[str, str]], state: dict[str, Any],
+                          state_path: Path) -> list[dict[str, str]]:
+    storage = state_dir / "private" / str(state["run_id"])
+    storage_root = state_dir / "private"
+    if storage_root.is_symlink() or (storage_root.exists() and not storage_root.is_dir()):
+        raise MigrationError("private recovery store is not a real directory")
+    if storage.is_symlink() or (storage.exists() and not storage.is_dir()):
+        raise MigrationError("per-run private recovery store is not a real directory")
+    storage.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(storage.parent, 0o700)
+    os.chmod(storage, 0o700)
+    prepared: list[dict[str, str]] = []
+    new_config_dir = new_root / ".private"
+    if new_config_dir.is_symlink() or (new_config_dir.exists() and not new_config_dir.is_dir()):
+        raise MigrationError("public staging private overlay path is not a real directory")
+    new_config_dir.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(new_config_dir, 0o700)
+    config: dict[str, Any] = {}
+    config_source = Path(os.environ["AI_TOOLKIT_CONFIG"]).expanduser().absolute() if os.environ.get("AI_TOOLKIT_CONFIG") else \
+        old_root / ".private" / "config.json"
+    if config_source.is_file():
+        try:
+            loaded = json.loads(config_source.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise MigrationError("old private configuration is invalid; recovery is retained") from exc
+        if isinstance(loaded, dict):
+            config = loaded
+    extension_map: dict[str, str] = {}
+    mapped_sources: dict[str, str] = {}
+    for index, item in enumerate(mappings):
+        source = mapped_source(old_root, item["source"])
+        if item["kind"] == "directory" and not source.is_dir():
+            raise MigrationError("a private directory mapping does not name a directory")
+        if item["kind"] == "file" and not source.is_file():
+            raise MigrationError("a private file mapping does not name a regular file")
+        relative = item["destination"]
+        if is_tracked(new_root, relative):
+            raise MigrationError("private mapping would replace a tracked public path; no file was overwritten")
+        destination = new_root / relative
+        private_copy = storage / f"mapping-{index:03d}"
+        if relative.startswith("hooks/"):
+            if destination.exists() or destination.is_symlink():
+                raise MigrationError("private hook alias destination already exists in the public release")
+            if private_copy.exists() or private_copy.is_symlink():
+                quarantine = private_copy.with_name(private_copy.name + ".incomplete-" + uuid.uuid4().hex)
+                os.replace(private_copy, quarantine)
+            secure_copy(source, private_copy)
+        elif destination.is_symlink() and os.path.realpath(destination) == os.path.realpath(private_copy):
+            pass
+        else:
+            if destination.exists() or destination.is_symlink():
+                raise MigrationError("private mapping destination already exists in the public release")
+            if private_copy.exists() or private_copy.is_symlink():
+                quarantine = private_copy.with_name(private_copy.name + ".incomplete-" + uuid.uuid4().hex)
+                os.replace(private_copy, quarantine)
+            secure_copy(source, private_copy)
+            if not relative.startswith("hooks/"):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.symlink_to(private_copy, target_is_directory=private_copy.is_dir())
+        add_local_exclude(new_root, relative)
+        mapped_sources[mapping_identity(old_root, item["source"])] = str(private_copy)
+        if relative.startswith("hooks/"):
+            extension_map[relative] = str(private_copy)
+            add_local_exclude(new_root, relative)
+        if relative == "memory" and private_copy.is_dir():
+            config["memory_root"] = str(private_copy)
+        prepared.append({"destination": relative, "private_copy": str(private_copy)})
+
+    installed_memory = Path(os.environ.get("HOME", str(Path.home()))) / ".claude" / "memory"
+    if installed_memory.is_symlink() and installed_memory.resolve().is_dir():
+        raw_target = Path(os.readlink(installed_memory)).expanduser()
+        target_path = raw_target if raw_target.is_absolute() else installed_memory.parent / raw_target
+        target_location = Path(os.path.realpath(target_path.parent)) / target_path.name
+        try:
+            target_relative = target_location.relative_to(Path(os.path.realpath(old_root)))
+        except ValueError:
+            # Preserve an explicitly external user memory store independently from
+            # any separate legacy memory/ directory in the old checkout.
+            config["memory_root"] = str(installed_memory.resolve())
+        else:
+            if target_relative != Path("memory"):
+                mapped_memory = mapped_sources.get(os.path.realpath(old_root / target_relative))
+                if mapped_memory is None:
+                    raise MigrationError("the installed project memory link points inside the old checkout; add it to the private migration map")
+                config["memory_root"] = mapped_memory
+
+    if old_root.joinpath(".env").is_file():
+        env_file = old_root / ".env"
+        destination = new_root / ".env"
+        if not destination.is_file() or destination.read_bytes() != env_file.read_bytes():
+            if destination.exists() or destination.is_symlink():
+                raise MigrationError("pinned release unexpectedly contains a different local environment file")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(env_file, destination)
+            os.chmod(destination, 0o600)
+        add_local_exclude(new_root, ".env")
+
+    # Keep explicit mapping metadata locally so a later release migration can
+    # carry forward the same private compatibility paths.
+    atomic_json(new_config_dir / "migration-map.json", {"mappings": mappings})
+
+    old_settings = Path(os.environ.get("HOME", str(Path.home()))) / ".claude" / "settings.json"
+    old_template = old_root / "settings.json.template"
+    new_template = new_root / "settings.json.template"
+    preferences = managed_preferences(old_template, old_settings, new_template)
+    preferences = merge_objects(old_settings_overlay(old_root, config), preferences)
+    if preferences:
+        local_settings = new_config_dir / "settings.json"
+        atomic_json(local_settings, preferences)
+
+    config["settings_overlay"] = ".private/settings.json"
+    existing_extensions = config.get("extensions", {})
+    if not isinstance(existing_extensions, dict):
+        raise MigrationError("old private extension configuration is not an object")
+    required_extensions = config.get("required_extensions", [])
+    if not isinstance(required_extensions, list) or any(
+        not isinstance(path, str) or not path for path in required_extensions
+    ):
+        raise MigrationError("required_extensions must be an array of historical hook paths")
+    required_extension_paths = set(required_extensions)
+    for legacy, source in existing_extensions.items():
+        if not isinstance(legacy, str) or not isinstance(source, str):
+            raise MigrationError("old private extension mappings must contain string paths")
+        legacy_path = Path(legacy)
+        if (legacy_path.is_absolute() or ".." in legacy_path.parts or not legacy_path.parts
+                or legacy_path.parts[0] != "hooks"):
+            raise MigrationError("a preserved private extension has an unsafe historical path")
+        mapped = mapped_sources.get(mapping_identity(old_root, source))
+        if mapped:
+            if is_tracked(new_root, legacy) or (new_root / legacy).exists():
+                raise MigrationError("a private extension alias conflicts with a public path; map it to an untracked compatibility path")
+            extension_map[legacy] = mapped
+            add_local_exclude(new_root, legacy)
+            continue
+        source_path = Path(source).expanduser()
+        if not source_path.is_absolute() and ".." not in source_path.parts and source_path.parts:
+            source_relative = source_path.as_posix()
+            if is_tracked(new_root, source_relative) and (new_root / source_relative).is_file():
+                if is_tracked(new_root, legacy) or (new_root / legacy).exists():
+                    raise MigrationError("a private extension alias conflicts with a public path; map it to an untracked compatibility path")
+                extension_map[legacy] = source_relative
+                add_local_exclude(new_root, legacy)
+                continue
+        # The old source remains in the preserved checkout/recovery. Do not silently
+        # reactivate an implementation that was neither mapped nor replaced by a
+        # tracked generic public hook.
+        if legacy in required_extension_paths:
+            raise MigrationError("a required private extension has no mapped or public generic implementation")
+        state.setdefault("unmapped_extensions", []).append({"legacy": legacy, "source": source})
+    if not required_extension_paths.issubset(extension_map):
+        raise MigrationError("a required private extension is missing from the extension map")
+    if extension_map:
+        config["extensions"] = extension_map
+    else:
+        config.pop("extensions", None)
+    # An explicit old pull allowlist must not become an implicit updater in the new install.
+    sync = config.get("sync", {})
+    if not isinstance(sync, dict):
+        sync = {}
+    sync["pull_repositories"] = []
+    config["sync"] = sync
+    atomic_json(new_config_dir / "config.json", config)
+    add_local_exclude(new_root, ".private/")
+
+    # Keep old operational rules only in the ignored overlay. Remove the old STYLE
+    # import and style-owned sections, then verify the remainder with the repository's
+    # marker scanner before it can be installed.
+    rules_parts = []
+    for source in (old_root / "CLAUDE.md", old_root / ".private" / "rules.md"):
+        if source.is_file():
+            text = source.read_text(encoding="utf-8")
+            rules_parts.append(sanitize_private_rules(text))
+    rules = "\n\n---\n\n".join(part for part in rules_parts if part.strip()).strip()
+    if rules:
+        rules_path = new_config_dir / "rules.md"
+        atomic_bytes(rules_path, (rules + "\n").encode("utf-8"), 0o600)
+        try:
+            import runpy
+            scanner = runpy.run_path(str(new_root / "bin" / "style-check"))
+            findings = scanner["scan"]([str(rules_path)])
+        except Exception as exc:
+            raise MigrationError("cannot validate legacy private rules against STYLE.md") from exc
+        if findings:
+            raise MigrationError("legacy private rules still contain writing-style directives; original remains in recovery for manual review")
+    else:
+        atomic_bytes(new_config_dir / "rules.md", b"", 0o600)
+    if os.environ.get("AI_TOOLKIT_CONFIG"):
+        resolved_source = Path(os.path.realpath(config_source))
+        try:
+            relative_config = resolved_source.relative_to(Path(os.path.realpath(old_root)))
+        except ValueError:
+            backup = state_dir / "external-config.original"
+            if not backup.exists():
+                atomic_bytes(backup, resolved_source.read_bytes(), 0o600)
+            state["external_config_path"] = str(resolved_source)
+            state["external_config_mode"] = stat.S_IMODE(resolved_source.stat().st_mode)
+            state["runtime_config_path"] = str(resolved_source)
+            state["config_link_required"] = True
+        else:
+            if is_tracked(new_root, relative_config.as_posix()):
+                raise MigrationError("explicit private configuration path conflicts with a tracked public file")
+            relocated = new_root / relative_config
+            relocated.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            atomic_json(relocated, config)
+            add_local_exclude(new_root, relative_config.as_posix())
+            if relative_config == Path(".private/config.json"):
+                state["runtime_config_path"] = None
+                state["config_link_required"] = False
+            else:
+                state["runtime_config_path"] = str(old_root / relative_config)
+                state["config_link_required"] = True
+        write_state(state_path, state)
+    else:
+        state["runtime_config_path"] = None
+        state["config_link_required"] = False
+        write_state(state_path, state)
+    return prepared
+
+
+def sanitize_private_rules(text: str) -> str:
+    lines = text.splitlines()
+    output: list[str] = []
+    dropping_level: int | None = None
+    style_heading = re.compile(r"(?:\bstyle\b|\bwriting(?: guidance| style)?\b|how\s+you\s+write|" +
+                               LEGACY_STYLE_HEADING_PATTERN + ")", re.I)
+    import_line = re.compile(r"^\s*@(?:STYLE\.md|\.private/rules\.md)\s*$", re.I)
+    for line in lines:
+        heading = re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line)
+        if heading:
+            level = len(heading.group(1))
+            if dropping_level is not None and level <= dropping_level:
+                dropping_level = None
+            if dropping_level is None and style_heading.search(heading.group(2)):
+                dropping_level = level
+                continue
+        if dropping_level is not None:
+            continue
+        if import_line.match(line):
+            continue
+        output.append(line)
+    return "\n".join(output).strip()
+
+
+def preflight_links(home: Path, old_root: Path) -> list[dict[str, str]]:
+    claude = home / ".claude"
+    records = []
+    for name in (*MANAGED_LINKS, "memory"):
+        path = claude / name
+        if not (path.exists() or path.is_symlink()):
+            records.append({"name": name, "kind": "absent"})
+            continue
+        if not path.is_symlink():
+            if name == "memory" and path.is_dir():
+                records.append({"name": name, "kind": "directory"})
+                continue
+            raise MigrationError(f"user-owned installation path blocks safe upgrade: {name}")
+        link = os.readlink(path)
+        resolved = Path(os.path.realpath(path))
+        expected = old_root / name
+        if name != "memory" and Path(os.path.realpath(expected)) != resolved:
+            raise MigrationError(f"existing installation link has a different target: {name}")
+        records.append({"name": name, "kind": "symlink", "link": link})
+    settings = claude / "settings.json"
+    if settings.is_symlink():
+        raise MigrationError("installed settings is a symlink; refusing to replace it")
+    return records
+
+
+def restore_link_spellings(home: Path, links: list[dict[str, str]], root: Path) -> None:
+    claude = home / ".claude"
+    for item in links:
+        name = item["name"]
+        path = claude / name
+        if item["kind"] != "symlink":
+            continue
+        if not path.is_symlink():
+            raise MigrationError(f"installer did not leave the expected link in place: {name}")
+        original = item["link"]
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        path.symlink_to(original, target_is_directory=(root / name).is_dir())
+
+
+def move_project_memories_aside(home: Path, state: dict[str, Any], state_path: Path,
+                               state_dir: Path) -> None:
+    """Temporarily move project memory entries so bootstrap cannot replace or merge them."""
+    projects = home / ".claude" / "projects"
+    if "project_memories" not in state:
+        entries = []
+        if projects.is_dir():
+            for project in sorted(projects.iterdir()):
+                memory = project / "memory"
+                hold = project / f".migration-memory-{state['run_id']}"
+                if hold.exists() or hold.is_symlink():
+                    raise MigrationError("a private project-memory recovery name already exists")
+                exists = memory.exists() or memory.is_symlink()
+                entries.append({"path": str(memory), "hold": str(hold),
+                                "kind": ("symlink" if memory.is_symlink() else "directory") if exists else "absent",
+                                "link": os.readlink(memory) if memory.is_symlink() else None,
+                                "moved": False})
+        state["project_memories"] = entries
+        state["phase"] = "preparing_project_memories"
+        write_state(state_path, state)
+    backup_root = state_dir / "installed-project-memories"
+    backup_root.mkdir(mode=0o700, exist_ok=True)
+    for index, entry in enumerate(state["project_memories"]):
+        original, hold = Path(entry["path"]), Path(entry["hold"])
+        if entry["kind"] == "absent":
+            if original.exists() or original.is_symlink():
+                if state.get("phase") != "bootstrap_started" or not original.is_symlink():
+                    raise MigrationError("a project-memory path appeared during migration; refusing to adopt it")
+                if not hold.exists() and not hold.is_symlink():
+                    os.replace(original, hold)
+                    fsync_dir(original.parent)
+            entry["moved"] = hold.exists() or hold.is_symlink()
+            write_state(state_path, state)
+            continue
+        backup = backup_root / f"memory-{index:04d}"
+        entry["backup"] = str(backup)
+        if original.exists() or original.is_symlink():
+            if not hold.exists() and not hold.is_symlink():
+                if not backup.exists() and not backup.is_symlink():
+                    secure_copy(original, backup)
+                os.replace(original, hold)
+                fsync_dir(original.parent)
+            entry["moved"] = True
+            write_state(state_path, state)
+        elif hold.exists() or hold.is_symlink():
+            entry["moved"] = True
+            write_state(state_path, state)
+        else:
+            raise MigrationError("a saved project-memory entry is missing; recovery stopped")
+    state["phase"] = "project_memories_moved"
+    write_state(state_path, state)
+
+
+def restore_project_memories(state: dict[str, Any], state_path: Path, *, rollback_mode: bool = False) -> None:
+    for entry in state.get("project_memories", []):
+        original, hold = Path(entry["path"]), Path(entry["hold"])
+        if entry.get("kind") == "absent":
+            if hold.is_symlink():
+                hold.unlink()
+            elif hold.exists():
+                raise MigrationError("unexpected data occupies a temporary project-memory path")
+            if rollback_mode and original.is_symlink():
+                original.unlink()
+            elif rollback_mode and original.exists():
+                raise MigrationError("unexpected data appeared at a formerly absent project-memory path")
+            continue
+        if not (hold.exists() or hold.is_symlink()):
+            if original.exists() or original.is_symlink():
+                entry["moved"] = False
+                continue
+            if not entry.get("moved"):
+                continue
+            raise MigrationError("preserved project-memory data is missing; recovery stopped")
+        if original.is_symlink():
+            original.unlink()
+        elif original.exists():
+            raise MigrationError("unexpected data appeared at a preserved project-memory path")
+        os.replace(hold, original)
+        fsync_dir(original.parent)
+        entry["moved"] = False
+        write_state(state_path, state)
+
+
+def prepare_and_switch(state: dict[str, Any], state_path: Path, target: Path,
+                       state_dir: Path, home: Path, checks: list[list[str]],
+                       private_map: str | None) -> None:
+    old_root = state_dir / "old-checkout"
+    stage = state_dir / "new-checkout"
+    settings_path = home / ".claude" / "settings.json"
+
+    phase = state.get("phase", "created")
+    if phase in ("complete", "rolled_back"):
+        return
+    if phase == "created":
+        links = preflight_links(home, target)
+        mappings = configured_map(target, private_map)
+        state["links"] = links
+        state["mapping_count"] = len(mappings)
+        state["private_map_sha256"] = hashlib.sha256(
+            json.dumps(mappings, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        write_state(state_path, state)
+        public_clone(state["repository"], state["revision"], state["old_commits"], stage)
+        run_public_checks(stage, state_dir, checks)
+        state["phase"] = "clone_verified"
+        write_state(state_path, state)
+        failpoint("after_clone_verified")
+        phase = "clone_verified"
+
+    if phase == "clone_verified":
+        mappings = configured_map(target, private_map)
+        map_digest = hashlib.sha256(
+            json.dumps(mappings, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if map_digest != state.get("private_map_sha256"):
+            raise MigrationError("private migration map changed during a resumable run; original data was not switched")
+        state["private_mappings"] = copy_machine_material(target, stage, state_dir, mappings,
+                                                            state, state_path)
+        state["phase"] = "private_prepared"
+        write_state(state_path, state)
+        failpoint("after_private_prepared")
+        phase = "private_prepared"
+
+    if phase in {"private_prepared", "pausing_sync", "sync_paused"}:
+        pause_sync(target, state, state_path, settings_path, state_dir)
+        phase = state["phase"]
+
+    if phase in ("sync_paused", "old_checkout_moved"):
+        if phase == "sync_paused":
+            if target.exists():
+                os.replace(target, old_root)
+                fsync_dir(target.parent)
+            state["phase"] = "old_checkout_moved"
+            write_state(state_path, state)
+            failpoint("after_old_move")
+        if not target.exists() and stage.exists():
+            os.replace(stage, target)
+            fsync_dir(target.parent)
+        state["phase"] = "new_checkout_moved"
+        write_state(state_path, state)
+        failpoint("after_new_move")
+        phase = "new_checkout_moved"
+
+    if phase in ("new_checkout_moved", "preparing_project_memories", "project_memories_moved", "bootstrap_started"):
+        # The current settings were temporarily edited to stop the old hook. Remove them
+        # only after preserving their exact bytes; the new renderer recreates them from
+        # public defaults plus the private preferences overlay.
+        if settings_path.exists() and not settings_path.is_symlink():
+            settings_path.unlink()
+        move_project_memories_aside(home, state, state_path, state_dir)
+        state["phase"] = "bootstrap_started"
+        write_state(state_path, state)
+        failpoint("after_project_memories_moved")
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        if state.get("config_link_required"):
+            generated_config = target / ".private" / "config.json"
+            if generated_config.is_symlink():
+                raise MigrationError("prepared private config unexpectedly became a symlink")
+            if generated_config.exists():
+                generated_config.unlink()
+            env["AI_TOOLKIT_CONFIG"] = str(state["runtime_config_path"])
+        else:
+            env.pop("AI_TOOLKIT_CONFIG", None)
+        run([sys.executable, str(target / "bin" / "bootstrap.py"), "--root", str(target)],
+            cwd=target, env=env, timeout=1800)
+        failpoint("after_bootstrap")
+        restore_project_memories(state, state_path)
+        restore_link_spellings(home, state.get("links", []), target)
+        state["phase"] = "deployed"
+        write_state(state_path, state)
+        phase = "deployed"
+
+    if phase == "deployed":
+        actual = run(["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"], capture=True).stdout.strip().lower()
+        if actual != state["revision"]:
+            raise MigrationError("installed checkout revision changed during deployment")
+        clean = run(["git", "-C", str(target), "status", "--porcelain", "--untracked-files=all"], capture=True)
+        if clean.stdout.strip():
+            raise MigrationError("migration created unignored changes in the public checkout")
+        marker = Path(state["sync_pause_marker"])
+        with contextlib.suppress(FileNotFoundError):
+            marker.unlink()
+        state["phase"] = "complete"
+        write_state(state_path, state)
+        print(f"Migration complete. Recovery data retained at {old_root}.")
+        print(f"Run ID: {state['run_id']}")
+
+
+def rollback(state: dict[str, Any], state_path: Path, target: Path, state_dir: Path,
+             home: Path) -> None:
+    if state.get("phase") == "rolled_back":
+        print("This migration was already rolled back; recovery data remains intact.")
+        return
+    old_root = state_dir / "old-checkout"
+    failed_root = state_dir / f"failed-checkout-{state.get('run_id', 'unknown')}"
+    rollback_phases = {"rolling_back", "old_restored", "project_memories_restored",
+                       "installation_links_restored", "external_config_restored",
+                       "sync_pause_released", "rollback_finishing"}
+    if state.get("phase") not in rollback_phases and not old_root.exists():
+        raise MigrationError("the preserved original checkout is unavailable; no rollback was attempted")
+    check_external_config_rollback(state, target, state_dir)
+    if state.get("phase") == "rollback_finishing":
+        settings_path = home / ".claude" / "settings.json"
+        settings_copy = state_dir / "installed-settings.original"
+        stamp_copy = state_dir / "installed-stamp.original"
+        settings_restored = (settings_copy.is_file() and settings_path.is_file() and
+                             settings_path.read_bytes() == settings_copy.read_bytes()) if state.get("settings_existed") else not settings_path.exists()
+        stamp = settings_path.parent / ".harness-stamp"
+        stamp_restored = (stamp_copy.is_file() and stamp.is_file() and stamp.read_bytes() == stamp_copy.read_bytes()) if state.get("stamp_existed") else not stamp.exists()
+        if settings_restored and stamp_restored:
+            state["phase"] = "rolled_back"
+            write_state(state_path, state)
+            print("Rollback complete. The original installation is restored; recovery data remains intact.")
+            return
+    if state.get("phase") not in rollback_phases:
+        state["phase"] = "rolling_back"
+        write_state(state_path, state)
+        failpoint("rollback_started")
+    if old_root.exists():
+        if target.exists():
+            if failed_root.exists():
+                raise MigrationError("failed-checkout destination already exists; refusing to overwrite it")
+            os.replace(target, failed_root)
+            fsync_dir(target.parent)
+            failpoint("after_rollback_new_move")
+        os.replace(old_root, target)
+        fsync_dir(target.parent)
+        state["phase"] = "old_restored"
+        write_state(state_path, state)
+        failpoint("after_rollback_old_move")
+    elif not target.exists():
+        raise MigrationError("rollback was interrupted but neither old checkout location is available")
+    elif state.get("phase") == "rolling_back" and state.get("old_revision"):
+        restored = run(["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"],
+                       capture=True, check=False).stdout.strip().lower()
+        if restored != state["old_revision"] and not failed_root.exists():
+            raise MigrationError("rollback target is not the preserved original checkout")
+    state["phase"] = "old_restored"
+    write_state(state_path, state)
+    restore_project_memories(state, state_path, rollback_mode=True)
+    state["phase"] = "project_memories_restored"
+    write_state(state_path, state)
+    settings_path = home / ".claude" / "settings.json"
+    for item in state.get("links", []):
+        path = home / ".claude" / item["name"]
+        if item["kind"] == "absent":
+            if path.is_symlink():
+                path.unlink()
+            elif path.exists():
+                raise MigrationError("unexpected data appeared at a path absent before migration")
+            continue
+        if item["kind"] == "symlink":
+            if path.is_symlink():
+                path.unlink()
+            path.symlink_to(item["link"], target_is_directory=(target / item["name"]).is_dir())
+    state["phase"] = "installation_links_restored"
+    write_state(state_path, state)
+    if state.get("external_config_path"):
+        backup = state_dir / "external-config.original"
+        if backup.is_file() and Path(state["external_config_path"]).read_bytes() != backup.read_bytes():
+            atomic_bytes(Path(state["external_config_path"]), backup.read_bytes(),
+                         int(state.get("external_config_mode", 0o600)))
+    state["phase"] = "external_config_restored"
+    write_state(state_path, state)
+    marker = Path(state.get("sync_pause_marker", pause_marker(target)))
+    with contextlib.suppress(FileNotFoundError):
+        marker.unlink()
+    state["phase"] = "sync_pause_released"
+    write_state(state_path, state)
+    state["phase"] = "rollback_finishing"
+    write_state(state_path, state)
+    restore_installed_stamp(settings_path, state, state_dir)
+    restore_settings(settings_path, state_dir / "installed-settings.original",
+                     bool(state.get("settings_existed")))
+    state["phase"] = "rolled_back"
+    write_state(state_path, state)
+    print(f"Rollback complete. The failed public checkout is retained at {failed_root}.")
+
+
+def launcher(repository: str, revision: str, digest: str, target: str) -> str:
+    revision = validate_revision(revision)
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        raise MigrationError("launcher requires a full SHA-256 migrator digest")
+    parsed = urllib.parse.urlparse(repository)
+    if parsed.scheme != "https" or parsed.netloc.lower() not in {"github.com", "www.github.com"}:
+        raise MigrationError("pinned launcher generation supports a GitHub HTTPS repository URL")
+    if parsed.username or parsed.password:
+        raise MigrationError("do not embed credentials in the pinned launcher repository URL")
+    parts = parsed.path.strip("/").removesuffix(".git").split("/")
+    if len(parts) != 2 or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", part) for part in parts):
+        raise MigrationError("repository must be a GitHub owner/repository URL")
+    raw_url = f"https://raw.githubusercontent.com/{parts[0]}/{parts[1]}/{revision}/bin/migrate-public-release"
+    py = r'''import hashlib, os, subprocess, sys, tempfile, urllib.request
+repo, rev, expected, target = sys.argv[1:5]
+url = sys.argv[5]
+with urllib.request.urlopen(url, timeout=30) as response:
+    payload = response.read(10 * 1024 * 1024 + 1)
+if len(payload) > 10 * 1024 * 1024:
+    raise SystemExit("migrator download exceeds safety limit")
+actual = hashlib.sha256(payload).hexdigest()
+if actual.lower() != expected.lower():
+    raise SystemExit("migrator SHA-256 mismatch; refusing to execute")
+fd, path = tempfile.mkstemp(prefix="ai-migrate-", suffix=".py")
+try:
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload)
+    os.chmod(path, 0o700)
+    result = subprocess.run([sys.executable, path, "--repository", repo,
+                             "--revision", rev, "--target", target], check=False)
+    raise SystemExit(result.returncode)
+finally:
+    try: os.unlink(path)
+    except OSError: pass
+'''
+    command = "python3 -c " + shlex.quote(py) + " " + " ".join(map(shlex.quote,
+        [repository, revision, digest.lower(), target, raw_url]))
+    return "# Replace the SHA-256 placeholder only after the accepted release is published.\n" + command
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", required=True, help="existing checkout path (outer symlinks are preserved)")
+    parser.add_argument("--repository", help="repository URL containing the accepted release")
+    parser.add_argument("--revision", help="full immutable commit SHA")
+    parser.add_argument("--dry-run", action="store_true", help="inspect and print planned actions without writes or network access")
+    parser.add_argument("--rollback", action="store_true", help="restore the preserved original checkout")
+    parser.add_argument("--private-map", help="explicit private mapping JSON; defaults to .private/migration-map.json")
+    parser.add_argument("--print-launcher", action="store_true", help="print a pinned, digest-verifying GitHub launcher")
+    parser.add_argument("--migrator-sha256", help="full SHA-256 used with --print-launcher")
+    args = parser.parse_args(argv)
+
+    try:
+        if args.print_launcher:
+            if not args.repository or not args.revision or not args.migrator_sha256:
+                raise MigrationError("--print-launcher requires --repository, --revision, and --migrator-sha256")
+            print(launcher(args.repository, args.revision, args.migrator_sha256, args.target))
+            return 0
+        target_arg = Path(args.target).expanduser()
+        state_guess = Path(os.path.realpath(target_arg))
+        allow_missing = args.rollback or (state_directory(state_guess) / "state.json").is_file()
+        target = physical_target(args.target, allow_missing=allow_missing)
+        if target.exists() and target.stat().st_dev != target.parent.stat().st_dev:
+            raise MigrationError("target is a mount point on another filesystem; sibling atomic staging is not safe")
+        if not args.rollback:
+            if not args.repository or not args.revision:
+                raise MigrationError("--repository and --revision are required for migration")
+            repository = validate_repository(args.repository)
+            revision = validate_revision(args.revision)
+        else:
+            revision = args.revision or ""
+            repository = args.repository
+        if target.exists() and git_root(target) != target:
+            raise MigrationError("--target must name the physical root of a Git checkout")
+        if not target.exists() and not (state_directory(target) / "state.json").is_file():
+            raise MigrationError("target is absent and no resumable migration state was found")
+        if repository:
+            remote = run(["git", "-C", str(target), "config", "--get", "remote.origin.url"],
+                         capture=True, check=False)
+            # The provided repository is authoritative; do not require an origin on the old checkout.
+            del remote
+        state_dir = state_directory(target)
+        state_path = state_dir / "state.json"
+        home = Path(os.environ.get("HOME", str(Path.home()))).expanduser().resolve()
+        checks = [list(command) for command in DEFAULT_CHECKS]
+        prior_public_revision = None
+
+        if args.dry_run:
+            if args.rollback:
+                print(f"Would restore the preserved original checkout for {target}.")
+            else:
+                mappings = configured_map(target, args.private_map)
+                print(f"Dry run: no files, settings, lock, or recovery state will be written.")
+                print(f"Target resolves to: {target}")
+                print(f"Pinned release: {revision}")
+                print(f"Explicit private mappings: {len(mappings)}")
+                print("Would fresh-clone the pinned commit, run isolated checks, pause SessionStart synchronization, and switch with recovery retained.")
+            return 0
+
+        with locked(state_dir):
+            if args.rollback:
+                state = read_state(state_path)
+                rollback(state, state_path, target, state_dir, home)
+                return 0
+            if state_path.exists():
+                state = read_state(state_path)
+                if (state.get("target") != str(target) or state.get("repository") != repository):
+                    raise MigrationError("a different migration already owns this target; retain its recovery and do not start another")
+                terminal = state.get("phase") in {"complete", "rolled_back"}
+                if state.get("revision") != revision and not terminal:
+                    raise MigrationError("a different migration already owns this target; retain its recovery and do not start another")
+                if state.get("phase") in {"rolling_back", "old_restored", "project_memories_restored",
+                                           "installation_links_restored", "external_config_restored",
+                                           "sync_pause_released", "rollback_finishing"}:
+                    rollback(state, state_path, target, state_dir, home)
+                    raise MigrationError("an interrupted rollback was completed; the public release is not installed")
+                if state.get("phase") == "complete":
+                    current = run(["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"], capture=True).stdout.strip().lower()
+                    if current != state.get("revision"):
+                        raise MigrationError("completed migration state no longer matches the checkout; inspect recovery data")
+                    if current == revision:
+                        print("This pinned release is already installed; no second migration was created.")
+                        return 0
+                    prior_public_revision = current
+                if terminal:
+                    archive_terminal_state(state_dir, state)
+                    state_path = state_dir / "state.json"
+                    failpoint("after_terminal_archive")
+            if not state_path.exists():
+                pending_path = state_dir / "pending-upgrade.json"
+                if pending_path.is_file():
+                    pending = read_state(pending_path)
+                    if pending.get("target") != str(target) or pending.get("repository") != repository:
+                        raise MigrationError("pending public upgrade does not match this target or repository")
+                    prior_public_revision = pending.get("prior_public_revision")
+                if state_dir.exists() and any(entry.name not in {"private", "pending-upgrade.json"}
+                                               for entry in state_dir.iterdir()):
+                    raise MigrationError("migration recovery directory exists without a state record; preserve it and inspect before retrying")
+                old_revision = run(["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"],
+                                   capture=True).stdout.strip().lower()
+                old_commits = [] if prior_public_revision == old_revision else \
+                    run(["git", "-C", str(target), "rev-list", "--all"], capture=True).stdout.splitlines()
+                if old_revision not in old_commits:
+                    if prior_public_revision != old_revision:
+                        old_commits.append(old_revision)
+                state = {"schema": 1, "run_id": uuid.uuid4().hex,
+                         "target": str(target), "repository": repository,
+                         "revision": revision, "phase": "created",
+                         "old_revision": old_revision, "old_commits": old_commits,
+                         "prior_public_revision": prior_public_revision,
+                         "created_at": int(time.time())}
+                write_state(state_path, state)
+                if pending_path.exists():
+                    pending_path.unlink()
+            try:
+                prepare_and_switch(state, state_path, target, state_dir, home, checks, args.private_map)
+            except Exception as failure:
+                if state.get("phase") in {"sync_paused", "old_checkout_moved", "new_checkout_moved",
+                                           "preparing_project_memories", "project_memories_moved", "bootstrap_started", "deployed"} and \
+                        (state_dir / "old-checkout").exists():
+                    rollback(state, state_path, target, state_dir, home)
+                elif state.get("phase") in {"pausing_sync", "sync_paused"} and not \
+                        (state_dir / "old-checkout").exists():
+                    recovery_settings = state_dir / "installed-settings.original"
+                    if recovery_settings.is_file():
+                        restore_settings(home / ".claude" / "settings.json", recovery_settings,
+                                         bool(state.get("settings_existed", True)))
+                    restore_installed_stamp(home / ".claude" / "settings.json", state, state_dir)
+                    if state.get("external_config_path"):
+                        check_external_config_rollback(state, target, state_dir)
+                        backup = state_dir / "external-config.original"
+                        if backup.is_file():
+                            atomic_bytes(Path(state["external_config_path"]), backup.read_bytes(),
+                                         int(state.get("external_config_mode", 0o600)))
+                    marker = Path(state.get("sync_pause_marker", pause_marker(target)))
+                    with contextlib.suppress(FileNotFoundError):
+                        marker.unlink()
+                    state["phase"] = "private_prepared"
+                    write_state(state_path, state)
+                if isinstance(failure, MigrationError):
+                    raise
+                raise MigrationError(f"migration operation failed: {failure.__class__.__name__}: {failure}; recovery state was retained") from failure
+        return 0
+    except MigrationError as exc:
+        print(f"migrate-public-release: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("migrate-public-release: interrupted; recovery and state were retained for safe resumption or rollback", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

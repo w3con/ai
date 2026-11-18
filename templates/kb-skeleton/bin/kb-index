@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""kb-index — generate kb/_index.md, the single navigation map of the KB.
+
+Reads every kb/**/*.md document's YAML frontmatter and emits one line per
+document (wikilink + one-line summary + type/tags), grouped by collection,
+followed by a domain cross-reference built from each doc's ai.domains.
+
+Usage:
+    bin/kb-index            # regenerate kb/_index.md
+    bin/kb-index --check    # exit 1 if kb/_index.md would change (CI-style)
+
+Never hand-edit kb/_index.md — rerun this instead.
+"""
+import datetime
+import glob
+import os
+import re
+import subprocess
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("PyYAML required: pip install pyyaml")
+
+ROOT = subprocess.check_output(
+    ["git", "rev-parse", "--show-toplevel"], text=True).strip()
+KB = os.path.join(ROOT, "kb")
+INDEX = os.path.join(KB, "_index.md")
+
+# Collections listed first, in this order; anything else follows alphabetically.
+# Edit this list to match the top-level collection folders in your project.
+# Leave empty to let all collections sort alphabetically.
+COLLECTION_ORDER: list[str] = []
+
+
+def load_docs():
+    docs = []
+    for path in glob.glob(os.path.join(KB, "**", "*.md"), recursive=True):
+        rel = os.path.relpath(path, KB)
+        if rel.startswith("_") or os.path.basename(path) == "_index.md":
+            continue
+        text = open(path, encoding="utf-8").read()
+        m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        if not m:
+            continue
+        try:
+            fm = yaml.safe_load(m.group(1)) or {}
+        except yaml.YAMLError:
+            fm = {}
+        parts = rel.split(os.sep)
+        collection = parts[0] if len(parts) > 1 else "(root)"
+        slug = os.path.splitext(os.path.basename(path))[0]
+        ai = fm.get("ai") or {}
+        summary = (ai.get("summary") or "").strip().replace("\n", " ")
+        if len(summary) > 200:
+            summary = summary[:197].rstrip() + "…"
+        docs.append({
+            "slug": slug,
+            "title": fm.get("title") or slug,
+            "type": fm.get("type") or "?",
+            "tags": fm.get("tags") or [],
+            "status": fm.get("status") or "",
+            "summary": summary,
+            "collection": collection,
+            "domains": ai.get("domains") or [],
+        })
+    return docs
+
+
+def line_for(d):
+    meta = d["type"]
+    if d["tags"]:
+        meta += " · " + ", ".join(d["tags"])
+    tail = " — " + d["summary"] if d["summary"] else " — *(no summary yet)*"
+    return "- [[%s|%s]]%s  *(%s)*" % (d["slug"], d["title"], tail, meta)
+
+
+def render(docs):
+    today = datetime.date.today().isoformat()
+    project_name = os.path.basename(ROOT)
+    out = [f"# {project_name} KB — Index", ""]
+    out.append("*Generated %s by `bin/kb-index`. One line per document, "
+               "grouped by collection. Do not hand-edit — rerun the helper.*"
+               % today)
+    out.append("")
+    out.append("**%d documents** across %d collections."
+               % (len(docs), len({d["collection"] for d in docs})))
+    out.append("")
+
+    by_coll = {}
+    for d in docs:
+        by_coll.setdefault(d["collection"], []).append(d)
+    ordered = [c for c in COLLECTION_ORDER if c in by_coll]
+    ordered += sorted(c for c in by_coll if c not in COLLECTION_ORDER)
+
+    for coll in ordered:
+        items = sorted(by_coll[coll], key=lambda d: d["title"].lower())
+        out.append("## %s" % coll)
+        out.append("")
+        out.extend(line_for(d) for d in items)
+        out.append("")
+
+    # Domain cross-reference
+    by_domain = {}
+    for d in docs:
+        for dom in d["domains"]:
+            by_domain.setdefault(dom, []).append(d)
+    if by_domain:
+        out.append("## Domain cross-reference")
+        out.append("")
+        out.append("*Built from each document's `ai.domains` (docs without "
+                   "metadata yet are absent here until the builder runs).*")
+        out.append("")
+        for dom in sorted(by_domain):
+            titles = sorted({d["title"] for d in by_domain[dom]}, key=str.lower)
+            slugs = {d["title"]: d["slug"] for d in by_domain[dom]}
+            links = ", ".join("[[%s|%s]]" % (slugs[t], t) for t in titles)
+            out.append("- **%s** — %s" % (dom, links))
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def main():
+    docs = load_docs()
+    content = render(docs)
+    if "--check" in sys.argv:
+        existing = open(INDEX, encoding="utf-8").read() if os.path.exists(INDEX) else ""
+        if existing != content:
+            print("kb/_index.md is stale — run bin/kb-index")
+            sys.exit(1)
+        print("kb/_index.md up to date")
+        return
+    open(INDEX, "w", encoding="utf-8").write(content)
+    no_meta = sum(1 for d in docs if not d["summary"])
+    print("Wrote kb/_index.md — %d docs, %d without summary yet."
+          % (len(docs), no_meta))
+
+
+if __name__ == "__main__":
+    main()

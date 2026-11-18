@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# pre-commit — portable checks run before a commit.
+#
+# It is versioned here rather than written into .git/hooks. The installer registers
+# the relative core.hooksPath value ".githooks", so the hook follows the checkout.
+#
+# Check one validates the staged public export and its secrets/language boundary.
+# Check two verifies that hook scripts parse. The pinned scanner is installed with
+# bin/public-check install-gitleaks; it never uses private credentials.
+
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FAILED=0
+
+echo "pre-commit: checking staged public export boundary and secrets…"
+if ! python3 "$REPO_ROOT/bin/public-check" check --root "$REPO_ROOT" --staged; then
+    FAILED=1
+fi
+
+echo "pre-commit: checking that every hook script parses…"
+for hook in "$REPO_ROOT"/hooks/*.sh; do
+    [ -f "$hook" ] || continue
+    if ! bash -n "$hook" 2>/dev/null; then
+        echo "pre-commit: $hook does not parse." >&2
+        FAILED=1
+    fi
+done
+for hook in "$REPO_ROOT"/hooks/*.py; do
+    [ -f "$hook" ] || continue
+    case "$hook" in *.test.py) continue ;; esac
+    if ! python3 -m py_compile "$hook" 2>/dev/null; then
+        echo "pre-commit: $hook does not parse." >&2
+        FAILED=1
+    fi
+done
+
+if [ "$FAILED" -ne 0 ]; then
+    echo >&2
+    echo "pre-commit: refusing the commit. Fix what is named above and commit again." >&2
+    exit 1
+fi
+
+echo "pre-commit: all checks passed."
+exit 0
