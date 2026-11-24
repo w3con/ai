@@ -197,6 +197,20 @@ def read_explicit_manifest(path: Path) -> list[str]:
     return result
 
 
+def local_external_skill_link(root: Path, rel: str) -> bool:
+    """Recognize a direct, untracked skill link supplied by a local installer."""
+    relative = PurePosixPath(rel)
+    if len(relative.parts) != 2 or relative.parts[0] != "skills":
+        return False
+    path = root / relative
+    if not path.is_symlink():
+        return False
+    try:
+        return not path.resolve().is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
 def select_export(root: Path, staged: bool, manifest_path: Path | None,
                   index: dict[str, tuple[str, str, int]]) -> list[str]:
     if manifest_path is not None:
@@ -211,7 +225,8 @@ def select_export(root: Path, staged: bool, manifest_path: Path | None,
         return git_paths(root, "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z")
     tracked = set(index)
     untracked = set(git_paths(root, "ls-files", "--others", "--exclude-standard", "-z"))
-    return sorted(tracked | untracked)
+    local_skills = {rel for rel in untracked if local_external_skill_link(root, rel)}
+    return sorted(tracked | (untracked - local_skills))
 
 
 def blocked_path(path: str) -> str | None:

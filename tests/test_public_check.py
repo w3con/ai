@@ -328,6 +328,48 @@ class PublicCheckIntegrationTests(unittest.TestCase):
         self.assertIn("<blocked-private-path>", result.stdout)
         self.assertNotIn(".private", result.stdout)
 
+    def test_local_skill_links_are_omitted_only_from_implicit_tree_exports(self) -> None:
+        external = Path(self.temporary.name) / "external-skill"
+        external.mkdir()
+        marker = "SYNTHETIC" + "_" + "TOKEN" + "_" + ("A" * 32)
+        private_content = f'api_key="{marker}"\n'
+        (external / "SKILL.md").write_text(private_content, encoding="utf-8")
+        skills = self.root / "skills"
+        skills.mkdir()
+        (skills / "vendor-one").symlink_to(external, target_is_directory=True)
+        (skills / "vendor-two").symlink_to("../../external-skill", target_is_directory=True)
+        result = self.run_check("--tree")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn(marker, result.stdout + result.stderr)
+
+        manifest = Path(self.temporary.name) / "manifest.json"
+        manifest.write_text(json.dumps(["skills/vendor-two"]), encoding="utf-8")
+        explicit = self.run_check("--manifest", str(manifest))
+        self.assertEqual(explicit.returncode, 1, explicit.stderr + explicit.stdout)
+        self.assertIn("symlinked public export path", explicit.stdout)
+        subprocess.run(["git", "-C", str(self.root), "add", "skills/vendor-one"], check=True)
+        staged = self.run_check("--staged")
+        self.assertEqual(staged.returncode, 1, staged.stderr + staged.stdout)
+        self.assertIn("symlinked public export path", staged.stdout)
+        self.assertEqual((external / "SKILL.md").read_text(), private_content)
+        self.assertTrue((skills / "vendor-one").is_symlink())
+        self.assertTrue((skills / "vendor-two").is_symlink())
+
+    def test_external_links_outside_direct_skill_entries_are_still_rejected(self) -> None:
+        external = Path(self.temporary.name) / "outside.txt"
+        external.write_text("synthetic external content\n", encoding="utf-8")
+        for relative in ("plugins/local-link", "skills/public-skill/local-link"):
+            with self.subTest(path=relative):
+                link = self.root / relative
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(external)
+                try:
+                    result = self.run_check("--tree")
+                    self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+                    self.assertIn(f"{relative}: symlinked public export path", result.stdout)
+                finally:
+                    link.unlink()
+
     def test_explicit_manifest_rejects_escape_paths(self) -> None:
         manifest = Path(self.temporary.name) / "manifest.json"
         manifest.write_text(json.dumps(["../outside.txt"]), encoding="utf-8")

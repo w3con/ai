@@ -13,6 +13,8 @@ A portable collection of shared agent instructions, skills, hooks, command-line 
 
 The shared toolkit is maintained in this repository. Private overlays provide data and integration configuration, not duplicate copies of shared implementations.
 
+An external skill installer may add links through the installed skills directory into this checkout. Direct, untracked `skills/<name>` symlinks whose targets lie outside the checkout are local integrations: automatic tree checks and migration acceptance snapshots omit them without reading or changing their targets. Tracked links and links explicitly selected for export or staged for a commit remain subject to the normal export checks. Regular skill files and nested links receive no exemption.
+
 ## Requirements
 
 Python 3.10 or newer, Bash, and Git are required for the relevant installation and command workflows on a Unix-like system. Individual tools may have additional dependencies; see their own documentation. The project knowledge-base scaffold may be used independently of the rest of the toolkit.

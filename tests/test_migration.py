@@ -52,9 +52,8 @@ def snapshot_public_tree(source: Path, destination: Path) -> None:
     """Copy the working public manifest, never ignored data or link referents."""
     source = source.resolve()
     checker = runpy.run_path(str(ROOT / "bin/public-check"))
-    result = subprocess.run(["git", "-C", str(source), "ls-files", "--cached", "--others",
-                             "--exclude-standard", "-z"], capture_output=True, check=True)
-    paths = sorted({os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw})
+    index = checker["index_entries"](source)
+    paths = checker["select_export"](source, False, None, index)
     entries = []
     for name in paths:
         if checker["blocked_path"](name):
@@ -187,6 +186,39 @@ class PublicSnapshotTests(unittest.TestCase):
                     self.assertFalse(self.destination.exists())
                 finally:
                     link.unlink()
+
+    def test_snapshot_preserves_public_skills_and_omits_new_global_skill_links(self) -> None:
+        skills = self.source / "skills"
+        public = skills / "public-skill"
+        public.mkdir(parents=True)
+        (public / "SKILL.md").write_text("public skill\n", encoding="utf-8")
+        cmd(["git", "-C", str(self.source), "add", "skills/public-skill/SKILL.md"])
+        installed = self.base / "home" / ".claude" / "skills"
+        installed.parent.mkdir(parents=True)
+        installed.symlink_to(skills, target_is_directory=True)
+        external = self.base / "external-skill"
+        external.mkdir()
+        (external / "SKILL.md").write_text("private external skill\n", encoding="utf-8")
+        (installed / "vendor-one").symlink_to(external, target_is_directory=True)
+        (installed / "vendor-two").symlink_to("../../external-skill", target_is_directory=True)
+        before = (self.source / ".git/index").read_bytes()
+        snapshot_public_tree(self.source, self.destination)
+        self.assertEqual((self.source / ".git/index").read_bytes(), before)
+        self.assertEqual((self.destination / "skills/public-skill/SKILL.md").read_text(), "public skill\n")
+        for name in ("vendor-one", "vendor-two"):
+            self.assertFalse((self.destination / "skills" / name).is_symlink())
+            self.assertFalse((self.destination / "skills" / name).exists())
+            self.assertEqual((installed / name / "SKILL.md").read_text(), "private external skill\n")
+
+    def test_snapshot_still_refuses_tracked_external_skill_links(self) -> None:
+        external = self.base / "external-skill"
+        external.mkdir()
+        (self.source / "skills").mkdir()
+        (self.source / "skills/vendor").symlink_to(external, target_is_directory=True)
+        cmd(["git", "-C", str(self.source), "add", "skills/vendor"])
+        with self.assertRaises(AssertionError):
+            snapshot_public_tree(self.source, self.destination)
+        self.assertFalse(self.destination.exists())
 
     def test_snapshot_refuses_symlinked_parents_of_tracked_files(self) -> None:
         directory = self.source / "public-directory"
