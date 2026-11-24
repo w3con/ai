@@ -6,11 +6,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +97,38 @@ class SettingsRenderTests(unittest.TestCase):
         result = self.run_cli("--home", "", "--digest")
         self.assertEqual(result.returncode, 1)
         self.assertIn("non-empty directory", result.stderr)
+
+    def test_strict_json_inputs_and_standalone_renderer(self) -> None:
+        # Migration callers can copy the renderer alone; no lib dependency.
+        standalone = self.root / "settings-render"
+        standalone.write_bytes(RENDERER.read_bytes())
+        for path in (self.template, self.overlay):
+            for text in ('{"x":1,"x":2}', '{"x":NaN}', '{"x":Infinity}', '{"x":1e999}'):
+                with self.subTest(path=path.name, text=text):
+                    self.template.write_text('{}')
+                    self.overlay.write_text('{}')
+                    path.write_text(text)
+                    result = subprocess.run([sys.executable, str(standalone), "--template", str(self.template),
+                                             "--overlay", str(self.overlay), "--digest"],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+        self.template.write_text('{"hooks":{}}')
+        self.overlay.write_text('{}')
+        result = subprocess.run([sys.executable, str(standalone), "--template", str(self.template),
+                                 "--overlay", str(self.overlay), "--output", str(self.output), "--digest"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), hashlib.sha256(self.output.read_bytes()).hexdigest())
+
+    def test_input_errors_do_not_disclose_decoder_values(self) -> None:
+        renderer = runpy.run_path(str(RENDERER))
+        marker = "SYNTHETIC_PRIVATE_VALUE"
+        with mock.patch.object(renderer["json"], "loads", side_effect=ValueError(marker)):
+            with self.assertRaises(renderer["RenderError"]) as caught:
+                renderer["_load_object"](self.template)
+        self.assertNotIn(marker, str(caught.exception))
+        self.assertTrue(caught.exception.__suppress_context__)
 
 
 if __name__ == "__main__":

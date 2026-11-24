@@ -116,6 +116,7 @@ PRIVATE_COMPONENTS = {
     "archives", "secrets", "worktrees", "logs",
 }
 PRIVATE_RECORD_NAMES = {
+    ".harness-managed.json", "installed-managed.original",
     "file-manifest.json", "audit-findings.md", "consumer-inventory.md", "disposition.md",
     "disclosure-patterns.json", "migration-evidence.md", "docs-log.md", "public-release.md",
 }

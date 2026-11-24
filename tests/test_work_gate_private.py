@@ -28,7 +28,7 @@ class PrivateWorkGateToggleTests(unittest.TestCase):
         env = dict(os.environ, HOME=str(self.home), TMPDIR=str(self.home),
                    WORK_GATE_STATE_DIR=str(self.home / "state"), WORK_GATE_SCOPE="on")
         if enabled is None:
-            env.pop("AI_TOOLKIT_CONFIG", None)
+            env["AI_TOOLKIT_CONFIG"] = str(self.home / "absent-config.json")
         else:
             self.config.write_text(json.dumps({"work_management": {"enabled": enabled}}),
                                    encoding="utf-8")

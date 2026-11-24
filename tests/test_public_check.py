@@ -102,7 +102,8 @@ def registered_legacy_fstring(rel: str, symbol: str) -> str:
 
 class PublicCheckUnitTests(unittest.TestCase):
     def test_private_and_machine_local_export_paths_are_blocked(self) -> None:
-        for path in (".private/rules.md", "session/log.txt", "settings.json", "notes/.env"):
+        for path in (".private/rules.md", "session/log.txt", "settings.json", "notes/.env",
+                     ".harness-managed.json", "notes/installed-managed.original"):
             with self.subTest(path=path):
                 self.assertIsNotNone(public_check.blocked_path(path))
         self.assertIsNone(public_check.blocked_path("templates/settings.json.template"))

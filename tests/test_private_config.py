@@ -8,6 +8,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lib.private_config import ConfigError, config_path, find_root, load, resolved_path
 
@@ -20,9 +21,11 @@ class PrivateConfigTests(unittest.TestCase):
         (self.root / "settings.json.template").write_text("{}", encoding="utf-8")
         self.private = self.root / ".private"
         self.private.mkdir()
+        environment = mock.patch.dict(os.environ, {"AI_TOOLKIT_CONFIG": str(self.private / "config.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def tearDown(self) -> None:
-        os.environ.pop("AI_TOOLKIT_CONFIG", None)
         self.temp.cleanup()
 
     def test_missing_file_is_an_optional_empty_configuration(self) -> None:
@@ -59,6 +62,15 @@ class PrivateConfigTests(unittest.TestCase):
         (self.private / "config.json").write_text("{broken", encoding="utf-8")
         with self.assertRaisesRegex(ConfigError, "cannot read valid private configuration"):
             load(self.root)
+
+    def test_input_errors_do_not_disclose_decoder_values(self) -> None:
+        (self.private / "config.json").write_text('{}', encoding="utf-8")
+        marker = "SYNTHETIC_PRIVATE_VALUE"
+        with mock.patch("lib.private_config.json.loads", side_effect=ValueError(marker)):
+            with self.assertRaises(ConfigError) as caught:
+                load(self.root)
+        self.assertNotIn(marker, str(caught.exception))
+        self.assertTrue(caught.exception.__suppress_context__)
 
     def test_root_discovery_uses_source_location_not_checkout_name(self) -> None:
         nested = self.root / "hooks" / "test.sh"

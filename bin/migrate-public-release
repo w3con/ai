@@ -477,6 +477,7 @@ def preserve_installed_state(settings_path: Path, state: dict[str, Any],
     if "settings_existed" not in state:
         if settings_path.is_symlink():
             raise MigrationError("installed settings is a symlink; refusing to change it")
+        preserve_installed_baseline(settings_path, state, state_path, state_dir)
         state["settings_existed"] = settings_path.is_file()
         if settings_path.is_file():
             atomic_bytes(state_dir / "installed-settings.original", settings_path.read_bytes(), 0o600)
@@ -487,6 +488,80 @@ def preserve_installed_state(settings_path: Path, state: dict[str, Any],
         if stamp.is_file():
             atomic_bytes(state_dir / "installed-stamp.original", stamp.read_bytes(), 0o600)
         write_state(state_path, state)
+
+
+def baseline_is_file(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        raise MigrationError("installed or saved managed baseline is not a regular file; recovery stopped")
+    return True
+
+
+def preserve_installed_baseline(settings_path: Path, state: dict[str, Any],
+                                state_path: Path, state_dir: Path) -> None:
+    if "baseline_existed" in state:
+        return
+    baseline = settings_path.parent / ".harness-managed.json"
+    existed = baseline_is_file(baseline)
+    if existed:
+        mode = stat.S_IMODE(baseline.stat().st_mode)
+        atomic_bytes(state_dir / "installed-managed.original", baseline.read_bytes(), 0o600)
+        state["baseline_mode"] = mode
+    state["baseline_existed"] = existed
+    # Commit this snapshot independently, so interruption while saving the other
+    # installed artifacts cannot resnapshot a later generated baseline on retry.
+    write_state(state_path, state)
+
+
+def saved_baseline(state_dir: Path) -> Path:
+    saved = state_dir / "installed-managed.original"
+    if not baseline_is_file(saved):
+        raise MigrationError("the saved managed baseline is missing; recovery stopped")
+    return saved
+
+
+def remove_installed_baseline(settings_path: Path, state: dict[str, Any], state_dir: Path) -> None:
+    baseline = settings_path.parent / ".harness-managed.json"
+    exists = baseline_is_file(baseline)
+    if "baseline_existed" not in state:
+        if exists:
+            raise MigrationError("this older migration did not snapshot the managed baseline; retain it for owner recovery")
+        return
+    if state["baseline_existed"]:
+        saved_baseline(state_dir)  # Never discard the installed copy without recovery evidence.
+    if exists:
+        baseline.unlink()
+        fsync_dir(baseline.parent)
+
+
+def restore_installed_baseline(settings_path: Path, state: dict[str, Any], state_dir: Path) -> None:
+    # Old state records have no ownership evidence for this artifact. In
+    # particular, a missing field must never be interpreted as saved absence.
+    if "baseline_existed" not in state:
+        return
+    baseline = settings_path.parent / ".harness-managed.json"
+    exists = baseline_is_file(baseline)
+    if state["baseline_existed"]:
+        saved = saved_baseline(state_dir)
+        atomic_bytes(baseline, saved.read_bytes(), int(state.get("baseline_mode", 0o600)))
+    elif exists:
+        baseline.unlink()
+        fsync_dir(baseline.parent)
+
+
+def installed_baseline_restored(settings_path: Path, state: dict[str, Any], state_dir: Path) -> bool:
+    if "baseline_existed" not in state:
+        return True
+    baseline = settings_path.parent / ".harness-managed.json"
+    exists = baseline_is_file(baseline)
+    if not state["baseline_existed"]:
+        return not exists
+    saved = saved_baseline(state_dir)
+    return (exists and baseline.read_bytes() == saved.read_bytes() and
+            stat.S_IMODE(baseline.stat().st_mode) == int(state.get("baseline_mode", 0o600)))
 
 
 def restore_installed_stamp(settings_path: Path, state: dict[str, Any], state_dir: Path) -> None:
@@ -1012,6 +1087,7 @@ def preflight_links(home: Path, old_root: Path) -> list[dict[str, str]]:
     settings = claude / "settings.json"
     if settings.is_symlink():
         raise MigrationError("installed settings is a symlink; refusing to replace it")
+    baseline_is_file(claude / ".harness-managed.json")
     return records
 
 
@@ -1176,7 +1252,9 @@ def prepare_and_switch(state: dict[str, Any], state_path: Path, target: Path,
     if phase in ("new_checkout_moved", "preparing_project_memories", "project_memories_moved", "bootstrap_started"):
         # The current settings were temporarily edited to stop the old hook. Remove them
         # only after preserving their exact bytes; the new renderer recreates them from
-        # public defaults plus the private preferences overlay.
+        # public defaults plus the private preferences overlay. Its baseline is paired
+        # with settings, including a new baseline left by an interrupted bootstrap.
+        remove_installed_baseline(settings_path, state, state_dir)
         if settings_path.exists() and not settings_path.is_symlink():
             settings_path.unlink()
         move_project_memories_aside(home, state, state_path, state_dir)
@@ -1240,7 +1318,8 @@ def rollback(state: dict[str, Any], state_path: Path, target: Path, state_dir: P
                              settings_path.read_bytes() == settings_copy.read_bytes()) if state.get("settings_existed") else not settings_path.exists()
         stamp = settings_path.parent / ".harness-stamp"
         stamp_restored = (stamp_copy.is_file() and stamp.is_file() and stamp.read_bytes() == stamp_copy.read_bytes()) if state.get("stamp_existed") else not stamp.exists()
-        if settings_restored and stamp_restored:
+        baseline_restored = installed_baseline_restored(settings_path, state, state_dir)
+        if settings_restored and stamp_restored and baseline_restored:
             state["phase"] = "rolled_back"
             write_state(state_path, state)
             print("Rollback complete. The original installation is restored; recovery data remains intact.")
@@ -1302,6 +1381,7 @@ def rollback(state: dict[str, Any], state_path: Path, target: Path, state_dir: P
     write_state(state_path, state)
     state["phase"] = "rollback_finishing"
     write_state(state_path, state)
+    restore_installed_baseline(settings_path, state, state_dir)
     restore_installed_stamp(settings_path, state, state_dir)
     restore_settings(settings_path, state_dir / "installed-settings.original",
                      bool(state.get("settings_existed")))
@@ -1477,6 +1557,7 @@ def main(argv: list[str] | None = None) -> int:
                     if recovery_settings.is_file():
                         restore_settings(home / ".claude" / "settings.json", recovery_settings,
                                          bool(state.get("settings_existed", True)))
+                    restore_installed_baseline(home / ".claude" / "settings.json", state, state_dir)
                     restore_installed_stamp(home / ".claude" / "settings.json", state, state_dir)
                     if state.get("external_config_path"):
                         check_external_config_rollback(state, target, state_dir)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -24,13 +25,37 @@ class RenderError(ValueError):
     """Invalid settings input or unsafe rendering request."""
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise RenderError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _finite_number(text):
+    value = float(text)
+    if not math.isfinite(value):
+        raise RenderError("non-finite JSON number")
+    return value
+
+
+def _reject_constant(text):
+    raise RenderError("non-finite JSON constant")
+
+
 def _load_object(path: Path, *, optional: bool = False) -> dict[str, Any]:
     if optional and not path.exists():
         return {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RenderError(f"cannot read valid JSON from {path}: {exc}") from exc
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object,
+                           parse_float=_finite_number, parse_constant=_reject_constant)
+    except (OSError, UnicodeError, ValueError):
+        # Decoder/conversion exception text can include fragments of private
+        # input. Keep diagnostics about the file and failure category only.
+        raise RenderError(f"cannot read valid JSON from {path} "
+                          "(unreadable, malformed, duplicate keys, or non-finite numbers)") from None
     if not isinstance(value, dict):
         raise RenderError(f"settings root must be a JSON object: {path}")
     return value

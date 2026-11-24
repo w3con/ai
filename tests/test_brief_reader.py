@@ -6,9 +6,11 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +19,12 @@ LOADER = importlib.machinery.SourceFileLoader("brief_reader_tested", str(PATH))
 SPEC = importlib.util.spec_from_loader("brief_reader_tested", LOADER)
 BRIEF = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
-SPEC.loader.exec_module(BRIEF)
+with tempfile.TemporaryDirectory(prefix="brief-config-") as temp:
+    config = Path(temp) / "config.json"
+    config.write_text(json.dumps({"brief_card_prefixes": ["tasks/"],
+                                  "brief_directories": ["tasks", "plans"]}), encoding="utf-8")
+    with mock.patch.dict(os.environ, {"AI_TOOLKIT_CONFIG": str(config)}):
+        SPEC.loader.exec_module(BRIEF)
 
 
 class BriefReaderTests(unittest.TestCase):

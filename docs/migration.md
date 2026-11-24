@@ -68,6 +68,8 @@ State and staging are held beside the checkout in a hidden, mode-restricted migr
 
 The migration runs the pinned installer against the actual home only after preserving local settings and project memory entries. If deployment or its final checks fail, the script moves the failed new checkout into recovery and restores the old checkout, installed settings, and links. Project-scoped memory directories are temporarily moved aside during bootstrap and restored unchanged afterward.
 
+The installed `.harness-managed.json` source baseline is preserved with exact bytes, existence, and mode in restricted recovery alongside settings and stamp. Fresh bootstrap and interrupted-bootstrap retries remove the prior/generated baseline together with settings, so the installer can establish a new source/stamp pair. Rollback restores the prior baseline or its recorded absence. Baseline symlinks and nonregular files are refused; `installed-managed.original` is private recovery data, never a public export. Older recovery states without `baseline_existed` do not authorize deleting or replacing an unknown baseline; a retry encountering one stops for owner recovery.
+
 To explicitly roll back a completed migration, run:
 
 ```sh

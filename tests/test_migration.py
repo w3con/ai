@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import io
 import json
 import os
 import runpy
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -17,8 +19,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from lib import settings_policy
+
 MIGRATOR = ROOT / "bin" / "migrate-public-release"
 
 
@@ -44,10 +48,57 @@ def init_repo(path: Path, *, bare: bool = False) -> None:
     cmd(args)
 
 
+def snapshot_public_tree(source: Path, destination: Path) -> None:
+    """Copy the working public manifest, never ignored data or link referents."""
+    source = source.resolve()
+    checker = runpy.run_path(str(ROOT / "bin/public-check"))
+    result = subprocess.run(["git", "-C", str(source), "ls-files", "--cached", "--others",
+                             "--exclude-standard", "-z"], capture_output=True, check=True)
+    paths = sorted({os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw})
+    entries = []
+    for name in paths:
+        if checker["blocked_path"](name):
+            raise AssertionError("private or escaping path in public snapshot manifest")
+        relative = Path(name)
+        if any((source / parent).is_symlink() for parent in relative.parents):
+            raise AssertionError("symlinked parent in public snapshot manifest")
+        path = source / relative
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            continue  # Respect working-tree deletions of tracked files.
+        if stat.S_ISLNK(mode):
+            link = os.readlink(path)
+            if Path(link).is_absolute():
+                raise AssertionError("absolute symlink in public snapshot manifest")
+            for target in (Path(os.path.abspath(path.parent / link)), path.resolve(strict=True)):
+                if not target.is_relative_to(source):
+                    raise AssertionError("escaping symlink in public snapshot manifest")
+                target_name = target.relative_to(source).as_posix()
+                if checker["blocked_path"](target_name) or not any(
+                        name == target_name or name.startswith(target_name + "/") for name in paths):
+                    raise AssertionError("symlink target is outside the public snapshot manifest")
+        elif not stat.S_ISREG(mode):
+            raise AssertionError("unsupported file type in public snapshot manifest")
+        entries.append((path, relative))
+
+    destination.mkdir()
+    for path, relative in entries:
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            target.symlink_to(os.readlink(path))
+        else:
+            shutil.copy2(path, target, follow_symlinks=False)
+
+
 def migration_test_environment(home: Path) -> dict[str, str]:
     """Isolate HOME without smuggling a scanner path through GITLEAKS_BIN."""
     env = dict(os.environ)
-    env.pop("GITLEAKS_BIN", None)
+    for key in ("GITLEAKS_BIN", "AI_TOOLKIT_CONFIG", "CLAUDE_HARNESS_BYPASS",
+                "HARNESS_STAMP_GATE_REPO_DIR", "HARNESS_STAMP_GATE_STAMP_FILE",
+                "AI_TOOLKIT_MIGRATION_FAILPOINT"):
+        env.pop(key, None)
     env["HOME"] = str(home)
     return env
 
@@ -84,6 +135,72 @@ def write_test_gitleaks(path: Path) -> None:
     path.chmod(0o700)
 
 
+class PublicSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="public-snapshot-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.source = self.base / "source"
+        self.destination = self.base / "snapshot"
+        init_repo(self.source)
+        (self.source / ".gitignore").write_text(".private/\n", encoding="utf-8")
+        (self.source / ".git/info/exclude").write_text("local-alias\nlocal-data/\n", encoding="utf-8")
+        (self.source / "tracked.txt").write_text("public\n", encoding="utf-8")
+        cmd(["git", "-C", str(self.source), "add", ".gitignore", "tracked.txt"])
+        (self.source / ".private").mkdir()
+        (self.source / ".private/secret.txt").write_text("synthetic private fixture\n", encoding="utf-8")
+
+    def test_manifest_keeps_public_working_files_modes_and_safe_links_without_index_changes(self) -> None:
+        (self.source / "local-alias").symlink_to(".private/secret.txt")
+        (self.source / "local-data").mkdir()
+        (self.source / "local-data/ignored.txt").write_text("local fixture\n", encoding="utf-8")
+        for name in ("lib/settings_policy.py", "docs/settings.md"):
+            path = self.source / name
+            path.parent.mkdir()
+            path.write_text("untracked public fixture\n", encoding="utf-8")
+        (self.source / "tracked.txt").chmod(0o755)
+        (self.source / "public-link").symlink_to("tracked.txt")
+        before = (self.source / ".git/index").read_bytes()
+        snapshot_public_tree(self.source, self.destination)
+        self.assertEqual((self.source / ".git/index").read_bytes(), before)
+        self.assertEqual((self.destination / "tracked.txt").read_text(), "public\n")
+        self.assertEqual((self.destination / "tracked.txt").stat().st_mode & 0o777, 0o755)
+        self.assertEqual(os.readlink(self.destination / "public-link"), "tracked.txt")
+        for name in ("lib/settings_policy.py", "docs/settings.md"):
+            self.assertTrue((self.destination / name).is_file())
+        for name in (".git", ".private", "local-alias", "local-data"):
+            self.assertFalse((self.destination / name).exists())
+            self.assertFalse((self.destination / name).is_symlink())
+
+    def test_snapshot_refuses_private_ignored_and_escaping_symlink_targets(self) -> None:
+        outside = self.base / "outside.txt"
+        outside.write_text("outside fixture\n", encoding="utf-8")
+        (self.source / "local-data").mkdir()
+        (self.source / "local-data/ignored.txt").write_text("local fixture\n", encoding="utf-8")
+        for target in (".private/secret.txt", "local-data/ignored.txt", "../outside.txt", str(outside)):
+            with self.subTest(target=target):
+                link = self.source / "public-link"
+                link.symlink_to(target)
+                try:
+                    with self.assertRaises(AssertionError):
+                        snapshot_public_tree(self.source, self.destination)
+                    self.assertFalse(self.destination.exists())
+                finally:
+                    link.unlink()
+
+    def test_snapshot_refuses_symlinked_parents_of_tracked_files(self) -> None:
+        directory = self.source / "public-directory"
+        directory.mkdir()
+        (directory / "item.txt").write_text("public\n", encoding="utf-8")
+        cmd(["git", "-C", str(self.source), "add", "public-directory/item.txt"])
+        shutil.rmtree(directory)
+        directory.symlink_to(".private", target_is_directory=True)
+        (self.source / ".private/item.txt").write_text("private fixture\n", encoding="utf-8")
+        with self.assertRaises(AssertionError):
+            snapshot_public_tree(self.source, self.destination)
+        self.assertFalse(self.destination.exists())
+
+
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="toolkit-migration-test-")
@@ -115,7 +232,7 @@ class MigrationTests(unittest.TestCase):
             "enabledPlugins": ["synthetic-default-plugin"],
             "skillOverrides": {"synthetic-skill": {"enabled": False}},
             "theme": "dark",
-            "preferredNotifChannel": "silent",
+            "preferredNotifChannel": "notifications_disabled",
             "agentPushNotifEnabled": False,
             "skipAutoPermissionPrompt": True,
             "hooks": {"SessionStart": [{"hooks": [
@@ -177,7 +294,7 @@ class MigrationTests(unittest.TestCase):
             "enabledPlugins": ["synthetic-default-plugin"],
             "skillOverrides": {"synthetic-skill": {"enabled": False}},
             "theme": "dark",
-            "preferredNotifChannel": "silent",
+            "preferredNotifChannel": "notifications_disabled",
             "agentPushNotifEnabled": False,
             "skipAutoPermissionPrompt": True,
             "hooks": {"SessionStart": [{"hooks": [
@@ -188,7 +305,7 @@ class MigrationTests(unittest.TestCase):
         }
         self.original_settings = (json.dumps(old_settings, sort_keys=True, indent=2) + "\n").encode()
         (home_claude / "settings.json").write_bytes(self.original_settings)
-        self.original_stamp = b"synthetic-old-stamp\n"
+        self.original_stamp = hashlib.sha256(self.original_settings).hexdigest().encode("ascii") + b"\n"
         (home_claude / ".harness-stamp").write_bytes(self.original_stamp)
         for name in ("CLAUDE.md", "agents", "hooks", "skills", "commands", "statusline-command.sh"):
             source = self.target / name
@@ -324,6 +441,48 @@ if projects.is_dir():
             args.extend(extra)
         return subprocess.run(args, env=env, capture_output=True, text=True, check=False)
 
+    def previous_baseline(self) -> tuple[bytes, int]:
+        source = settings_policy.controlled(json.loads(self.original_settings))
+        payload = (json.dumps({"controlled": source, "version": 1}, indent=4) + "\n\n").encode()
+        baseline = self.home / ".claude/.harness-managed.json"
+        baseline.write_bytes(payload)
+        baseline.chmod(0o400)
+        self.original_stamp = (settings_policy.managed_stamp(source) + "\n").encode()
+        (self.home / ".claude/.harness-stamp").write_bytes(self.original_stamp)
+        return payload, 0o400
+
+    def use_real_release_bootstrap(self) -> None:
+        """Keep the small release fixture, but execute actual production bootstrap."""
+        files = ("bin/bootstrap.py", "bin/settings-render", "lib/__init__.py",
+                 "lib/settings_policy.py", "lib/private_config.py")
+        for relative in files:
+            target = self.release / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, target)
+        template = self.release / "settings.json.template"
+        source = json.loads(template.read_bytes())
+        source.update({"theme": "auto", "preferredNotifChannel": "auto"})
+        template.write_text(json.dumps(source))
+        cmd(["git", "-C", str(self.release), "add", "--", *files, "settings.json.template"])
+        cmd(["git", "-C", str(self.release), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "commit", "--quiet", "-m", "real bootstrap boundary fixture"])
+        cmd(["git", "-C", str(self.release), "push", "--quiet", "origin", "main"])
+        self.revision = cmd(["git", "-C", str(self.release), "rev-parse", "HEAD"]).stdout.strip()
+
+    def injected_migration_failure(self, boundary: str, callback) -> tuple[int, str]:
+        module = runpy.run_path(str(MIGRATOR))
+        original_run = module["run"]
+        def quiet_run(*args, **kwargs):
+            kwargs.setdefault("capture", True)
+            return original_run(*args, **kwargs)
+        output = io.StringIO()
+        with mock.patch.dict(module["main"].__globals__, {boundary: callback, "run": quiet_run}), \
+                mock.patch.dict(os.environ, migration_test_environment(self.home), clear=True), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            result = module["main"](["--target", str(self.outer), "--repository", str(self.bare),
+                                     "--revision", self.revision])
+        return result, output.getvalue()
+
     def signature(self, root: Path) -> tuple:
         result = []
         for path in sorted(root.rglob("*")):
@@ -431,9 +590,11 @@ if projects.is_dir():
     @unittest.skipIf(os.environ.get("AI_TOOLKIT_MIGRATION_PREFLIGHT") == "1",
                      "the migrator preflight already runs the candidate test suite")
     def test_real_candidate_snapshot_installs_and_migrates_with_real_bootstrap(self) -> None:
+        baseline_before, baseline_mode = self.previous_baseline()
         release_root = self.base / "actual-candidate"
-        shutil.copytree(ROOT, release_root, symlinks=True,
-                        ignore=shutil.ignore_patterns(".git", ".private", "__pycache__", "*.pyc"))
+        snapshot_public_tree(ROOT, release_root)
+        self.assertTrue((release_root / "lib/settings_policy.py").is_file())
+        self.assertTrue((release_root / "docs/settings.md").is_file())
         init_repo(release_root)
         cmd(["git", "-C", str(release_root), "add", "--all"])
         cmd(["git", "-C", str(release_root), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -446,10 +607,18 @@ if projects.is_dir():
 
         env = migration_test_environment(self.home)
         self.assertNotIn("GITLEAKS_BIN", env)
-        result = subprocess.run([
+        args = [
             sys.executable, str(MIGRATOR), "--target", str(self.outer),
             "--repository", str(actual_bare), "--revision", actual_revision,
-        ], env=env, capture_output=True, text=True, check=False)
+        ]
+        interrupted = subprocess.run(args, env={**env, "AI_TOOLKIT_MIGRATION_FAILPOINT": "after_bootstrap"},
+                                     capture_output=True, text=True, check=False)
+        self.assertEqual(interrupted.returncode, 86, interrupted.stderr)
+        baseline = self.home / ".claude/.harness-managed.json"
+        self.assertNotEqual(baseline.read_bytes(), baseline_before)
+        # Resume must remove the newly generated baseline before rebootstrap,
+        # while retaining the original recovery bytes and existence record.
+        result = subprocess.run(args, env=env, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         preflight_home = self.base / ".checkout.migration/preflight-home"
         self.assertFalse((preflight_home / ".cache/ai-toolkit/public-check/gitleaks-8.24.3/gitleaks").exists(),
@@ -464,13 +633,198 @@ if projects.is_dir():
         self.assertIn("Preserve the user's local memory.", (self.target / ".private/rules.md").read_text())
         settings = self.home / ".claude/settings.json"
         stamp = self.home / ".claude/.harness-stamp"
-        self.assertEqual(hashlib.sha256(settings.read_bytes()).hexdigest(), stamp.read_text().strip())
+        self.assertEqual(settings_policy.managed_stamp(json.loads(settings.read_bytes())), stamp.read_text().strip())
+        record = json.loads(baseline.read_bytes())
+        self.assertEqual(record, {"version": 1, "controlled": settings_policy.controlled(json.loads(settings.read_bytes()))})
+        self.assertEqual(baseline.stat().st_mode & 0o777, 0o600)
+        recovery = self.base / ".checkout.migration"
+        state = json.loads((recovery / "state.json").read_bytes())
+        self.assertIs(state["baseline_existed"], True)
+        self.assertEqual(state["baseline_mode"], baseline_mode)
+        self.assertEqual((recovery / "installed-managed.original").read_bytes(), baseline_before)
+        self.assertEqual((recovery / "installed-managed.original").stat().st_mode & 0o777, 0o600)
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}})
         gate = subprocess.run(["bash", str(self.home / ".claude/hooks/harness-stamp-gate.sh")],
                               input=payload, text=True, capture_output=True, env=env, check=False)
         self.assertEqual(gate.returncode, 0, gate.stderr)
         gate_output = json.loads(gate.stdout)["hookSpecificOutput"]
         self.assertEqual(gate_output["permissionDecision"], "allow", gate_output.get("permissionDecisionReason"))
+        rolled_back = cmd([sys.executable, str(MIGRATOR), "--target", str(self.outer), "--rollback"], env=env)
+        self.assertEqual(rolled_back.returncode, 0)
+        self.assertEqual(baseline.read_bytes(), baseline_before)
+        self.assertEqual(baseline.stat().st_mode & 0o777, baseline_mode)
+        self.assertEqual(settings.read_bytes(), self.original_settings)
+        self.assertEqual(stamp.read_bytes(), self.original_stamp)
+
+    def test_real_bootstrap_explicit_rollback_restores_baseline_absence(self) -> None:
+        self.use_real_release_bootstrap()
+        baseline = self.home / ".claude/.harness-managed.json"
+        self.assertFalse(baseline.exists())
+        migrated = self.migrate()
+        self.assertEqual(migrated.returncode, 0, migrated.stderr)
+        self.assertTrue(baseline.is_file())
+        self.assertEqual(settings_policy.managed_stamp(json.loads(baseline.read_bytes())["controlled"]),
+                         (self.home / ".claude/.harness-stamp").read_text().strip())
+        state_dir = self.base / ".checkout.migration"
+        state = json.loads((state_dir / "state.json").read_bytes())
+        self.assertIs(state["baseline_existed"], False)
+        self.assertFalse((state_dir / "installed-managed.original").exists())
+        rolled_back = cmd([sys.executable, str(MIGRATOR), "--target", str(self.outer), "--rollback"],
+                          env=migration_test_environment(self.home))
+        self.assertEqual(rolled_back.returncode, 0)
+        self.assertFalse(baseline.exists())
+        self.assertEqual((self.home / ".claude/settings.json").read_bytes(), self.original_settings)
+        self.assertEqual((self.home / ".claude/.harness-stamp").read_bytes(), self.original_stamp)
+
+    def test_real_bootstrap_post_deploy_failure_restores_baseline_bytes_mode_or_absence(self) -> None:
+        for existed in (False, True):
+            with self.subTest(existed=existed):
+                if existed:
+                    self.tearDown()
+                    self.setUp()
+                self.use_real_release_bootstrap()
+                baseline = self.home / ".claude/.harness-managed.json"
+                original, mode = self.previous_baseline() if existed else (None, None)
+                observed = []
+                def fail_after_real_bootstrap(*_):
+                    payload = baseline.read_bytes()
+                    self.assertNotEqual(payload, original)
+                    self.assertEqual(settings_policy.managed_stamp(json.loads(payload)["controlled"]),
+                                     (self.home / ".claude/.harness-stamp").read_text().strip())
+                    observed.append(payload)
+                    raise RuntimeError("synthetic post-bootstrap verification failure")
+                result, output = self.injected_migration_failure("restore_link_spellings", fail_after_real_bootstrap)
+                self.assertEqual(result, 1, output)
+                self.assertEqual(len(observed), 1, output)
+                self.assertIn("Rollback complete", output)
+                if existed:
+                    self.assertEqual(baseline.read_bytes(), original)
+                    self.assertEqual(baseline.stat().st_mode & 0o777, mode)
+                else:
+                    self.assertFalse(baseline.exists())
+                self.assertEqual((self.home / ".claude/settings.json").read_bytes(), self.original_settings)
+                self.assertEqual((self.home / ".claude/.harness-stamp").read_bytes(), self.original_stamp)
+
+    def test_pause_failure_cleanup_restores_baseline_without_switching_checkout(self) -> None:
+        for existed in (False, True):
+            with self.subTest(existed=existed):
+                if existed:
+                    self.tearDown()
+                    self.setUp()
+                baseline = self.home / ".claude/.harness-managed.json"
+                original, mode = self.previous_baseline() if existed else (None, None)
+                def pause_failure(*_):
+                    if baseline.exists():
+                        baseline.chmod(0o600)
+                    baseline.write_bytes(b"synthetic replacement before switch\n")
+                    raise RuntimeError("synthetic pause failure")
+                result, output = self.injected_migration_failure("wait_for_updaters", pause_failure)
+                self.assertEqual(result, 1, output)
+                self.assertFalse((self.base / ".checkout.migration/old-checkout").exists())
+                if existed:
+                    self.assertEqual(baseline.read_bytes(), original)
+                    self.assertEqual(baseline.stat().st_mode & 0o777, mode)
+                else:
+                    self.assertFalse(baseline.exists())
+                self.assertEqual((self.home / ".claude/settings.json").read_bytes(), self.original_settings)
+                self.assertEqual((self.home / ".claude/.harness-stamp").read_bytes(), self.original_stamp)
+
+    def test_baseline_snapshot_survives_interruption_before_settings_snapshot(self) -> None:
+        module = runpy.run_path(str(MIGRATOR))
+        settings = self.home / ".claude/settings.json"
+        baseline = self.home / ".claude/.harness-managed.json"
+        original, mode = self.previous_baseline()
+        recovery = self.base / "snapshot-recovery"
+        recovery.mkdir(mode=0o700)
+        state_path = recovery / "state.json"
+        original_atomic = module["atomic_bytes"]
+        def interrupt_settings(path, *args, **kwargs):
+            if path.name == "installed-settings.original":
+                raise OSError("synthetic interrupted settings snapshot")
+            return original_atomic(path, *args, **kwargs)
+        with mock.patch.dict(module["preserve_installed_state"].__globals__, {"atomic_bytes": interrupt_settings}):
+            with self.assertRaises(OSError):
+                module["preserve_installed_state"](settings, {}, state_path, recovery)
+        state = module["read_state"](state_path)
+        self.assertIs(state["baseline_existed"], True)
+        self.assertNotIn("settings_existed", state)
+        baseline.chmod(0o600)
+        baseline.write_bytes(b"synthetic later baseline\n")
+        module["preserve_installed_state"](settings, state, state_path, recovery)
+        self.assertEqual((recovery / "installed-managed.original").read_bytes(), original)
+        self.assertEqual((recovery / "installed-managed.original").stat().st_mode & 0o777, 0o600)
+        module["restore_installed_baseline"](settings, state, recovery)
+        self.assertEqual(baseline.read_bytes(), original)
+        self.assertEqual(baseline.stat().st_mode & 0o777, mode)
+
+    def test_unsafe_baseline_or_recovery_types_are_refused_without_following_links(self) -> None:
+        module = runpy.run_path(str(MIGRATOR))
+        settings = self.home / ".claude/settings.json"
+        baseline = self.home / ".claude/.harness-managed.json"
+        outside = self.base / "outside-baseline"
+        outside.write_bytes(b"synthetic private baseline\n")
+        recovery = self.base / "unsafe-recovery"
+        recovery.mkdir(mode=0o700)
+        for kind in ("symlink", "directory"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    baseline.symlink_to(outside)
+                else:
+                    baseline.mkdir()
+                with self.assertRaises(module["MigrationError"]):
+                    module["preflight_links"](self.home, self.target)
+                with self.assertRaises(module["MigrationError"]):
+                    module["preserve_installed_state"](settings, {}, recovery / "state.json", recovery)
+                with self.assertRaises(module["MigrationError"]):
+                    module["restore_installed_baseline"](settings, {"baseline_existed": False}, recovery)
+                self.assertEqual(outside.read_bytes(), b"synthetic private baseline\n")
+                self.assertEqual(settings.read_bytes(), self.original_settings)
+                baseline.unlink() if kind == "symlink" else baseline.rmdir()
+        baseline.write_bytes(b"installed baseline\n")
+        saved = recovery / "installed-managed.original"
+        saved.symlink_to(outside)
+        for operation in ("remove_installed_baseline", "restore_installed_baseline", "installed_baseline_restored"):
+            with self.assertRaises(module["MigrationError"]):
+                module[operation](settings, {"baseline_existed": True}, recovery)
+        self.assertEqual(baseline.read_bytes(), b"installed baseline\n")
+        self.assertEqual(outside.read_bytes(), b"synthetic private baseline\n")
+
+    def test_rollback_finishing_checks_baseline_and_preserves_unknown_legacy_artifacts(self) -> None:
+        module = runpy.run_path(str(MIGRATOR))
+        settings = self.home / ".claude/settings.json"
+        baseline = self.home / ".claude/.harness-managed.json"
+        for kind in ("previous", "absent", "legacy", "mode-only"):
+            with self.subTest(kind=kind):
+                if baseline.exists():
+                    baseline.unlink()
+                original, mode = self.previous_baseline() if kind in {"previous", "mode-only"} else (None, None)
+                recovery = self.base / ("finishing-" + kind)
+                recovery.mkdir(mode=0o700)
+                state_path = recovery / "state.json"
+                state = {"run_id": "baseline-fixture", "phase": "private_prepared"}
+                module["preserve_installed_state"](settings, state, state_path, recovery)
+                if baseline.exists():
+                    baseline.chmod(0o600)
+                baseline.write_bytes(original if kind == "mode-only" else b"synthetic un-restored baseline\n")
+                baseline.chmod(0o600)
+                if kind == "legacy":
+                    del state["baseline_existed"]
+                    state.pop("baseline_mode", None)
+                    module["preserve_installed_state"](settings, state, state_path, recovery)
+                    self.assertNotIn("baseline_existed", state)
+                    with self.assertRaisesRegex(module["MigrationError"], "older migration"):
+                        module["remove_installed_baseline"](settings, state, recovery)
+                state["phase"] = "rollback_finishing"
+                module["write_state"](state_path, state)
+                module["rollback"](state, state_path, self.target, recovery, self.home)
+                self.assertEqual(state["phase"], "rolled_back")
+                if kind in {"previous", "mode-only"}:
+                    self.assertEqual(baseline.read_bytes(), original)
+                    self.assertEqual(baseline.stat().st_mode & 0o777, mode)
+                elif kind == "absent":
+                    self.assertFalse(baseline.exists())
+                else:
+                    self.assertEqual(baseline.read_bytes(), b"synthetic un-restored baseline\n")
 
     def test_migration_preserves_local_data_settings_aliases_and_outer_symlink(self) -> None:
         result = self.migrate()
@@ -499,7 +853,7 @@ if projects.is_dir():
         self.assertEqual(settings["enabledPlugins"], ["synthetic-default-plugin"])
         self.assertEqual(settings["skillOverrides"], {"synthetic-skill": {"enabled": False}})
         self.assertEqual(settings["theme"], "dark")
-        self.assertEqual(settings["preferredNotifChannel"], "silent")
+        self.assertEqual(settings["preferredNotifChannel"], "notifications_disabled")
         self.assertIs(settings["agentPushNotifEnabled"], False)
         self.assertIs(settings["skipAutoPermissionPrompt"], True)
         self.assertEqual(settings["home"], os.path.realpath(self.home))

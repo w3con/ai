@@ -8,7 +8,6 @@ configuration. It never discovers a business vault or writes shell startup files
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -19,6 +18,9 @@ import tempfile
 import stat
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib import settings_policy as policy
 
 
 def load_renderer(root: Path):
@@ -146,9 +148,12 @@ class FileTransaction:
         elif path.is_dir():
             path.rmdir()
 
-    def restore(self) -> list[str]:
+    def restore(self, preserve: set[Path] | None = None) -> list[str]:
         failures: list[str] = []
+        preserve = {Path(os.path.abspath(path)) for path in (preserve or set())}
         for path, kind, value in reversed(self.entries):
+            if path in preserve:
+                continue
             try:
                 if kind == "missing":
                     if path.is_symlink() or path.is_file():
@@ -211,8 +216,61 @@ def symlink_problem(source: Path, target: Path) -> str | None:
     return None
 
 
+def input_snapshot(path: Path) -> tuple[Any, ...]:
+    """Detect replacement, retargeted links, and byte edits since preflight."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return ("missing", str(path.resolve()))
+    target = path.stat()
+    return (str(path.resolve()), info.st_ino, info.st_mtime_ns, info.st_mode,
+            target.st_ino, target.st_mtime_ns, path.read_bytes())
+
+
+def check_inputs(snapshots: dict[Path, tuple[Any, ...]]) -> None:
+    for path, before in snapshots.items():
+        if input_snapshot(path) != before:
+            raise OSError(f"settings input changed since preflight: {path.name}; retry --dry-run")
+
+
+def confirm_adoption(summary: str) -> None:
+    """Read the owner's explicit decision only from a controlling terminal."""
+    try:
+        # Buffered bidirectional text streams require seeking, which terminals
+        # do not support. Use one unbuffered terminal descriptor for both ways.
+        with open("/dev/tty", "r+b", buffering=0) as terminal:
+            if not terminal.isatty():
+                raise OSError("not a terminal")
+            terminal.write(("Adopt preference keys only: " + (summary or "no changes") +
+                            "\nType adopt to confirm: ").encode("utf-8"))
+            terminal.flush()
+            if terminal.readline().strip() != b"adopt":
+                raise policy.PolicyError("owner declined preference adoption")
+    except OSError as exc:
+        raise policy.PolicyError("--adopt requires owner confirmation on a controlling terminal (/dev/tty)") from exc
+
+
+def adoption_overlay(root: Path, overlay: Path, installed: dict[str, Any]) -> tuple[bytes, str]:
+    # Never replace a link, even when its referent is writable. The owner can
+    # deliberately configure that regular external target as settings_overlay.
+    if overlay.is_symlink():
+        raise policy.PolicyError("--adopt refuses overlay symlinks; configure the regular target explicitly")
+    resolved_overlay = overlay.resolve()
+    if resolved_overlay.is_relative_to(root):
+        ignored = subprocess.run(["git", "-C", str(root), "check-ignore", "-q", "--", str(resolved_overlay)],
+                                 capture_output=True, check=False)
+        if ignored.returncode != 0:
+            raise policy.PolicyError("--adopt requires an ignored private overlay or an explicitly configured external path")
+    original = policy.loads_object(overlay.read_bytes()) if overlay.exists() else {}
+    wanted = policy.preferences(installed)
+    summary = policy.differences(policy.preferences(original), wanted)
+    updated = {key: value for key, value in original.items() if key not in policy.PREFERENCE_KEYS}
+    updated.update(wanted)
+    return (json.dumps(updated, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), summary
+
+
 def prepare_install(root: Path, home: Path, config: dict[str, Any], renderer: Any,
-                    path_resolver: Any) -> tuple[dict[str, Any], list[str]]:
+                    path_resolver: Any, adopt: bool = False) -> tuple[dict[str, Any], list[str]]:
     """Read and validate every deployment input before touching the installation."""
     failures: list[str] = []
     claude = home / ".claude"
@@ -327,27 +385,57 @@ def prepare_install(root: Path, home: Path, config: dict[str, Any], renderer: An
         overlay = path_resolver(root, overlay_value)
     settings_path = claude / "settings.json"
     stamp_path = claude / ".harness-stamp"
+    baseline_path = claude / ".harness-managed.json"
     rendered: bytes | None = None
     digest: str | None = None
+    snapshots: dict[Path, tuple[Any, ...]] = {}
+    adoption: bytes | None = None
+    adoption_summary = ""
+    preference_summary = ""
+    controlled_summary = ""
+    hook_summary = ""
+    baseline_payload: bytes | None = None
     try:
-        rendered = renderer.render(root / "settings.json.template",
-                                   overlay if overlay and overlay.exists() else None,
-                                   str(home))
-        digest = hashlib.sha256(rendered).hexdigest()
+        if overlay is None:
+            raise policy.PolicyError("settings overlay path is invalid")
+        if overlay.is_symlink() and not overlay.exists():
+            raise policy.PolicyError("settings overlay is a broken symlink")
+        config_source = Path(configured_file).expanduser() if configured_file else private_link
+        if overlay.resolve() in {path.resolve() for path in
+                                 (settings_path, stamp_path, baseline_path, config_source, root / "settings.json.template")}:
+            raise policy.PolicyError("settings_overlay must name a separate private JSON file")
+        if baseline_path.is_symlink() or (baseline_path.exists() and not baseline_path.is_file()):
+            raise policy.PolicyError("managed source baseline must be a regular file, not a symlink")
+        for path in (settings_path, stamp_path, baseline_path, overlay, root / "settings.json.template", config_source):
+            snapshots[path] = input_snapshot(path)
+        source_bytes = renderer.render(root / "settings.json.template", overlay, str(home))
+        expected = policy.loads_object(source_bytes)
+        policy.validate_preferences(expected)
+        installed = None
+        stamp_value = policy.read_stamp(stamp_path) if stamp_path.exists() or stamp_path.is_symlink() else None
+        baseline = policy.read_baseline(baseline_path, stamp_value)
+        if settings_path.exists() or settings_path.is_symlink():
+            installed = policy.read_settings(settings_path)
+        deployed, previous = policy.compose_settings(installed, expected, stamp_value, baseline)
+        if installed is not None:
+            preference_summary = policy.differences(policy.preferences(expected), policy.preferences(installed))
+            controlled_summary = policy.source_differences(previous, expected)
+            hook_summary = policy.additional_hooks(installed, previous)
+        if adopt:
+            if installed is None:
+                raise policy.PolicyError("--adopt requires existing installed settings")
+            adoption, adoption_summary = adoption_overlay(root, overlay, installed)
+            adopted_source = renderer._expand(renderer._merge(
+                renderer._load_object(root / "settings.json.template"),
+                policy.loads_object(adoption)), str(home))
+            if policy.canonical(policy.controlled(adopted_source)) != policy.canonical(policy.controlled(expected)):
+                raise policy.PolicyError("preference adoption would change controlled source settings")
+        rendered = (json.dumps(deployed, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        digest = policy.managed_stamp(expected)
+        baseline_payload = policy.baseline_bytes(expected)
+        check_inputs(snapshots)
     except Exception as exc:
-        failures.append(f"settings render failed: {exc}")
-    if settings_path.is_symlink():
-        failures.append(f"refusing to replace a settings symlink: {settings_path}")
-    elif settings_path.exists() and not settings_path.is_file():
-        failures.append(f"installed settings path is not a regular file: {settings_path}")
-    elif settings_path.is_file() and rendered is not None:
-        try:
-            if settings_path.read_bytes() != rendered:
-                failures.append(f"machine-local settings differ from this render: {settings_path}; preserve desired values in the ignored private settings overlay first")
-        except OSError as exc:
-            failures.append(f"cannot read existing settings safely: {exc}")
-    if stamp_path.is_symlink() or (stamp_path.exists() and not stamp_path.is_file()):
-        failures.append(f"installed settings stamp is not a regular file: {stamp_path}")
+        failures.append(f"settings preflight failed: {exc}. " + policy.recovery(root))
 
     exclude = root / ".git" / "info" / "exclude"
     if extensions and exclude.is_symlink():
@@ -364,10 +452,14 @@ def prepare_install(root: Path, home: Path, config: dict[str, Any], renderer: An
             "project_memory": project_memory, "extensions": extensions,
             "optional_rules": optional_rules, "settings_path": settings_path,
             "stamp_path": stamp_path, "rendered": rendered, "digest": digest,
+            "baseline_path": baseline_path, "baseline_payload": baseline_payload,
+            "snapshots": snapshots, "overlay": overlay, "adoption": adoption,
+            "adoption_summary": adoption_summary, "preference_summary": preference_summary,
+            "controlled_summary": controlled_summary, "hook_summary": hook_summary,
             "exclude": exclude, "git_config": git_config}, failures
 
 
-def install(root: Path, home: Path, dry_run: bool) -> int:
+def install(root: Path, home: Path, dry_run: bool, adopt: bool = False) -> int:
     sys.path.insert(0, str(root))
     try:
         from lib.private_config import ConfigError, load, resolved_path
@@ -376,7 +468,7 @@ def install(root: Path, home: Path, dry_run: bool) -> int:
         print(f"bootstrap: invalid optional private configuration: {exc}", file=sys.stderr)
         return 1
     try:
-        plan, failures = prepare_install(root, home, config, load_renderer(root), resolved_path)
+        plan, failures = prepare_install(root, home, config, load_renderer(root), resolved_path, adopt)
     except Exception as exc:
         print(f"bootstrap: preflight failed: {exc}", file=sys.stderr)
         return 1
@@ -386,6 +478,14 @@ def install(root: Path, home: Path, dry_run: bool) -> int:
         return 1
 
     claude = plan["claude"]
+    if plan["preference_summary"]:
+        print("[preferences] preserve installed keys relative to source: " + plan["preference_summary"])
+    if plan["controlled_summary"]:
+        print("[controlled] deploy source update: " + plan["controlled_summary"])
+    if plan["hook_summary"]:
+        print("[hooks] " + plan["hook_summary"] + "; executable additions are independently trusted, not safety-validated")
+    if adopt:
+        print("[adopt] preference overlay keys: " + (plan["adoption_summary"] or "no changes"))
     if dry_run:
         print("[dry-run] no filesystem changes will be made")
         for name, source in plan["link_sources"].items():
@@ -397,23 +497,42 @@ def install(root: Path, home: Path, dry_run: bool) -> int:
         if not plan["optional_rules"].exists():
             print(f"[dry-run] create empty optional rules target {plan['optional_rules']}")
         if plan["rendered"] is not None:
-            print(f"[dry-run] render settings at {plan['settings_path']}; expected digest {plan['digest']}")
+            print(f"[dry-run] render settings at {plan['settings_path']}; managed stamp {plan['digest']}")
+            print(f"[dry-run] save managed source baseline at {plan['baseline_path']}")
         return 0
+
+    try:
+        if adopt:
+            confirm_adoption(plan["adoption_summary"])
+        check_inputs(plan["snapshots"])
+    except (OSError, ValueError) as exc:
+        print(f"bootstrap: {exc}", file=sys.stderr)
+        return 1
 
     transaction = FileTransaction()
     managed_paths = [claude, *[claude / name for name in plan["link_sources"]],
                      plan["memory_target"], *plan["project_memory"],
-                     plan["settings_path"], plan["stamp_path"], plan["private_link"],
+                     plan["settings_path"], plan["stamp_path"], plan["baseline_path"], plan["private_link"],
                      plan["optional_rules"], plan["git_config"]]
     if plan["link_memory"]:
         managed_paths.append(plan["memory_root"])
     if plan["extensions"]:
         managed_paths.append(plan["exclude"])
         managed_paths.extend(target for _, _, target in plan["extensions"])
+    if adopt:
+        managed_paths.append(plan["overlay"])
     try:
         for path in managed_paths:
             transaction.capture_path(path)
+        # No mutation has occurred yet, so concurrent edits must not be rolled
+        # back to the preflight snapshot if this final check fails.
+        check_inputs(plan["snapshots"])
+    except (OSError, ValueError) as exc:
+        print(f"bootstrap: {exc}", file=sys.stderr)
+        return 1
 
+    settings_written = overlay_written = baseline_written = False
+    try:
         if plan["private_file"]:
             error = atomic_symlink(plan["private_file"], plan["private_link"], False)
             if error:
@@ -468,16 +587,36 @@ def install(root: Path, home: Path, dry_run: bool) -> int:
 
         if plan["rendered"] is None:
             raise OSError("settings renderer did not produce output")
+        # Links/configuration may take time. Recheck immediately before replacing
+        # settings or the overlay; the old stamp was deliberately removed above.
+        check_inputs({path: before for path, before in plan["snapshots"].items()
+                      if path != plan["stamp_path"]})
+        if adopt:
+            atomic_text_bytes(plan["overlay"], plan["adoption"], 0o600)
+            overlay_written = True
+        check_inputs({plan["settings_path"]: plan["snapshots"][plan["settings_path"]]})
         renderer = load_renderer(root)
         renderer.write_atomic(plan["settings_path"], plan["rendered"])
+        settings_written = True
+        check_inputs({plan["baseline_path"]: plan["snapshots"][plan["baseline_path"]]})
+        atomic_text_bytes(plan["baseline_path"], plan["baseline_payload"], 0o600)
+        baseline_written = True
         installation_failpoint("after-settings")
         atomic_text(plan["stamp_path"], plan["digest"] + "\n")
         print(f"[render] {plan['settings_path']}")
         print(f"[stamp] {plan['stamp_path']}")
+        print(f"[baseline] {plan['baseline_path']}")
         print("bootstrap: deployment checks passed")
         return 0
     except BaseException as exc:
-        rollback_failures = transaction.restore()
+        preserve = set()
+        if not settings_written:
+            preserve.add(plan["settings_path"])
+        if adopt and not overlay_written:
+            preserve.add(plan["overlay"])
+        if not baseline_written:
+            preserve.add(plan["baseline_path"])
+        rollback_failures = transaction.restore(preserve)
         print(f"bootstrap: deployment failed and was rolled back: {exc}", file=sys.stderr)
         if rollback_failures:
             print("bootstrap: rollback could not restore these paths: " + ", ".join(rollback_failures),
@@ -489,10 +628,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True, help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--adopt", action="store_true", help="adopt installed user preferences into the private overlay with owner terminal confirmation")
     args = parser.parse_args(argv)
     root = args.root.expanduser().resolve()
     home = Path.home().resolve()
-    return install(root, home, args.dry_run)
+    return install(root, home, args.dry_run, args.adopt)
 
 
 if __name__ == "__main__":

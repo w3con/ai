@@ -9,6 +9,7 @@ than silently falling back to a project-specific path.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -45,12 +46,31 @@ def _string_list(value: Any, key: str) -> list[str]:
 
 def load(root: str | Path) -> dict[str, Any]:
     path = config_path(root)
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ConfigError("duplicate private configuration key")
+            result[key] = value
+        return result
+
+    def finite_number(text):
+        value = float(text)
+        if not math.isfinite(value):
+            raise ConfigError("non-finite private configuration number")
+        return value
+
+    def reject_constant(text):
+        raise ConfigError("non-finite private configuration constant")
+
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
+        config = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object,
+                            parse_float=finite_number, parse_constant=reject_constant)
     except FileNotFoundError:
         return {}
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ConfigError(f"cannot read valid private configuration at {path}: {exc}") from exc
+    except (OSError, UnicodeError, ValueError):
+        raise ConfigError(f"cannot read valid private configuration at {path} "
+                          "(unreadable, malformed, duplicate keys, or non-finite numbers)") from None
     if not isinstance(config, dict):
         raise ConfigError("private configuration root must be a JSON object")
 
