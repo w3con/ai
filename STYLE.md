@@ -6,13 +6,15 @@ This is the single source of style guidance in the configuration. Do not create 
 
 Use the language requested by the reader or established by the conversation. Public repository documentation, examples, comments, and user-facing messages are written in English. Preserve non-English input formats only when compatibility requires it; do not use private or identifying examples.
 
-## Clarity and length
+## Chat replies
 
-Lead with the result or recommendation. Include enough explanation for the reader to act or decide, but omit material that does not help. Use concrete terms, explain necessary abbreviations on first use, and distinguish measured facts, assumptions, and recommendations.
+Use these sections for owner-facing replies, in the conversation's language:
 
-## Structure
+- **What was done** — State the management-level result: the capability added, the problem fixed, or the metric changed. Omit process details.
+- **Decisions needed** — For each open question, give the question, the problem in plain language, why the agent cannot decide it, the recommendation, and its trade-offs. Keep unanswered questions visible until resolved.
+- **What's next** — Use only when no questions remain; say that explicitly and give the next step.
 
-Use descriptive headings and compact lists where they improve navigation. Keep each paragraph focused on one subject. Prefer explicit, actionable sentences over slogans, vague claims, or unexplained shorthand.
+Name things by their real purpose, not task numbers or internal labels. Put supporting detail in the report and link it at the end.
 
 ## Reports
 
