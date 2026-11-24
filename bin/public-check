@@ -494,7 +494,8 @@ def read_index_blob(root: Path, rel: str, entries: dict[str, tuple[str, str, int
     return result.stdout, None
 
 
-def check_history(root: Path, private_rules: dict[str, Any] | None) -> list[dict[str, Any]]:
+def check_history(root: Path, private_rules: dict[str, Any] | None, *,
+                  staged: bool = False) -> list[dict[str, Any]]:
     findings = []
     shallow = git(root, "rev-parse", "--is-shallow-repository")
     if shallow.returncode == 0 and shallow.stdout.strip() == b"true":
@@ -532,7 +533,11 @@ def check_history(root: Path, private_rules: dict[str, Any] | None) -> list[dict
             if local_remote or credentialed_remote or path_remote:
                 findings.append({"kind": "local, credentialed, or machine-specific Git remote", "path": "<git-config>", "line": 0})
                 break
-    fsck = git(root, "fsck", "--full", "--unreachable", "--no-reflogs", "--no-progress")
+    # Path-scoped commits write an unreferenced tree before pre-commit runs.
+    # Still validate object integrity there; require no unreachable objects only
+    # for a complete tree/export audit.
+    reachability = "--no-dangling" if staged else "--unreachable"
+    fsck = git(root, "fsck", "--full", reachability, "--no-reflogs", "--no-progress")
     fsck_lines = [line.strip() for line in (fsck.stdout + fsck.stderr).splitlines() if line.strip()]
     empty_ref_notices = (
         refs.returncode == 0 and not refs.stdout.strip() and
@@ -851,7 +856,7 @@ def check_export(root: Path, *, staged: bool = False, manifest: Path | None = No
     for rel, payload in payloads:
         if rel == ".gitmodules" and re.search(rb"(?im)^\s*\[submodule\s+", payload):
             findings.append({"kind": "nested Git submodule declaration", "path": rel, "line": 0})
-    findings.extend(check_history(root, private_rules))
+    findings.extend(check_history(root, private_rules, staged=staged))
     scanner = scanner_binary(gitleaks_bin)
     findings.extend(run_secret_scans(scanner, root, payloads))
     private_detail = [item for item in findings

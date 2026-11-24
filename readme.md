@@ -56,6 +56,8 @@ python3 bin/public-check check --root . --tree
 
 Use `python3 bin/public-check check --root . --staged` to validate the staged export. The checker scans tracked and non-ignored untracked files in tree mode; it does not read ignored private data. Gitleaks 8.24.3 is downloaded from its versioned release and checked against the pinned platform SHA-256 before installation. The continuous-integration workflow runs the test suite and tree check without private credentials. Migration on another computer is verified separately by the owner running the supplied release-pinned command.
 
+Staged checks validate Git object integrity while allowing transient unreachable objects created by normal Git commits. Complete tree and manifest audits also reject unreachable objects. Both modes retain the public-content and reachable-history secret checks.
+
 ## License and provenance
 
 Owner-authored core components are released under the MIT License; see `LICENSE`. PyYAML 6.0.1 is a third-party dependency with its MIT license included at `lib/third_party/PyYAML-LICENSE.txt`; see `THIRD-PARTY-NOTICES.md`. The bounded provenance review did not identify other copied source or bundled assets in the reviewed core, but it does not establish authorship for every historical file. Private local tools with unresolved provenance are not part of this release.

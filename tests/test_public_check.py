@@ -9,7 +9,9 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 import tarfile
 import tokenize
@@ -338,6 +340,39 @@ class PublicCheckIntegrationTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
         result = self.run_check("--staged")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_path_scoped_commit_passes_the_real_staged_precommit_check(self) -> None:
+        (self.root / "ordinary.txt").write_text("before\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        identity = ["-c", "user.name=Example", "-c", "user.email=example.invalid"]
+        subprocess.run(["git", "-C", str(self.root), *identity,
+                        "commit", "--quiet", "-m", "initial fixture"], check=True)
+        hook = self.root / ".git" / "hooks" / "pre-commit"
+        command = [sys.executable, str(ROOT / "bin" / "public-check"), "check",
+                   "--root", str(self.root), "--staged"]
+        hook.write_text("#!/bin/sh\nexec " + shlex.join(command) + "\n", encoding="utf-8")
+        hook.chmod(0o755)
+        (self.root / "ordinary.txt").write_text("after\n", encoding="utf-8")
+        result = subprocess.run(["git", "-C", str(self.root), *identity,
+                                 "commit", "--quiet", "-m", "path-scoped update", "--",
+                                 "ordinary.txt"], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        committed = subprocess.run(["git", "-C", str(self.root), "show", "HEAD:ordinary.txt"],
+                                   check=True, text=True, capture_output=True)
+        self.assertEqual(committed.stdout, "after\n")
+
+    def test_staged_check_still_rejects_corrupt_object_database(self) -> None:
+        (self.root / "ordinary.txt").write_text("synthetic public content\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        object_id = subprocess.run(["git", "-C", str(self.root), "hash-object", "-w", "--stdin"],
+                                   input=b"synthetic object\n", check=True,
+                                   capture_output=True).stdout.decode().strip()
+        object_path = self.root / ".git" / "objects" / object_id[:2] / object_id[2:]
+        object_path.chmod(0o600)
+        object_path.write_bytes(b"invalid Git object\n")
+        result = self.run_check("--staged")
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertIn("unreachable Git objects or object-database errors", result.stdout)
 
     def test_unreachable_loose_object_remains_a_history_finding(self) -> None:
         subprocess.run(["git", "-C", str(self.root), "hash-object", "-w", "--stdin"],
