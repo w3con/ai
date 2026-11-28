@@ -78,7 +78,7 @@ def main():
 
     emit("deny",
          "Blocked by websearch-gate: the built-in WebSearch is the last resort, not the "
-         "first. Every search goes Tavily, then Brave, then DuckDuckGo, through one command:\n"
+         "first. Every search goes Tavily, then Brave, then Firecrawl, then DuckDuckGo, through one command:\n"
          "    %s \"%s\"\n"
           "Exit 0 means it found something — use that, and report any NOTICE block naming a "
           "provider that did not work. Exit 3 means the whole chain failed, and only then does this hook let the "

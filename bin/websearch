@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """websearch — provider-chained web search, standard library only.
 
-Tries providers in order — Tavily, then Brave, then DuckDuckGo (see
+Tries providers in order — Tavily, then Brave, then Firecrawl, then DuckDuckGo (see
 PROVIDERS below) — and prints exactly one JSON object to stdout describing
 the first provider that returned results. All diagnostics (skips, HTTP
 errors, empty results) go to stderr, never stdout.
@@ -81,6 +81,7 @@ EXHAUSTED_TTL_SECONDS = 15 * 60
 THROTTLE_MIN_INTERVAL_SECONDS = {
     "tavily": 1.0,
     "brave": 1.1,       # Brave's free tier is capped at 1 request/second.
+    "firecrawl": 6.0,   # Firecrawl's free tier allows 10 searches/minute.
     "duckduckgo": 2.5,
 }
 
@@ -379,6 +380,44 @@ def search_brave(query, count, api_key):
     return results
 
 
+def search_firecrawl(query, count, api_key):
+    # Search only, no scraping: 2 credits per 10 results on Firecrawl's plan.
+    payload = {"query": query, "limit": count}
+    req = urllib.request.Request(
+        "https://api.firecrawl.dev/v2/search",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    result = _fetch_with_retry("firecrawl", req)
+    if result is None:
+        return None
+    status, body = result
+
+    if status >= 400:
+        log(f"firecrawl: HTTP {status}: {body[:500]!r}")
+        return None
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as e:
+        log(f"firecrawl: could not parse response as JSON: {e}")
+        return None
+
+    raw_results = (parsed.get("data") or {}).get("web") or []
+    results = []
+    for r in raw_results[:count]:
+        results.append({
+            "title": r.get("title") or "",
+            "url": r.get("url") or "",
+            "snippet": r.get("description") or "",
+        })
+    return results
+
+
 def _unwrap_ddg_url(href):
     """DuckDuckGo's HTML result page wraps outbound links in a redirect:
     //duckduckgo.com/l/?uddg=<url-encoded target>&rut=<token>. Pull the real
@@ -488,6 +527,7 @@ def search_duckduckgo(query, count, api_key):
 PROVIDERS = [
     {"name": "tavily", "key_env": "TAVILY_API_KEY", "func": search_tavily},
     {"name": "brave", "key_env": "BRAVE_API_KEY", "func": search_brave},
+    {"name": "firecrawl", "key_env": "FIRECRAWL_API_KEY", "func": search_firecrawl},
     {"name": "duckduckgo", "key_env": None, "func": search_duckduckgo},
 ]
 

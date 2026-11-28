@@ -86,6 +86,20 @@ class WebSearchTests(unittest.TestCase):
         self.assertTrue(json.loads(output.getvalue())["cached"])
         provider["func"].assert_not_called()
 
+    def test_firecrawl_maps_web_results_and_sends_bearer_key(self) -> None:
+        body = json.dumps({"success": True, "data": {"web": [
+            {"title": "Synthetic title", "url": "https://example.test/a", "description": "Synthetic snippet"},
+            {"title": "Second", "url": "https://example.test/b", "description": "Other"},
+        ]}})
+        fetch = mock.Mock(return_value=(200, body))
+        with mock.patch.object(WEBSEARCH, "_fetch_with_retry", fetch):
+            results = WEBSEARCH.search_firecrawl("synthetic query", 1, "fixture-key")
+        self.assertEqual(results, [{"title": "Synthetic title", "url": "https://example.test/a",
+                                    "snippet": "Synthetic snippet"}])
+        request = fetch.call_args.args[1]
+        self.assertEqual(request.get_header("Authorization"), "Bearer fixture-key")
+        self.assertEqual(json.loads(request.data), {"query": "synthetic query", "limit": 1})
+
     def test_invalid_argument_exit_contract(self) -> None:
         with self.assertRaises(SystemExit) as raised:
             WEBSEARCH.parse_args([])
