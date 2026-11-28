@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """websearch — provider-chained web search, standard library only.
 
-Tries providers in order — Tavily, then Brave, then Firecrawl, then DuckDuckGo (see
+Tries providers in order — Tavily, then Firecrawl, then Brave, then DuckDuckGo (see
 PROVIDERS below) — and prints exactly one JSON object to stdout describing
 the first provider that returned results. All diagnostics (skips, HTTP
 errors, empty results) go to stderr, never stdout.
@@ -526,8 +526,8 @@ def search_duckduckgo(query, count, api_key):
 # and the function that performs the search.
 PROVIDERS = [
     {"name": "tavily", "key_env": "TAVILY_API_KEY", "func": search_tavily},
-    {"name": "brave", "key_env": "BRAVE_API_KEY", "func": search_brave},
     {"name": "firecrawl", "key_env": "FIRECRAWL_API_KEY", "func": search_firecrawl},
+    {"name": "brave", "key_env": "BRAVE_API_KEY", "func": search_brave},
     {"name": "duckduckgo", "key_env": None, "func": search_duckduckgo},
 ]
 
