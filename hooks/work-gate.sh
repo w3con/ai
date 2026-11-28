@@ -717,8 +717,8 @@ READ_ONLY_PROGRAMS = frozenset((
     "grep", "egrep", "fgrep", "rg", "find", "ls", "cat", "head", "tail", "wc", "nl",
     "sort", "uniq", "cut", "tr", "basename", "dirname", "realpath", "stat", "file",
     "echo", "true", "pwd", "test", "diff", "comm", "md5", "shasum", "date", "sed",
-    # The web-search command is included as a read-only lookup tool.
-    "websearch",
+    # The web-search and web-scrape commands are included as read-only lookup tools.
+    "websearch", "webscrape",
 ))
 # Written forms that turn a reading program into a writing one, or that reach a program this
 # list never vetted. Matched on the raw command before it is split, so no quoting trick in a
@@ -797,8 +797,9 @@ if brief.get("role") in READING_ROLES and tool_name == "Bash":
         "Searching is allowed and is how you are meant to work. These programs pass, alone "
         "or piped into one another: grep, rg, find, ls, cat, head, tail, wc, nl, sort, "
         "uniq, cut, tr, sed, diff, basename, dirname, realpath, stat, file, echo, pwd, "
-        "test, and %s/bin/websearch — which is how you search the web, never the "
-        "built-in WebSearch tool. Redirection, command substitution, xargs, tee, sed -i and find -exec are "
+        "test, %s/bin/websearch — which is how you search the web, never the "
+        "built-in WebSearch tool — and %s/bin/webscrape, which reads the full text of one "
+        "page. Redirection, command substitution, xargs, tee, sed -i and find -exec are "
         "refused, and so is every program not on that list. Note that the Grep and Glob "
         "tools do not exist here: grep and find through this Bash tool are their "
         "replacement, not a workaround.\n"
@@ -806,7 +807,7 @@ if brief.get("role") in READING_ROLES and tool_name == "Bash":
         "points at. Never read a large file end to end to search it.\n"
         "You never run a check yourself and you never see a check's output. Whatever raised "
         "you runs every check with its own hand, after reading your answer." %
-        (brief.get("role"), toolkit_root, command_of(tool_input)),
+        (brief.get("role"), toolkit_root, toolkit_root, command_of(tool_input)),
         "work-gate.reading-role-read-only"
     )
 

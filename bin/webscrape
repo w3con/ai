@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""webscrape — full text of one web page through a provider chain, standard library only.
+
+Tries providers in order — Firecrawl, then Tavily Extract, then a plain HTTP GET with
+HTML-to-text conversion (see PROVIDERS below) — and prints exactly one JSON object to
+stdout describing the first provider that returned page text. All diagnostics (skips,
+HTTP errors, empty pages) go to stderr, never stdout.
+
+Use it for pages the built-in fetch tool reads badly: content built by scripts, PDFs,
+sites that block bots. For a page that a plain fetch reads fine, prefer the fetch tool.
+
+Every call is first looked up in a 15-minute, on-disk cache keyed by provider + URL
+(~/.cache/ai-toolkit/webscrape/); a hit never touches the network and sets "cached":
+true. On a cache miss, each provider is throttled independently (a per-provider
+timestamp file in the same cache directory) before the HTTP request is made, and HTTP
+429/5xx responses are retried up to twice with exponential backoff before falling
+through to the next provider. --no-cache bypasses the cache entirely, both for reading
+and for writing. The cache holds the full page text; --max-chars is applied on output.
+
+Usage:
+    webscrape https://example.test/page
+    webscrape --text --max-chars 5000 https://example.test/page
+    webscrape --no-cache https://example.test/page
+
+Output contract (stdout, one line, unless --text is given):
+    {"provider": "firecrawl", "url": "...", "title": "...", "content": "...",
+     "chars": 1234, "truncated": false, "cached": false}
+
+"chars" is the length of the returned "content"; "truncated" is true when the page text
+was longer than --max-chars and was cut. With --text the output is the title, the URL
+and then the content.
+
+Provider costs: Firecrawl 1 credit per page; Tavily Extract 1 credit per 5 pages; the
+plain GET is free but cannot read pages built by scripts or binary files such as PDF.
+
+Exit codes:
+    0  success — a provider returned page text, printed to stdout
+    2  bad arguments (missing or non-http(s) URL, bad flag) — argparse's own exit code
+    3  every provider in the chain was skipped, errored, or returned nothing
+
+API keys are read from this checkout's optional .env file or the process environment,
+never from the caller's current directory. An environment variable always takes
+precedence, including when explicitly set to an empty value.
+"""
+import argparse
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+# Secrets stay in an ignored checkout-local .env file or the caller's environment.
+ENV_CANDIDATES = [SCRIPT_DIR.parent / ".env"]
+
+# Per-request timeouts. The paid scrapers render pages server-side and need longer
+# than the plain GET.
+FIRECRAWL_TIMEOUT_SECONDS = 60
+TAVILY_TIMEOUT_SECONDS = 30
+PLAIN_TIMEOUT_SECONDS = 10
+
+# Largest response body any provider may deliver; the plain provider cuts at this size.
+MAX_BODY_BYTES = 5 * 1024 * 1024
+DEFAULT_MAX_CHARS = 20000
+
+# --- Throttling, retry and disk cache ---------------------------------------
+#
+# The cache/throttle directory lives outside the repository on purpose (~/.cache,
+# not Dev/ai/): it is per-machine state, never git-tracked.
+CACHE_DIR = Path.home() / ".cache" / "ai-toolkit" / "webscrape"
+CACHE_TTL_SECONDS = 15 * 60
+
+# Minimum seconds between two requests to the same provider.
+THROTTLE_MIN_INTERVAL_SECONDS = {
+    "firecrawl": 6.0,   # Firecrawl's free tier allows 10 scrapes/minute.
+    "tavily": 1.0,
+    "plain": 1.0,
+}
+
+# Retry only HTTP 429 (rate limited) and 5xx (server-side failure). Any other HTTP
+# error is a client-side problem (bad key, over quota, malformed request) that retrying
+# cannot fix, so it falls through to the next provider immediately.
+MAX_RETRIES = 2
+RETRY_BACKOFF_BASE_SECONDS = 0.5
+
+
+def log(message):
+    print(message, file=sys.stderr)
+
+
+def announce(failures):
+    """Name every provider that did not work, on a run that succeeded anyway as much
+    as on one that did not. A provider failing silently costs a little on every later
+    call, and nobody ever finds out why."""
+    if not failures:
+        return
+    log("")
+    log("NOTICE: part of the provider chain did not succeed:")
+    for line in failures:
+        log("  " + line)
+    log("")
+
+
+def load_dotenv(candidates):
+    """Parse KEY=VALUE lines from the first .env file that exists among the candidate
+    paths. Never logs or returns values on its own initiative — callers decide what, if
+    anything, gets printed."""
+    env = {}
+    path = next((p for p in candidates if p.exists()), None)
+    if path is None:
+        tried = ", ".join(str(p) for p in candidates)
+        log(f"webscrape: no .env found (tried {tried}) — provider keys must come from the shell environment")
+        return env
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        env[key] = value
+    return env
+
+
+def get_key(name, dotenv):
+    """A shell-exported var always wins over .env, even if exported empty — this is how
+    a provider is forced to be skipped without editing the .env file."""
+    if name in os.environ:
+        return os.environ[name]
+    return dotenv.get(name, "")
+
+
+def _sleep_monotonic(seconds):
+    """Sleep for at least `seconds`, re-checking the deadline against the monotonic
+    clock so a wall-clock jump mid-sleep cannot shorten or lengthen the wait. The
+    on-disk throttle stamp stays wall-clock because a separate later process must read
+    it back."""
+    if seconds <= 0:
+        return
+    deadline = time.monotonic() + seconds
+    remaining = seconds
+    while remaining > 0:
+        time.sleep(remaining)
+        remaining = deadline - time.monotonic()
+
+
+def _fetch_with_retry(name, req, timeout=PLAIN_TIMEOUT_SECONDS, body_log_chars=500,
+                      max_bytes=MAX_BODY_BYTES):
+    """Perform req, retrying on HTTP 429/5xx with exponential backoff (0.5s, 1.0s) up to
+    MAX_RETRIES times, then giving up. Any other outcome — a 4xx that isn't 429, a
+    network-level failure, a timeout, or retries exhausted — is logged exactly once,
+    here, and signalled to the caller by returning None; callers must not log the same
+    failure again. Returns (status, body, content_type) on success, with the body cut at
+    max_bytes. This function is the only HTTP boundary the tests replace."""
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                content_type = resp.headers.get("Content-Type", "") if resp.headers else ""
+                return resp.status, resp.read(max_bytes), content_type
+        except urllib.error.HTTPError as e:
+            body = e.read()
+            retryable = e.code == 429 or e.code >= 500
+            if retryable and attempt < MAX_RETRIES:
+                wait = RETRY_BACKOFF_BASE_SECONDS * (2 ** attempt)
+                log(f"{name}: HTTP {e.code}, retrying in {wait:.1f}s ({attempt + 1}/{MAX_RETRIES})")
+                _sleep_monotonic(wait)
+                attempt += 1
+                continue
+            log(f"{name}: HTTP {e.code}: {body[:body_log_chars]!r}")
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            log(f"{name}: network error: {e}")
+            return None
+
+
+def _cache_key(provider, url):
+    """sha1 over provider + URL, so a cached Firecrawl page is never handed back under
+    another provider's name."""
+    return hashlib.sha1(f"{provider}|{url}".encode("utf-8")).hexdigest()
+
+
+def _cache_path(key):
+    return CACHE_DIR / f"{key}.json"
+
+
+def _load_cache(key):
+    """Return the cached payload dict for `key` if it exists and is younger than
+    CACHE_TTL_SECONDS, else None. Any read or parse problem is a plain cache miss, never
+    an error."""
+    path = _cache_path(key)
+    if not path.exists():
+        return None
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    stored_at = stored.get("stored_at")
+    payload = stored.get("payload")
+    if not isinstance(stored_at, (int, float)) or not isinstance(payload, dict):
+        return None
+    if time.time() - stored_at > CACHE_TTL_SECONDS:
+        return None
+    return payload
+
+
+def _save_cache(key, payload):
+    """Write payload under `key`, wall-clock timestamped. Written to a temp file and
+    renamed into place (atomic on POSIX) so a concurrent reader never sees a
+    half-written file. A cache write failure is logged and never fails the run."""
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _cache_path(key)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(
+            json.dumps({"stored_at": time.time(), "payload": payload}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+    except OSError as e:
+        log(f"webscrape: could not write cache: {e}")
+
+
+def _throttle_wait(name):
+    """Block, if needed, so at least THROTTLE_MIN_INTERVAL_SECONDS[name] has elapsed
+    since the last request this script sent to `name` — from any process, since the
+    state is a file. Waits only for the missing difference."""
+    min_interval = THROTTLE_MIN_INTERVAL_SECONDS.get(name)
+    if min_interval is None:
+        return
+
+    stamp_path = CACHE_DIR / f"throttle_{name}.ts"
+    last_call = None
+    if stamp_path.exists():
+        try:
+            last_call = float(stamp_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            last_call = None
+
+    if last_call is not None:
+        remaining = min_interval - (time.time() - last_call)
+        if remaining > 0:
+            log(f"{name}: throttling, waiting {remaining:.2f}s")
+            _sleep_monotonic(remaining)
+
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        stamp_path.write_text(repr(time.time()), encoding="utf-8")
+    except OSError as e:
+        log(f"webscrape: could not write throttle stamp: {e}")
+
+
+def _parse_json(name, body):
+    """Parse a provider response body as a JSON object, logging once on failure."""
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        log(f"{name}: could not parse response as JSON: {e}")
+        return None
+    if not isinstance(parsed, dict):
+        log(f"{name}: unexpected response shape")
+        return None
+    return parsed
+
+
+# --- Providers --------------------------------------------------------------
+#
+# Each provider function takes (url, api_key) and returns {"title", "content"} on
+# success, or None after logging the cause. Empty page text counts as failure.
+
+def scrape_firecrawl(url, api_key):
+    payload = {"url": url, "formats": ["markdown"], "onlyMainContent": True}
+    req = urllib.request.Request(
+        "https://api.firecrawl.dev/v2/scrape",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    result = _fetch_with_retry("firecrawl", req, timeout=FIRECRAWL_TIMEOUT_SECONDS)
+    if result is None:
+        return None
+    status, body = result[0], result[1]
+
+    if status >= 400:
+        log(f"firecrawl: HTTP {status}: {body[:500]!r}")
+        return None
+
+    parsed = _parse_json("firecrawl", body)
+    if parsed is None:
+        return None
+    if parsed.get("success") is False:
+        log(f"firecrawl: request reported failure: {str(parsed.get('error') or '')[:300]}")
+        return None
+
+    data = parsed.get("data") or {}
+    content = (data.get("markdown") or "").strip()
+    if not content:
+        log("firecrawl: empty page text")
+        return None
+    title = (data.get("metadata") or {}).get("title") or ""
+    return {"title": title, "content": content}
+
+
+def scrape_tavily(url, api_key):
+    payload = {
+        "api_key": api_key,
+        "urls": [url],
+        "extract_depth": "basic",
+        "format": "markdown",
+    }
+    req = urllib.request.Request(
+        "https://api.tavily.com/extract",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    result = _fetch_with_retry("tavily", req, timeout=TAVILY_TIMEOUT_SECONDS)
+    if result is None:
+        return None
+    status, body = result[0], result[1]
+
+    if status >= 400:
+        log(f"tavily: HTTP {status}: {body[:500]!r}")
+        return None
+
+    parsed = _parse_json("tavily", body)
+    if parsed is None:
+        return None
+
+    # A URL Tavily could not extract is reported under failed_results, sometimes
+    # alongside an otherwise successful response, so it is checked first.
+    failed = parsed.get("failed_results") or []
+    if failed:
+        first = failed[0]
+        reason = first.get("error") if isinstance(first, dict) else first
+        log(f"tavily: extraction failed: {str(reason or '')[:300]}")
+        return None
+
+    results = parsed.get("results") or []
+    first = results[0] if results and isinstance(results[0], dict) else {}
+    content = (first.get("raw_content") or "").strip()
+    if not content:
+        log("tavily: empty page text")
+        return None
+    return {"title": first.get("title") or "", "content": content}
+
+
+# Elements whose whole subtree is dropped from the plain provider's text.
+_SKIPPED_TAGS = frozenset(("script", "style", "nav", "noscript", "template", "svg", "iframe"))
+# Elements that end a line of text.
+_BLOCK_TAGS = frozenset((
+    "p", "div", "section", "article", "main", "header", "footer", "aside", "ul", "ol",
+    "li", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "table", "pre",
+    "blockquote", "form", "fieldset", "figure", "figcaption", "dl", "dt", "dd",
+))
+
+
+class _TextExtractor(HTMLParser):
+    """Turns an HTML document into plain text with the standard library's html.parser:
+    script/style/nav subtrees are dropped, block elements become line breaks, and the
+    <title> text is kept separately."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self._parts = []
+        self._skip_depth = 0
+        self._in_title = False
+        self._title_parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _SKIPPED_TAGS:
+            self._skip_depth += 1
+        elif tag == "title":
+            self._in_title = True
+        elif tag in _BLOCK_TAGS and not self._skip_depth:
+            self._parts.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        # Self-closing form, e.g. <br/> or <svg/>: no matching end tag will follow.
+        if tag in _SKIPPED_TAGS:
+            return
+        if tag in _BLOCK_TAGS and not self._skip_depth:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in _SKIPPED_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag == "title":
+            self._in_title = False
+            self.title = " ".join("".join(self._title_parts).split())
+        elif tag in _BLOCK_TAGS and not self._skip_depth:
+            self._parts.append("\n")
+
+    def handle_data(self, data):
+        if self._in_title:
+            self._title_parts.append(data)
+        elif not self._skip_depth:
+            self._parts.append(data)
+
+    def text(self):
+        raw = "".join(self._parts)
+        lines = [" ".join(line.split()) for line in raw.split("\n")]
+        out = []
+        for line in lines:
+            if line or (out and out[-1]):
+                out.append(line)
+        return "\n".join(out).strip()
+
+
+def html_to_text(markup):
+    """Return (title, text) for an HTML document."""
+    parser = _TextExtractor()
+    parser.feed(markup)
+    parser.close()
+    return parser.title, parser.text()
+
+
+def _charset(content_type):
+    for part in content_type.split(";")[1:]:
+        key, _, value = part.strip().partition("=")
+        if key.lower() == "charset" and value:
+            return value.strip("\"'")
+    return "utf-8"
+
+
+def scrape_plain(url, api_key):
+    req = urllib.request.Request(
+        url,
+        headers={
+            # A generic browser-like User-Agent: many sites refuse an empty or
+            # library-default one.
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,text/plain,*/*;q=0.5",
+        },
+        method="GET",
+    )
+    result = _fetch_with_retry("plain", req, timeout=PLAIN_TIMEOUT_SECONDS, body_log_chars=200)
+    if result is None:
+        return None
+    status, body, content_type = result
+
+    if status >= 400:
+        log(f"plain: HTTP {status}")
+        return None
+
+    mime = content_type.split(";")[0].strip().lower()
+    try:
+        text = body.decode(_charset(content_type), errors="replace")
+    except LookupError:
+        text = body.decode("utf-8", errors="replace")
+
+    is_html = mime in ("text/html", "application/xhtml+xml")
+    if not mime:
+        # No Content-Type header: sniff the start of the body.
+        is_html = text.lstrip()[:200].lower().startswith(("<!doctype html", "<html"))
+        if not is_html and b"\x00" in body[:1024]:
+            log("plain: binary content without a Content-Type")
+            return None
+    elif not is_html and not (mime.startswith("text/") or mime.endswith(("+json", "+xml"))
+                              or mime in ("application/json", "application/xml")):
+        log(f"plain: cannot read content type {mime}")
+        return None
+
+    if is_html:
+        title, content = html_to_text(text)
+    else:
+        title, content = "", text.strip()
+    if not content:
+        log("plain: empty page text")
+        return None
+    return {"title": title, "content": content}
+
+
+# The chain the main loop walks, in order. Each entry names the provider, the
+# .env/environment variable that holds its key (None if no key is needed), and the
+# function that scrapes the page.
+PROVIDERS = [
+    {"name": "firecrawl", "key_env": "FIRECRAWL_API_KEY", "func": scrape_firecrawl},
+    {"name": "tavily", "key_env": "TAVILY_API_KEY", "func": scrape_tavily},
+    {"name": "plain", "key_env": None, "func": scrape_plain},
+]
+
+
+def _http_url(value):
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise argparse.ArgumentTypeError(f"not an http(s) URL: {value!r}")
+    return value
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="webscrape",
+        description="Full text of one web page (Firecrawl -> Tavily Extract -> plain GET).",
+    )
+    parser.add_argument("url", type=_http_url, help="http(s) URL of the page to read")
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument("--json", action="store_true", help="print JSON to stdout (default)")
+    output_group.add_argument("--text", action="store_true",
+                              help="print title, URL and content as text instead of JSON")
+    parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
+                        help=f"truncate content to this many characters (default: {DEFAULT_MAX_CHARS})")
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="bypass the on-disk cache entirely — no read, no write",
+    )
+    args = parser.parse_args(argv)
+    if args.max_chars < 1:
+        parser.error("--max-chars must be a positive number")
+    return args
+
+
+def build_result(page, args, cached):
+    content = page["content"]
+    truncated = len(content) > args.max_chars
+    if truncated:
+        content = content[:args.max_chars]
+    return {
+        "provider": page["provider"],
+        "url": page["url"],
+        "title": page["title"],
+        "content": content,
+        "chars": len(content),
+        "truncated": truncated,
+        "cached": cached,
+    }
+
+
+def emit(result, args):
+    if args.text:
+        print(f"provider: {result['provider']}  (cached: {result['cached']})")
+        print(f"title: {result['title']}")
+        print(f"url: {result['url']}")
+        print()
+        print(result["content"])
+    else:
+        print(json.dumps(result, ensure_ascii=False))
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    url = args.url
+    dotenv = load_dotenv(ENV_CANDIDATES)
+    # One line per provider that did not answer, in chain order. Printed by announce()
+    # at the end of every run, successful or not.
+    failures = []
+
+    for provider in PROVIDERS:
+        name = provider["name"]
+        key_env = provider["key_env"]
+
+        api_key = None
+        if key_env is not None:
+            api_key = get_key(key_env, dotenv)
+            if not api_key:
+                log(f"{name}: skipped, no {key_env} in .env or environment")
+                failures.append(f"{name}: missing {key_env} in the optional .env file and environment")
+                continue
+
+        # Cache is checked before throttling: a hit must never touch the network and
+        # never pay a throttle sleep.
+        cache_key = _cache_key(name, url)
+        if not args.no_cache:
+            cached_page = _load_cache(cache_key)
+            if cached_page is not None:
+                announce(failures)
+                emit(build_result(cached_page, args, True), args)
+                return 0
+
+        _throttle_wait(name)
+
+        try:
+            page = provider["func"](url, api_key)
+        except Exception as e:
+            log(f"{name}: unexpected error: {e}")
+            failures.append(f"{name}: request failed — {e}")
+            continue
+
+        if page is None:
+            # The provider function already logged the specific cause.
+            failures.append(f"{name}: returned no page text (see earlier diagnostic)")
+            continue
+
+        page = {"provider": name, "url": url, "title": page["title"], "content": page["content"]}
+        if not args.no_cache:
+            _save_cache(cache_key, page)
+        announce(failures)
+        emit(build_result(page, args, False), args)
+        return 0
+
+    log("webscrape: all providers exhausted with no page text")
+    failures.append("all providers were exhausted without a result")
+    announce(failures)
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())
